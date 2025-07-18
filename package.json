@@ -1,0 +1,14 @@
+{
+  "name": "sentiric-media-service",
+  "version": "0.1.0",
+  "description": "Manages real-time media (RTP) streams for the Sentiric platform.",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "author": "Sentiric Team",
+  "license": "MIT"
+}
