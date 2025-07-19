@@ -29,7 +29,7 @@ COPY --from=builder /app/sentiric-media-service .
 
 # Portları aç
 EXPOSE 3003
-EXPOSE 10000-20000/udp
+EXPOSE 10000-10100/udp
 
 # Konteyner başladığında uygulamayı çalıştır
 CMD ["./sentiric-media-service"]
