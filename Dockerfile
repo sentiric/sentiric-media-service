@@ -3,11 +3,14 @@ FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
-# Bağımlılıkları indir
-COPY go.mod ./
+# ÖNCE sadece mod dosyalarını kopyala. Bu, Docker'ın katman önbelleklemesini (layer caching)
+# çok daha verimli kullanmasını sağlar.
+COPY go.mod go.sum ./
+
+# Bağımlılıkları indir. Eğer go.mod/go.sum değişmediyse, Docker bu adımı tekrar çalıştırmaz.
 RUN go mod download
 
-# Kaynak kodunu kopyala
+# Şimdi kaynak kodunun geri kalanını kopyala
 COPY . .
 
 # Uygulamayı derle (statik olarak, C kütüphaneleri olmadan)

@@ -11,8 +11,9 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
-	"github.comcom/gofiber/fiber/v2"
+	"github.com/gofiber/fiber/v2"
 	"github.com/google/uuid"
 )
 
@@ -132,7 +133,7 @@ func listenRtp(port int, conn *net.UDPConn) {
 			log.Printf("❌ [RTP:%d] Port dinleme hatası: %v", port, err)
 			return
 		}
-		
+
 		rtpSessions.Lock()
 		session, ok := rtpSessions.m[port]
 		if ok && session.RemoteInfo == nil {
@@ -161,7 +162,7 @@ func playAudioWithFfmpeg(session *RtpSession, audioBase64 string) {
 		log.Printf("❌ Base64 decode hatası: %v", err)
 		return
 	}
-	
+
 	tmpFile := filepath.Join(os.TempDir(), fmt.Sprintf("audio_%s.mp3", uuid.New().String()))
 	if err := os.WriteFile(tmpFile, audioData, 0644); err != nil {
 		log.Printf("❌ Geçici dosya yazma hatası: %v", err)
@@ -171,9 +172,9 @@ func playAudioWithFfmpeg(session *RtpSession, audioBase64 string) {
 
 	rtpURL := fmt.Sprintf("rtp://%s:%d?pkt_size=160", session.RemoteInfo.IP.String(), session.RemoteInfo.Port)
 	log.Printf("--> FFmpeg ile %s dosyası %s adresine stream edilecek.", tmpFile, rtpURL)
-	
+
 	cmd := exec.Command("ffmpeg", "-re", "-i", tmpFile, "-ar", "8000", "-ac", "1", "-acodec", "pcm_mulaw", "-f", "rtp", rtpURL)
-	
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("❌ FFmpeg hatası: %v\nÇıktı: %s", err, string(output))
