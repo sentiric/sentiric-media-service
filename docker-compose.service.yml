@@ -1,0 +1,14 @@
+
+services:
+  media-service:
+    image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
+    build: { context: . }
+    container_name: sentiric_media_service
+    env_file: [./.env]
+    ports: ["10000-10100:10000-10100/udp"]
+    networks: [sentiric-net]
+    restart: always
+networks:
+  sentiric-net:
+    name: ${NETWORK_NAME:-sentiric-net}
+    driver: bridge
