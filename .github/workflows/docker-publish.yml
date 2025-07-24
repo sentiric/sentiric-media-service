@@ -11,25 +11,28 @@ on:
 
 jobs:
   build_and_push:
-    # İşlemin çalışacağı sanal sunucu (GitHub tarafından sağlanır)
+    # İşlemin çalışacağı sanal sunucu
     runs-on: ubuntu-latest
 
-    # Bu işin, paketleri ghcr.io'ya yazma izni olduğunu belirtiyoruz
+    # Bu işin, paketleri ghcr.io'ya yazma ve repoyu okuma izni olduğunu belirtiyoruz
     permissions:
       contents: read
       packages: write
 
     steps:
-      # Adım 1: Kodumuzu (repoyu) sanal sunucuya indir (checkout)
-      - name: Check out the repo
+      # --- Adım 1: Repoyu ve İçindeki Submodule'leri Klonla ---
+      # 'submodules: recursive' parametresi, .gitmodules dosyasında tanımlı olan
+      # 'core-interfaces' reposunu otomatik olarak klonlayacaktır. Bu en önemli değişiklik.
+      - name: Checkout repository with submodules
         uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
 
-      # Adım 2: Docker imajları için daha gelişmiş özellikler sunan buildx'i kur
+      # --- Adım 2: Docker Buildx Kurulumu ---
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Adım 3: GitHub Container Registry'ye (ghcr.io) giriş yap
-      # GITHUB_TOKEN, GitHub tarafından otomatik olarak sağlanan bir sırdır, bizim bir şey yapmamıza gerek yok
+      # --- Adım 3: GitHub Container Registry'ye Giriş Yap ---
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -37,13 +40,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Adım 4: Docker imajını derle ve GHCR'ye gönder (push)
+      # --- Adım 4: Docker İmajını Oluştur ve Yayınla ---
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          # Derleme için kullanılacak Dockerfile'ın yolu
+          # Derleme için kullanılacak Dockerfile'ın bulunduğu klasör (projenin ana dizini)
           context: .
           # İmajı GHCR'ye gönder
           push: true
           # İmajı etiketle. Örnek: ghcr.io/sentiric/sentiric-media-service:latest
           tags: ghcr.io/${{ github.repository }}:latest
+          # Derleme sırasında önbellek kullanarak gelecekteki build'leri hızlandırır
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

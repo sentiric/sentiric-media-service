@@ -1,13 +1,20 @@
-
 services:
   media-service:
     image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
-    build: { context: . }
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: sentiric_media_service
-    env_file: [./.env]
-    ports: ["10000-10100:10000-10100/udp"]
-    networks: [sentiric-net]
+    env_file:
+      - ./.env
+    ports:
+      # gRPC portunu haritalamaya gerek yok, dahili ağdan erişilir.
+      # Sadece RTP portlarını haritalıyoruz.
+      - "${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-20000}:${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-20000}/udp"
+    networks:
+      - sentiric-net
     restart: always
+
 networks:
   sentiric-net:
     name: ${NETWORK_NAME:-sentiric-net}

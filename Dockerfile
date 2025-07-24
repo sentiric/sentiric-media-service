@@ -1,35 +1,22 @@
-# Adım 1: Kodu derlemek için Go imajını kullan
-FROM golang:1.22-alpine AS builder
-
+# (sip-signaling'in Dockerfile'ı ile neredeyse aynı, sadece binary adı farklı)
+# --- AŞAMA 1: Derleme (Builder) ---
+FROM rust:1.79 as builder
+RUN apt-get update && apt-get install -y protobuf-compiler clang libclang-dev
 WORKDIR /app
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir -p src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release
+RUN rm -f target/release/deps/sentiric_media_service*
+COPY src ./src
+COPY build.rs ./
+COPY ../sentiric-core-interfaces ./sentiric-core-interfaces
+RUN cargo build --release
 
-# ÖNCE sadece mod dosyalarını kopyala. Bu, Docker'ın katman önbelleklemesini (layer caching)
-# çok daha verimli kullanmasını sağlar.
-COPY go.mod go.sum ./
-
-# Bağımlılıkları indir. Eğer go.mod/go.sum değişmediyse, Docker bu adımı tekrar çalıştırmaz.
-RUN go mod download
-
-# Şimdi kaynak kodunun geri kalanını kopyala
-COPY . .
-
-# Uygulamayı derle (statik olarak, C kütüphaneleri olmadan)
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o sentiric-media-service .
-
-# Adım 2: Sadece derlenmiş uygulamayı ve FFmpeg'i içeren minimal bir imaj oluştur
-FROM alpine:latest
-
-# FFmpeg'i kur
-RUN apk --no-cache add ffmpeg
-
-WORKDIR /root/
-
-# Derlenmiş uygulamayı builder aşamasından kopyala
-COPY --from=builder /app/sentiric-media-service .
-
-# Portları aç
-EXPOSE 3003
-EXPOSE 10000-10100/udp
-
-# Konteyner başladığında uygulamayı çalıştır
-CMD ["./sentiric-media-service"]
+# --- AŞAMA 2: Çalıştırma (Runtime) ---
+FROM gcr.io/distroless/cc-debian12
+WORKDIR /app
+COPY --from=builder /app/target/release/sentiric-media-service .
+# gRPC portunu ve RTP port aralığını açıyoruz
+EXPOSE 50052/tcp
+EXPOSE 10000-20000/udp
+ENTRYPOINT ["/app/sentiric-media-service"]

@@ -1,0 +1,18 @@
+[package]
+name = "sentiric-media-service"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+tonic = "0.11"
+prost = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+rand = "0.8"
+# Portları yönetmek için bir mutex'e ihtiyacımız olacak
+async-mutex = "1.4"
+
+[build-dependencies]
+tonic-build = "0.11"

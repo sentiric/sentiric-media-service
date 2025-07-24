@@ -1,38 +1,85 @@
-# Sentiric Media Service
+### **Dosya: `sentiric-media-service/README.md` (Güncel ve Nihai Sürüm)**
 
-**Description:** Manages real-time media (RTP/SRTP) streams, providing proxy, encryption, and media interaction capabilities for the Sentiric platform.
+# 🎙️ Sentiric Media Service
+
+**Description:** This service is responsible for all real-time media stream (RTP) management within the Sentiric platform. Built with **Rust** for high performance and low-level network control, it handles the allocation of media ports and the future capabilities of processing and manipulating audio/video streams.
 
 **Core Responsibilities:**
-*   Dynamic allocation and release of RTP/SRTP ports.
-*   Proxying RTP/SRTP media streams (audio/video) between participants (acting as a media bridge).
-*   SRTP key management, encryption, and decryption of media packets.
-*   Playing audio files (announcements, IVR prompts) into RTP streams.
-*   Monitoring and publishing media stream quality metrics (packet loss, jitter, etc.).
+*   **Dynamic Port Allocation:** Provides a gRPC endpoint (`AllocatePort`) for other services (like `sip-signaling`) to request and reserve a free UDP port from a predefined range for RTP traffic.
+*   **Port Management:** Keeps track of all active and available ports to prevent conflicts and efficiently manage network resources.
+*   **RTP Stream Handling:** Listens on allocated ports for incoming RTP traffic. (Future capabilities will include proxying, recording, and analyzing these streams).
+*   **Media Playback (Future):** Will expose an API for services like `agent-service` to play audio announcements or hold music into an active RTP stream.
 
-**Technologies:**
-*   Go (or Node.js, depending on chosen implementation)
-*   UDP sockets
-*   Internal Web/gRPC API for signaling interactions
+**Technology Stack:**
+*   **Language:** Rust
+*   **Async Runtime:** Tokio
+*   **Inter-Service Communication:**
+    *   **gRPC (with Tonic):** Exposes a `MediaService` for synchronous, type-safe control by other backend services.
+*   **Containerization:** Docker (Multi-stage builds for minimal, secure images).
 
-**API Interactions (As an API Provider):**
-*   Exposes APIs for `sentiric-sip-server` to initiate/terminate RTP sessions, start media proxying, and play announcements.
-*   Publishes media quality events to `sentiric-cdr-service` (via Message Queue).
+**API Interactions (Server For):**
+*   **`sentiric-sip-signaling-service` (gRPC):** This service calls the `AllocatePort` RPC to get a media port during the initial SIP call setup.
+*   **`sentiric-agent-service` (Future API):** Will call this service to play audio into the call.
 
-**Local Development:**
-1.  Clone this repository: `git clone https://github.com/sentiric/sentiric-media-service.git`
-2.  Navigate into the directory: `cd sentiric-media-service`
-3.  Install dependencies (Go: `go mod tidy` / Node.js: `npm install`).
-4.  Create a `.env` file from `.env.example` and configure environment variables (e.g., RTP port range).
-5.  Start the service: (Go: `go run main.go` / Node.js: `npm start`).
+## Getting Started
 
-**Configuration:**
-See relevant configuration files and `.env.example` for configurable options. Essential configurations include RTP port ranges and media file paths.
+### Prerequisites
+- Docker and Docker Compose
+- Git
+- All Sentiric repositories cloned into a single workspace directory.
 
-**Deployment:**
-This service is designed for containerized deployment (e.g., Docker, Kubernetes). Refer to the `sentiric-infrastructure` repository for deployment configurations, specifically considering `host` networking mode for RTP ports.
+### Local Development & Platform Setup
+This service is not designed to run standalone. It is an integral part of the Sentiric platform and must be run via the central orchestrator in the `sentiric-infrastructure` repository.
 
-**Contributing:**
-We welcome contributions! Please refer to the [Sentiric Governance](https://github.com/sentiric/sentiric-governance) repository for coding standards and contribution guidelines.
+1.  **Clone all repositories:**
+    ```bash
+    # In your workspace directory
+    git clone https://github.com/sentiric/sentiric-infrastructure.git
+    git clone https://github.com/sentiric/sentiric-core-interfaces.git
+    git clone https://github.com/sentiric/sentiric-media-service.git
+    # ... clone other required services
+    ```
 
-**License:**
-This project is licensed under the [License](LICENSE).
+2.  **Initialize Submodules:** This service depends on `sentiric-core-interfaces` using a Git submodule.
+    ```bash
+    cd sentiric-media-service
+    git submodule update --init --recursive
+    cd .. 
+    ```
+
+3.  **Configure Environment:**
+    ```bash
+    cd sentiric-infrastructure
+    cp .env.local.example .env
+    # Open .env and set RTP_PORT_MIN, RTP_PORT_MAX etc. if needed
+    ```
+
+4.  **Run the platform:** The central Docker Compose file will automatically build and run this service.
+    ```bash
+    # From the sentiric-infrastructure directory
+    docker compose up --build -d
+    ```
+
+5.  **View Logs:**
+    ```bash
+    docker compose logs -f media-service
+    ```
+
+## Configuration
+
+All configuration is managed via environment variables passed from the `sentiric-infrastructure` repository's `.env` file. See the `.env.local.example` file in that repository for a complete list. Key variables include:
+*   `GRPC_HOST`, `GRPC_PORT`: The address this service's gRPC server listens on.
+*   `RTP_HOST`: The host IP to bind RTP ports to (`0.0.0.0` for all interfaces).
+*   `RTP_PORT_MIN`, `RTP_PORT_MAX`: The UDP port range to be used for media streams.
+
+## Deployment
+
+This service is designed for containerized deployment. The multi-stage `Dockerfile` ensures a small and secure production image. The CI/CD pipeline in `.github/workflows/docker-ci.yml` automatically builds and pushes the image to the GitHub Container Registry (`ghcr.io`).
+
+## Contributing
+
+We welcome contributions! Please refer to the [Sentiric Governance](https://github.com/sentiric/sentiric-governance) repository for detailed coding standards, contribution guidelines, and the overall project vision.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).

@@ -1,0 +1,3 @@
+[submodule "core-interfaces"]
+	path = core-interfaces
+	url = https://github.com/sentiric/sentiric-core-interfaces.git
