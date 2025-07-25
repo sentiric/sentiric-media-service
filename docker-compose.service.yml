@@ -9,7 +9,7 @@ services:
       - ./.env
     ports:
       # gRPC portunu haritalamaya gerek yok, dahili ağdan erişilir.
-      # Sadece RTP portlarını haritalıyoruz.
+      # Sadece RTP portlarını haritalıyoruz ki dış dünyadan ses gelebilsin.
       - "${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-20000}:${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-20000}/udp"
     networks:
       - sentiric-net

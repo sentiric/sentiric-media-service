@@ -6,7 +6,7 @@ use tokio::net::UdpSocket;
 use async_mutex::Mutex;
 use rand::{thread_rng, Rng};
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{info, error, instrument, Level};
+use tracing::{info, error, debug, instrument, Level};
 use tracing_subscriber::FmtSubscriber;
 
 // build.rs tarafından üretilen modülü import et
@@ -21,7 +21,6 @@ use sentiric::media::v1::{
 
 // --- Uygulama Durumu ve Konfigürasyonu ---
 
-// Ayrılmış portları güvenli bir şekilde takip etmek için
 type PortPool = Arc<Mutex<HashSet<u16>>>;
 
 struct AppConfig {
@@ -34,21 +33,24 @@ struct AppConfig {
 impl AppConfig {
     fn load_from_env() -> Result<Self, Box<dyn std::error::Error>> {
         let grpc_host = env::var("GRPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-        let grpc_port = env::var("GRPC_PORT")?.parse::<u16>()?;
+        let grpc_port_str = env::var("GRPC_PORT").unwrap_or_else(|_| "50052".to_string());
+        let grpc_port = grpc_port_str.parse::<u16>()?;
         
+        let rtp_host = env::var("RTP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+        let rtp_port_min_str = env::var("RTP_PORT_MIN").unwrap_or_else(|_| "10000".to_string());
+        let rtp_port_max_str = env::var("RTP_PORT_MAX").unwrap_or_else(|_| "20000".to_string());
+
         Ok(AppConfig {
             grpc_listen_addr: format!("{}:{}", grpc_host, grpc_port).parse()?,
-            rtp_host: env::var("RTP_HOST")?,
-            rtp_port_min: env::var("RTP_PORT_MIN")?.parse()?,
-            rtp_port_max: env::var("RTP_PORT_MAX")?.parse()?,
+            rtp_host,
+            rtp_port_min: rtp_port_min_str.parse()?,
+            rtp_port_max: rtp_port_max_str.parse()?,
         })
     }
 }
 
-
 // --- gRPC Servis Implementasyonu ---
 
-#[derive(Default)]
 pub struct MyMediaService {
     allocated_ports: PortPool,
     config: Arc<AppConfig>,
@@ -65,6 +67,9 @@ impl MyMediaService {
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
+    // 'request' değişkeni makroda kullanıldığı için,
+    // derleyiciye 'unused_variables' uyarısını bu fonksiyon için görmezden gelmesini söylüyoruz.
+    #[allow(unused_variables)]
     #[instrument(skip(self), fields(call_id = %request.get_ref().call_id))]
     async fn allocate_port(
         &self,
@@ -88,7 +93,6 @@ impl MediaService for MyMediaService {
                     info!(port = rtp_port, "Boş port bulundu ve bağlandı.");
                     ports_guard.insert(rtp_port);
 
-                    // Arka planda bu soketi dinlemeye başla (şimdilik sadece log basar)
                     tokio::spawn(handle_rtp_stream(socket));
 
                     let reply = AllocatePortResponse { rtp_port: rtp_port as u32 };
@@ -136,7 +140,6 @@ async fn handle_rtp_stream(socket: UdpSocket) {
         }
     }
 }
-
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {

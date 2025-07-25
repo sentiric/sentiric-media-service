@@ -11,7 +11,6 @@ serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 rand = "0.8"
-# Portları yönetmek için bir mutex'e ihtiyacımız olacak
 async-mutex = "1.4"
 
 [build-dependencies]
