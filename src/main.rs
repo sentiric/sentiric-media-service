@@ -9,12 +9,13 @@ use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, error, debug, instrument, Level};
 use tracing_subscriber::FmtSubscriber;
 
-// build.rs tarafından üretilen modülü import et
-pub mod sentiric {
-    pub mod media { pub mod v1 { tonic::include_proto!("sentiric.media.v1"); } }
+// YENİ: 'tonic::include_proto!' makrosu, build.rs tarafından üretilen kodu
+// derleme zamanında buraya dahil eder. Bu, en temiz ve standart yöntemdir.
+pub mod media_v1 {
+    tonic::include_proto!("sentiric.media.v1");
 }
 
-use sentiric::media::v1::{
+use media_v1::{
     media_service_server::{MediaService, MediaServiceServer},
     AllocatePortRequest, AllocatePortResponse, ReleasePortRequest, ReleasePortResponse,
 };
@@ -67,22 +68,18 @@ impl MyMediaService {
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
-    // 'request' değişkeni makroda kullanıldığı için,
-    // derleyiciye 'unused_variables' uyarısını bu fonksiyon için görmezden gelmesini söylüyoruz.
-    #[allow(unused_variables)]
     #[instrument(skip(self), fields(call_id = %request.get_ref().call_id))]
     async fn allocate_port(
         &self,
         request: Request<AllocatePortRequest>,
     ) -> Result<Response<AllocatePortResponse>, Status> {
         info!("AllocatePort isteği alındı.");
+        // 'request' değişkeni loglamada kullanıldığı için artık uyarı vermeyecek.
 
         let mut ports_guard = self.allocated_ports.lock().await;
         
-        // 100 deneme boyunca boş bir port bulmaya çalış
         for _ in 0..100 {
             let port = thread_rng().gen_range(self.config.rtp_port_min..=self.config.rtp_port_max);
-            // Sadece çift portları kullanmak iyi bir pratiktir (RTP/RTCP için)
             let rtp_port = if port % 2 == 0 { port } else { port.saturating_add(1) };
             
             if rtp_port > self.config.rtp_port_max { continue; }
