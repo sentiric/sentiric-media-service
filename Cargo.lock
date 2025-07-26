@@ -844,8 +844,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sentiric-contracts"
-version = "0.0.0"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v0.2.0#72a68ca30c4416981a4f172c0f7376974cc85013"
+version = "0.4.0"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v0.4.0#d9f008b01922d0bd26419a301b5b6ed43c85a60b"
 dependencies = [
  "prost",
  "tonic",
@@ -863,7 +863,6 @@ dependencies = [
  "serde",
  "tokio",
  "tonic",
- "tonic-build",
  "tracing",
  "tracing-subscriber",
 ]

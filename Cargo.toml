@@ -13,12 +13,10 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 rand = "0.8"
 async-mutex = "1.4"
 
-# YENİ: Merkezi kontratları bir git bağımlılığı olarak ekliyoruz.
-# 'tag' anahtar kelimesi ile hangi versiyonu kullanacağımızı net bir şekilde belirtiyoruz.
+# Artık derleme yapmayan, sadece hazır kod içeren kütüphaneyi kullanıyoruz.
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v0.2.0"
+tag = "v0.4.0"
 
-[build-dependencies]
-# Build script'i için gerekli olan bağımlılıklar burada olmalı.
-tonic-build = "0.11"
+# build.rs'i sildiğimiz için bu bölüme artık ihtiyaç yok.
+# [build-dependencies]

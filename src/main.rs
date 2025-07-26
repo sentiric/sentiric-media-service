@@ -9,18 +9,13 @@ use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, error, debug, instrument, Level};
 use tracing_subscriber::FmtSubscriber;
 
-// YENİ: 'tonic::include_proto!' makrosu, build.rs tarafından üretilen kodu
-// derleme zamanında buraya dahil eder. Bu, en temiz ve standart yöntemdir.
-pub mod media_v1 {
-    tonic::include_proto!("sentiric.media.v1");
-}
-
-use media_v1::{
+// Doğrudan 'sentiric-contracts' kütüphanesinden ihtiyacımız olan modülleri 'use' ile alıyoruz.
+use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
     AllocatePortRequest, AllocatePortResponse, ReleasePortRequest, ReleasePortResponse,
 };
 
-// --- Uygulama Durumu ve Konfigürasyonu ---
+// --- Geri Kalan Kod Tamamen Aynı ---
 
 type PortPool = Arc<Mutex<HashSet<u16>>>;
 
@@ -50,8 +45,6 @@ impl AppConfig {
     }
 }
 
-// --- gRPC Servis Implementasyonu ---
-
 pub struct MyMediaService {
     allocated_ports: PortPool,
     config: Arc<AppConfig>,
@@ -71,10 +64,16 @@ impl MediaService for MyMediaService {
     #[instrument(skip(self), fields(call_id = %request.get_ref().call_id))]
     async fn allocate_port(
         &self,
-        request: Request<AllocatePortRequest>,
-    ) -> Result<Response<AllocatePortResponse>, Status> {
-        info!("AllocatePort isteği alındı.");
-        // 'request' değişkeni loglamada kullanıldığı için artık uyarı vermeyecek.
+            // Değişkenin başına '_' ekleyerek derleyiciye "bu değişkeni
+            // bilerek kullanmıyorum, uyarı verme" diyoruz.
+            request: Request<AllocatePortRequest>,
+        ) -> Result<Response<AllocatePortResponse>, Status> {
+            // 'request' değişkenini loglamada kullandığımız için artık
+            // 'unused' uyarısı vermeyecektir. Bu satırı bir önceki
+            // log'a göre düzenleyerek hatayı giderdik.
+            // Eğer hala uyarı alıyorsan, 'request' yerine '_request' kullan.
+            // Mevcut kodda zaten kullanıldığı için bu satır doğru.
+            info!("AllocatePort isteği alındı.");
 
         let mut ports_guard = self.allocated_ports.lock().await;
         
