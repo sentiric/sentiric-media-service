@@ -9,13 +9,12 @@ use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, error, debug, instrument, Level};
 use tracing_subscriber::FmtSubscriber;
 
-// Doğrudan 'sentiric-contracts' kütüphanesinden ihtiyacımız olan modülleri 'use' ile alıyoruz.
 use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
     AllocatePortRequest, AllocatePortResponse, ReleasePortRequest, ReleasePortResponse,
 };
 
-// --- Geri Kalan Kod Tamamen Aynı ---
+// --- Uygulama Durumu ve Konfigürasyonu ---
 
 type PortPool = Arc<Mutex<HashSet<u16>>>;
 
@@ -61,19 +60,14 @@ impl MyMediaService {
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
-    #[instrument(skip(self), fields(call_id = %request.get_ref().call_id))]
+    // DÜZELTME: 'instrument' makrosunu bu fonksiyondan kaldırdık.
+    // Zaten fonksiyon içinde manuel loglama yapıyoruz ve bu, hatayı çözüyor.
     async fn allocate_port(
         &self,
-            // Değişkenin başına '_' ekleyerek derleyiciye "bu değişkeni
-            // bilerek kullanmıyorum, uyarı verme" diyoruz.
-            request: Request<AllocatePortRequest>,
-        ) -> Result<Response<AllocatePortResponse>, Status> {
-            // 'request' değişkenini loglamada kullandığımız için artık
-            // 'unused' uyarısı vermeyecektir. Bu satırı bir önceki
-            // log'a göre düzenleyerek hatayı giderdik.
-            // Eğer hala uyarı alıyorsan, 'request' yerine '_request' kullan.
-            // Mevcut kodda zaten kullanıldığı için bu satır doğru.
-            info!("AllocatePort isteği alındı.");
+        request: Request<AllocatePortRequest>,
+    ) -> Result<Response<AllocatePortResponse>, Status> {
+        let call_id = &request.get_ref().call_id;
+        info!(call_id = %call_id, "AllocatePort isteği alındı.");
 
         let mut ports_guard = self.allocated_ports.lock().await;
         
@@ -101,6 +95,7 @@ impl MediaService for MyMediaService {
         Err(Status::resource_exhausted("Available RTP port pool is exhausted."))
     }
     
+    // Bu fonksiyonda 'instrument' doğru çalışıyor, dokunmuyoruz.
     #[instrument(skip(self), fields(port = %request.get_ref().rtp_port))]
     async fn release_port(
         &self,
