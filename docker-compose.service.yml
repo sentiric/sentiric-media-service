@@ -7,6 +7,13 @@ services:
     container_name: sentiric_media_service
     env_file:
       - ./.env
+    environment:
+      # Rust kodumuz bu değişkenleri bekliyor, .env'den direkt alıyoruz.
+      - GRPC_PORT=${GRPC_PORT_MEDIA}
+      - RTP_PORT_MIN=${RTP_PORT_MIN}
+      - RTP_PORT_MAX=${RTP_PORT_MAX}
+      # Rust kodumuz RTP_HOST bekliyor, şimdilik sabit bir değer verelim.
+      - RTP_HOST=0.0.0.0      
     ports:
       # gRPC portunu haritalamaya gerek yok, dahili ağdan erişilir.
       # Sadece RTP portlarını haritalıyoruz ki dış dünyadan ses gelebilsin.

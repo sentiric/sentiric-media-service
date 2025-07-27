@@ -6,18 +6,16 @@ use tokio::net::UdpSocket;
 use async_mutex::Mutex;
 use rand::{thread_rng, Rng};
 use tonic::{transport::Server, Request, Response, Status};
-use tracing::{info, error, debug, instrument, Level};
-use tracing_subscriber::FmtSubscriber;
+use tracing::{info, error, debug, instrument};
 
 use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
     AllocatePortRequest, AllocatePortResponse, ReleasePortRequest, ReleasePortResponse,
 };
 
-// --- Uygulama Durumu ve Konfigürasyonu ---
-
 type PortPool = Arc<Mutex<HashSet<u16>>>;
 
+#[derive(Debug, Clone)]
 struct AppConfig {
     grpc_listen_addr: SocketAddr,
     rtp_host: String,
@@ -30,11 +28,10 @@ impl AppConfig {
         let grpc_host = env::var("GRPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let grpc_port_str = env::var("GRPC_PORT").unwrap_or_else(|_| "50052".to_string());
         let grpc_port = grpc_port_str.parse::<u16>()?;
-        
         let rtp_host = env::var("RTP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
         let rtp_port_min_str = env::var("RTP_PORT_MIN").unwrap_or_else(|_| "10000".to_string());
         let rtp_port_max_str = env::var("RTP_PORT_MAX").unwrap_or_else(|_| "20000".to_string());
-
+        
         Ok(AppConfig {
             grpc_listen_addr: format!("{}:{}", grpc_host, grpc_port).parse()?,
             rtp_host,
@@ -60,21 +57,13 @@ impl MyMediaService {
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
-    // DÜZELTME: 'instrument' makrosunu bu fonksiyondan kaldırdık.
-    // Zaten fonksiyon içinde manuel loglama yapıyoruz ve bu, hatayı çözüyor.
-    async fn allocate_port(
-        &self,
-        request: Request<AllocatePortRequest>,
-    ) -> Result<Response<AllocatePortResponse>, Status> {
-        let call_id = &request.get_ref().call_id;
-        info!(call_id = %call_id, "AllocatePort isteği alındı.");
-
+    #[instrument(skip(self), fields(call_id = %request.get_ref().call_id))]
+    async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
+        info!("AllocatePort isteği alındı.");
         let mut ports_guard = self.allocated_ports.lock().await;
-        
         for _ in 0..100 {
             let port = thread_rng().gen_range(self.config.rtp_port_min..=self.config.rtp_port_max);
             let rtp_port = if port % 2 == 0 { port } else { port.saturating_add(1) };
-            
             if rtp_port > self.config.rtp_port_max { continue; }
 
             if !ports_guard.contains(&rtp_port) {
@@ -82,28 +71,19 @@ impl MediaService for MyMediaService {
                 if let Ok(socket) = UdpSocket::bind(&bind_addr).await {
                     info!(port = rtp_port, "Boş port bulundu ve bağlandı.");
                     ports_guard.insert(rtp_port);
-
                     tokio::spawn(handle_rtp_stream(socket));
-
-                    let reply = AllocatePortResponse { rtp_port: rtp_port as u32 };
-                    return Ok(Response::new(reply));
+                    return Ok(Response::new(AllocatePortResponse { rtp_port: rtp_port as u32 }));
                 }
             }
         }
-        
         error!("Uygun RTP portu bulunamadı.");
         Err(Status::resource_exhausted("Available RTP port pool is exhausted."))
     }
     
-    // Bu fonksiyonda 'instrument' doğru çalışıyor, dokunmuyoruz.
     #[instrument(skip(self), fields(port = %request.get_ref().rtp_port))]
-    async fn release_port(
-        &self,
-        request: Request<ReleasePortRequest>,
-    ) -> Result<Response<ReleasePortResponse>, Status> {
+    async fn release_port(&self, request: Request<ReleasePortRequest>) -> Result<Response<ReleasePortResponse>, Status> {
         info!("ReleasePort isteği alındı.");
         let port_to_release = request.into_inner().rtp_port as u16;
-
         let mut ports_guard = self.allocated_ports.lock().await;
         if ports_guard.remove(&port_to_release) {
             info!(port = port_to_release, "Port başarıyla serbest bırakıldı.");
@@ -117,15 +97,15 @@ impl MediaService for MyMediaService {
 
 async fn handle_rtp_stream(socket: UdpSocket) {
     let local_addr = socket.local_addr().unwrap();
-    info!("Yeni RTP stream için dinleyici başlatıldı: {}", local_addr);
+    info!(%local_addr, "Yeni RTP stream için dinleyici başlatıldı.");
     let mut buf = [0; 2048];
     loop {
         match socket.recv_from(&mut buf).await {
             Ok((len, remote_addr)) => {
-                debug!("Port {} üzerinden {} adresinden {} byte'lık RTP paketi alındı.", local_addr.port(), remote_addr, len);
+                debug!(port = local_addr.port(), %remote_addr, bytes = len, "RTP paketi alındı.");
             }
             Err(e) => {
-                error!("RTP soket dinleme hatası: {}", e);
+                error!(error = %e, "RTP soket dinleme hatası.");
                 break;
             }
         }
@@ -134,11 +114,18 @@ async fn handle_rtp_stream(socket: UdpSocket) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let subscriber = FmtSubscriber::builder().with_max_level(Level::INFO).finish();
-    tracing::subscriber::set_global_default(subscriber)?;
+    dotenv::dotenv().ok();
+    
+    tracing_subscriber::fmt()
+        .json()
+        .with_file(true)
+        .with_line_number(true)
+        .with_target(true)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
     let config = Arc::new(AppConfig::load_from_env()?);
-    info!("Media Service başlatılıyor. Adres: {}", config.grpc_listen_addr);
+    info!(config = ?config, "Media Service başlatılıyor.");
     
     let media_service = MyMediaService::new(config.clone());
     
