@@ -1,29 +1,31 @@
 # --- AŞAMA 1: Derleme (Builder) ---
-FROM rust:1.79 as builder
-RUN apt-get update && apt-get install -y protobuf-compiler clang libclang-dev
+FROM rust:1.79-alpine AS builder
+
+# build-essential, git gibi temel araçları kur
+RUN apk add --no-cache build-base git protobuf-dev
 
 WORKDIR /app
+
+# YENİ ADIM: Asset'leri klonla
+RUN git clone https://github.com/sentiric/sentiric-assets.git
+
 COPY Cargo.toml Cargo.lock ./
-
-# Sadece bağımlılıkları indirmek için sahte bir proje oluştur
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs
+RUN mkdir src && echo "fn main() {}" > src/main.rs
 RUN cargo build --release
-RUN rm -f target/release/deps/sentiric_media_service*
 
-# Şimdi gerçek kaynak kodunu kopyala
 COPY src ./src
-
-# SİLİNEN SATIRLAR:
-# build.rs ve core-interfaces artık burada kopyalanmıyor.
-# COPY build.rs ./
-# COPY ./core-interfaces ./core-interfaces
-
 RUN cargo build --release
 
 # --- AŞAMA 2: Çalıştırma (Runtime) ---
-FROM gcr.io/distroless/cc-debian12
+FROM alpine:latest
+RUN apk add --no-cache libc6-compat
+
 WORKDIR /app
+
+# Derlenmiş uygulamayı kopyala
 COPY --from=builder /app/target/release/sentiric-media-service .
-EXPOSE 50052/tcp
-EXPOSE 10000-20000/udp
-ENTRYPOINT ["/app/sentiric-media-service"]
+
+# YENİ ADIM: Asset'leri builder'dan kopyala
+COPY --from=builder /app/sentiric-assets/audio /app/assets
+
+ENTRYPOINT ["./sentiric-media-service"]
