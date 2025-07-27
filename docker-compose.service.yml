@@ -1,3 +1,5 @@
+# DOSYA: sentiric-media-service/docker-compose.service.yml (YENİ VE TEMİZ VERSİYON)
+
 services:
   media-service:
     image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
@@ -5,17 +7,17 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: sentiric_media_service
+    
+    # Bu satır, ana docker-compose.yml'nin bulunduğu yerdeki .env dosyasındaki
+    # tüm değişkenleri bu konteynere aktarır. Rust kodu artık bunları
+    # doğrudan okuyabilir.
     env_file:
       - ./.env
-    environment:
-      # .env dosyasındaki değişkenleri, Rust kodunun beklediği isimlere atıyoruz.
-      - GRPC_PORT=${INTERNAL_GRPC_PORT_MEDIA}
-      - RTP_PORT_MIN=${EXTERNAL_RTP_PORT_MIN}
-      - RTP_PORT_MAX=${EXTERNAL_RTP_PORT_MAX}
-      - RTP_HOST=0.0.0.0
+      
     ports:
       # Dış RTP port aralığını, içerideki aynı aralığa yönlendiriyoruz.
       - "${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}:${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}/udp"
+      
     networks:
       - sentiric-net
     restart: always
@@ -23,3 +25,4 @@ services:
 networks:
   sentiric-net:
     name: ${NETWORK_NAME:-sentiric-net}
+    external: true
