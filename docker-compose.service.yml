@@ -23,4 +23,3 @@ services:
 networks:
   sentiric-net:
     name: ${NETWORK_NAME:-sentiric-net}
-    external: true
