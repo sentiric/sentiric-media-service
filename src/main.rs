@@ -7,6 +7,7 @@ use async_mutex::Mutex;
 use rand::{thread_rng, Rng};
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, error, debug, instrument};
+use tracing_subscriber::EnvFilter;
 
 use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
@@ -25,12 +26,15 @@ struct AppConfig {
 
 impl AppConfig {
     fn load_from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        let grpc_host = env::var("GRPC_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-        let grpc_port_str = env::var("GRPC_PORT").unwrap_or_else(|_| "50052".to_string());
+        dotenv::dotenv().ok();
+
+        let grpc_host = "0.0.0.0".to_string();
+        let grpc_port_str = env::var("INTERNAL_GRPC_PORT_MEDIA")?;
         let grpc_port = grpc_port_str.parse::<u16>()?;
-        let rtp_host = env::var("RTP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-        let rtp_port_min_str = env::var("RTP_PORT_MIN").unwrap_or_else(|_| "10000".to_string());
-        let rtp_port_max_str = env::var("RTP_PORT_MAX").unwrap_or_else(|_| "20000".to_string());
+        
+        let rtp_host = "0.0.0.0".to_string();
+        let rtp_port_min_str = env::var("EXTERNAL_RTP_PORT_MIN")?;
+        let rtp_port_max_str = env::var("EXTERNAL_RTP_PORT_MAX")?;
         
         Ok(AppConfig {
             grpc_listen_addr: format!("{}:{}", grpc_host, grpc_port).parse()?,
@@ -57,9 +61,12 @@ impl MyMediaService {
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
-    #[instrument(skip(self), fields(call_id = %request.get_ref().call_id))]
+    // 'instrument' makrosunu kaldırdık ve loglamayı manuel yaparak daha net kontrol sağlıyoruz.
     async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
-        info!("AllocatePort isteği alındı.");
+        let call_id = &request.get_ref().call_id;
+        // Değişkeni burada loglayarak "kullanılmış" hale getiriyoruz ve uyarıyı gideriyoruz.
+        info!(call_id = %call_id, "AllocatePort isteği alındı.");
+        
         let mut ports_guard = self.allocated_ports.lock().await;
         for _ in 0..100 {
             let port = thread_rng().gen_range(self.config.rtp_port_min..=self.config.rtp_port_max);
@@ -114,17 +121,21 @@ async fn handle_rtp_stream(socket: UdpSocket) {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    dotenv::dotenv().ok();
-    
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
     tracing_subscriber::fmt()
         .json()
-        .with_file(true)
-        .with_line_number(true)
-        .with_target(true)
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(env_filter)
         .init();
 
-    let config = Arc::new(AppConfig::load_from_env()?);
+    let config = match AppConfig::load_from_env() {
+        Ok(cfg) => Arc::new(cfg),
+        Err(e) => {
+            error!(error = %e, "Konfigürasyon yüklenemedi. .env veya ortam değişkenlerini kontrol edin.");
+            return Err(e);
+        }
+    };
     info!(config = ?config, "Media Service başlatılıyor.");
     
     let media_service = MyMediaService::new(config.clone());

@@ -8,16 +8,14 @@ services:
     env_file:
       - ./.env
     environment:
-      # Rust kodumuz bu değişkenleri bekliyor, .env'den direkt alıyoruz.
-      - GRPC_PORT=${GRPC_PORT_MEDIA}
-      - RTP_PORT_MIN=${RTP_PORT_MIN}
-      - RTP_PORT_MAX=${RTP_PORT_MAX}
-      # Rust kodumuz RTP_HOST bekliyor, şimdilik sabit bir değer verelim.
-      - RTP_HOST=0.0.0.0      
+      # .env dosyasındaki değişkenleri, Rust kodunun beklediği isimlere atıyoruz.
+      - GRPC_PORT=${INTERNAL_GRPC_PORT_MEDIA}
+      - RTP_PORT_MIN=${EXTERNAL_RTP_PORT_MIN}
+      - RTP_PORT_MAX=${EXTERNAL_RTP_PORT_MAX}
+      - RTP_HOST=0.0.0.0
     ports:
-      # gRPC portunu haritalamaya gerek yok, dahili ağdan erişilir.
-      # Sadece RTP portlarını haritalıyoruz ki dış dünyadan ses gelebilsin.
-      - "${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-20000}:${RTP_PORT_MIN:-10000}-${RTP_PORT_MAX:-20000}/udp"
+      # Dış RTP port aralığını, içerideki aynı aralığa yönlendiriyoruz.
+      - "${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}:${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}/udp"
     networks:
       - sentiric-net
     restart: always
@@ -25,4 +23,4 @@ services:
 networks:
   sentiric-net:
     name: ${NETWORK_NAME:-sentiric-net}
-    driver: bridge
+    external: true
