@@ -13,7 +13,10 @@ services:
     # doğrudan okuyabilir.
     env_file:
       - ./.env
-      
+    # --- YENİ EKLENEN SATIR ---
+    # PUBLIC_IP değişkenini ana .env dosyasından alıp konteynere aktar.
+    environment:
+      - PUBLIC_IP=${PUBLIC_IP}      
     ports:
       # Dış RTP port aralığını, içerideki aynı aralığa yönlendiriyoruz.
       - "${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}:${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}/udp"

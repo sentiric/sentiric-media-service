@@ -21,4 +21,4 @@ webrtc-util = { version = "0.7", features = ["marshal"] }
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v0.5.1" # <-- BU SATIRI GÜNCELLEYİN
+tag = "v0.5.2" # <-- BU SATIRI GÜNCELLEYİN
