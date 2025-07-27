@@ -1,31 +1,38 @@
 # --- AŞAMA 1: Derleme (Builder) ---
-FROM rust:1.79-alpine AS builder
+# En güncel ve 'slim' bir temel imaj kullanarak başlıyoruz.
+FROM rust:1.88-slim-bookworm AS builder
 
-# build-essential, git gibi temel araçları kur
-RUN apk add --no-cache build-base git protobuf-dev
+# Gerekli derleme araçlarını VE git'i kuruyoruz.
+RUN apt-get update && apt-get install -y protobuf-compiler clang libclang-dev pkg-config git
 
 WORKDIR /app
 
-# YENİ ADIM: Asset'leri klonla
+# YENİ ADIM: Asset'leri derleme ortamına klonla
 RUN git clone https://github.com/sentiric/sentiric-assets.git
 
+# Bağımlılıkları önbelleğe almak için önce sadece Cargo dosyalarını kopyala
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
+RUN cargo build
 
+# Kaynak kodunu kopyala ve asıl derlemeyi yap
 COPY src ./src
 RUN cargo build --release
 
 # --- AŞAMA 2: Çalıştırma (Runtime) ---
-FROM alpine:latest
-RUN apk add --no-cache libc6-compat
+# Mümkün olan en küçük ve en güvenli imajlardan birini kullanıyoruz.
+FROM gcr.io/distroless/cc-debian12
 
 WORKDIR /app
 
-# Derlenmiş uygulamayı kopyala
+# Derlenmiş uygulamayı builder aşamasından kopyala
 COPY --from=builder /app/target/release/sentiric-media-service .
 
-# YENİ ADIM: Asset'leri builder'dan kopyala
+# YENİ ADIM: Klonlanmış asset'leri builder aşamasından son imajın içine kopyala
+# Bu, '/app/assets/welcome_tr.wav' yolunu oluşturur.
 COPY --from=builder /app/sentiric-assets/audio /app/assets
+
+EXPOSE 50052/tcp
+EXPOSE 10000-20000/udp 
 
 ENTRYPOINT ["./sentiric-media-service"]
