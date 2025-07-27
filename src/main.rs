@@ -200,7 +200,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().json().with_env_filter(env_filter).init();
     let config = Arc::new(AppConfig::load_from_env()?);
-    info!(config = ?config, "Media Service başlatılıyor.");
+    info!(config = ?config, "Media Service başlatılıyor!");
     let media_service = MyMediaService::new(config.clone());
     Server::builder().add_service(MediaServiceServer::new(media_service)).serve(config.grpc_listen_addr).await?;
     Ok(())
