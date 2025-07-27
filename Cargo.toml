@@ -7,13 +7,18 @@ edition = "2021"
 tokio = { version = "1", features = ["full"] }
 tonic = "0.11"
 prost = "0.12"
-serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-rand = "0.8"
+dotenv = "0.15"
 async-mutex = "1.4"
-dotenv = "0.15" # <-- EKSİK OLAN VE YENİ EKLENEN SATIR
+rand = "0.8"
+hound = "3.5"
+bytes = "1.0"
+
+# Sadece temel RTP paket yapısı için kullanıyoruz
+rtp = "0.6"
+webrtc-util = { version = "0.7", features = ["marshal"] }
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v0.4.2"
+tag = "v0.4.4"

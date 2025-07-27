@@ -165,6 +165,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d71b6127be86fdcfddb610f7182ac57211d4b18a3e9c82eb2d17662f2227ad6a"
 
 [[package]]
+name = "cc"
+version = "1.2.30"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "deec109607ca693028562ed836a5f1c4b8bd77755c4e132fc5ce11b0b6211ae7"
+dependencies = [
+ "shlex",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -328,6 +337,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hound"
+version = "3.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62adaabb884c94955b19907d60019f4e145d091c75345379e70d1ee696f7854f"
+
+[[package]]
 name = "http"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -429,6 +444,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ipnet"
+version = "2.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "469fb0b9cefa57e3ef31275ee7cacb78f2fdca44e4765491884a2b119d4eb130"
+
+[[package]]
 name = "itertools"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -499,6 +520,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32a282da65faaf38286cf3be983213fcf1d2e2a58700e808f83f4ea9a4804bc0"
 
 [[package]]
+name = "memoffset"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
+dependencies = [
+ "autocfg",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -529,6 +559,18 @@ name = "multimap"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
+
+[[package]]
+name = "nix"
+version = "0.24.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fa52e972a9a719cecb6864fb88568781eb706bac2cd1d4f04a648542dbf78069"
+dependencies = [
+ "bitflags 1.3.2",
+ "cfg-if",
+ "libc",
+ "memoffset",
+]
 
 [[package]]
 name = "nu-ansi-term"
@@ -812,6 +854,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2b15c43186be67a4fd63bee50d0303afffcef381492ebe2c5d87f324e1b8815c"
 
 [[package]]
+name = "rtp"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2a095411ff00eed7b12e4c6a118ba984d113e1079582570d56a5ee723f11f80"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "rand",
+ "serde",
+ "thiserror",
+ "webrtc-util",
+]
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.25"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -851,7 +907,7 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 [[package]]
 name = "sentiric-contracts"
 version = "0.4.0"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v0.4.2#23027bfeb41d9ef9231beb50d98405dcdf003d54"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v0.4.4#9c27e5785ba1b85a24ee00b1863e7bc71b47b4cf"
 dependencies = [
  "prost",
  "tonic",
@@ -863,15 +919,18 @@ name = "sentiric-media-service"
 version = "0.1.0"
 dependencies = [
  "async-mutex",
+ "bytes",
  "dotenv",
+ "hound",
  "prost",
  "rand",
+ "rtp",
  "sentiric-contracts",
- "serde",
  "tokio",
  "tonic",
  "tracing",
  "tracing-subscriber",
+ "webrtc-util",
 ]
 
 [[package]]
@@ -914,6 +973,12 @@ checksum = "f40ca3c46823713e0d4209592e8d6e826aa57e928f09752619fc696c499637f6"
 dependencies = [
  "lazy_static",
 ]
+
+[[package]]
+name = "shlex"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "signal-hook-registry"
@@ -984,6 +1049,26 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "thiserror"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "1.0.69"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
@@ -1246,6 +1331,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9683f9a5a998d873c0d21fcbe3c083009670149a8fab228644b8bd36b2c48cb3"
 dependencies = [
  "wit-bindgen-rt",
+]
+
+[[package]]
+name = "webrtc-util"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93f1db1727772c05cf7a2cfece52c3aca8045ca1e176cd517d323489aa3c6d87"
+dependencies = [
+ "async-trait",
+ "bitflags 1.3.2",
+ "bytes",
+ "cc",
+ "ipnet",
+ "lazy_static",
+ "libc",
+ "log",
+ "nix",
+ "rand",
+ "thiserror",
+ "tokio",
+ "winapi",
 ]
 
 [[package]]
