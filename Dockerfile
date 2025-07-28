@@ -1,5 +1,4 @@
 # --- AŞAMA 1: Derleme (Builder) ---
-# En güncel ve 'slim' bir temel imaj kullanarak başlıyoruz.
 FROM rust:1.88-slim-bookworm AS builder
 
 # Gerekli derleme araçlarını VE git'i kuruyoruz.
@@ -13,14 +12,13 @@ RUN git clone https://github.com/sentiric/sentiric-assets.git
 # Bağımlılıkları önbelleğe almak için önce sadece Cargo dosyalarını kopyala
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build
+RUN cargo build --release
 
 # Kaynak kodunu kopyala ve asıl derlemeyi yap
 COPY src ./src
 RUN cargo build --release
 
 # --- AŞAMA 2: Çalıştırma (Runtime) ---
-# Mümkün olan en küçük ve en güvenli imajlardan birini kullanıyoruz.
 FROM gcr.io/distroless/cc-debian12
 
 WORKDIR /app
@@ -29,9 +27,10 @@ WORKDIR /app
 COPY --from=builder /app/target/release/sentiric-media-service .
 
 # YENİ ADIM: Klonlanmış asset'leri builder aşamasından son imajın içine kopyala
-# Bu, '/app/assets/welcome_tr.wav' yolunu oluşturur.
-COPY --from=builder /app/sentiric-assets/audio /app/assets
+# Bu, konteyner içinde /app/assets/audio/... yolunu oluşturur.
+COPY --from=builder /app/sentiric-assets/audio /app/assets/audio
 
+# .env'den gelen portları EXPOSE etmek iyi bir pratiktir.
 EXPOSE 50052/tcp
 EXPOSE 10000-20000/udp 
 
