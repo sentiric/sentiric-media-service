@@ -27,7 +27,7 @@ RUN cargo build --release
 FROM debian:bookworm-slim
 
 # Çalışma zamanında ihtiyaç duyulabilecek temel kütüphaneleri kuruyoruz.
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+# RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
@@ -37,7 +37,14 @@ COPY --from=builder /app/sentiric-assets/audio /app/assets/audio
 
 # .env dosyasından gelen portları belirtmek, iyi bir dokümantasyon ve ağ kuralı yönetimi pratiğidir.
 EXPOSE 50052/tcp
-EXPOSE 10000-20020/udp
+EXPOSE 10000-10010/udp
+
+# ÖNEMLİ: Hata ayıklama araçlarını (ldd ve strace) kuruyoruz.
+# 'procps' ldd için gereklidir.
+# RUN apt-get update && apt-get install -y ca-certificates procps strace && rm -rf /var/lib/apt/lists/*
+# CMD ["tail", "-f", "/dev/null"]
+# ldd ./sentiric-media-service
+# strace ./sentiric-media-service
 
 # Konteyner başladığında bu binary'yi çalıştır.
 ENTRYPOINT ["./sentiric-media-service"]

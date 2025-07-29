@@ -49,8 +49,8 @@ struct AppConfig {
 
 impl AppConfig {
     fn load_from_env() -> Result<Self, Box<dyn Error>> {
-        // bu satır container zamanında başlatma sorunlarına neden oluyor.
-        // dotenv::dotenv().ok();
+        // bu satır container zamanında başlatma sorunlarına neden olabilir.
+        dotenv::dotenv().ok();
         
         let grpc_port_str = env::var("INTERNAL_GRPC_PORT_MEDIA")
             .map_err(|e| format!("CRITICAL: INTERNAL_GRPC_PORT_MEDIA bulunamadı: {}", e))?;
@@ -107,8 +107,9 @@ impl MyMediaService {
     }
 }
 
+// std::error container zamanında önemli
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().json().with_env_filter(env_filter).init();
 
@@ -125,8 +126,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
     
-    let server_addr = config.grpc_listen_addr;
+    info!(config = ?config, "Media Service gRPC sunucusu hazırlanıyor...");
     let media_service = MyMediaService::new(config.clone());
+    let server_addr = config.grpc_listen_addr;
 
     tokio::spawn(async move {
         info!(address = %server_addr, "gRPC sunucusu dinlemeye başlıyor...");
