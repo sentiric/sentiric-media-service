@@ -49,7 +49,8 @@ struct AppConfig {
 
 impl AppConfig {
     fn load_from_env() -> Result<Self, Box<dyn Error>> {
-        dotenv::dotenv().ok();
+        // bu satır container zamanında başlatma sorunlarına neden oluyor.
+        // dotenv::dotenv().ok();
         
         let grpc_port_str = env::var("INTERNAL_GRPC_PORT_MEDIA")
             .map_err(|e| format!("CRITICAL: INTERNAL_GRPC_PORT_MEDIA bulunamadı: {}", e))?;
