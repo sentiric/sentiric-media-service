@@ -1,6 +1,4 @@
 target/
 .git/
-*.log
-*.db
-*.sqlite
-.env
+.github/
+*.local*

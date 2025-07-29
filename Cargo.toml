@@ -10,12 +10,9 @@ prost = "0.12"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 dotenv = "0.15"
-async-mutex = "1.4"
 rand = "0.8"
 hound = "3.5"
 bytes = "1.0"
-
-# Sadece temel RTP paket yapısı için kullanıyoruz
 rtp = "0.6"
 webrtc-util = { version = "0.7", features = ["marshal"] }
 

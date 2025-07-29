@@ -1,5 +1,3 @@
-# DOSYA: sentiric-media-service/docker-compose.service.yml (YENİ VE TEMİZ VERSİYON)
-
 services:
   media-service:
     image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
@@ -7,25 +5,15 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: sentiric_media_service
-    
-    # Bu satır, ana docker-compose.yml'nin bulunduğu yerdeki .env dosyasındaki
-    # tüm değişkenleri bu konteynere aktarır. Rust kodu artık bunları
-    # doğrudan okuyabilir.
+    # Bu servis için özel .env dosyasını yükler
     env_file:
       - ./.env
-    # --- YENİ EKLENEN SATIR ---
-    # PUBLIC_IP değişkenini ana .env dosyasından alıp konteynere aktar.
+    # Ana .env dosyasından PUBLIC_IP'yi alır (opsiyonel ama iyi pratik)
     environment:
-      - PUBLIC_IP=${PUBLIC_IP}      
+      - PUBLIC_IP=${PUBLIC_IP}
     ports:
       # Dış RTP port aralığını, içerideki aynı aralığa yönlendiriyoruz.
       - "${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}:${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}/udp"
-      
-    networks:
-      - sentiric-net
+      # gRPC portunu test için dışarı açmak gerekebilir
+      - "50052:50052"
     restart: always
-
-networks:
-  sentiric-net:
-    name: ${NETWORK_NAME:-sentiric-net}
-    external: true

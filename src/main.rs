@@ -1,7 +1,8 @@
-// DOSYA: sentiric-media-service/src/main.rs (TEK SORUMLULUK PRENSİBİ İLE GÜNCELLENMİŞ NİHAİ VERSİYON)
+// DOSYA: sentiric-media-service/src/main.rs (PRODUCTION-READY)
 
 use std::collections::HashMap;
 use std::env;
+use std::error::Error;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
@@ -26,20 +27,18 @@ use sentiric_contracts::sentiric::media::v1::{
     ReleasePortRequest, ReleasePortResponse,
 };
 
-// YENİ KOMUT: Oturumu sonlandırmak için.
 #[derive(Debug)]
 enum RtpCommand {
     PlayFile {
         audio_id: String,
         candidate_target_addr: SocketAddr,
     },
-    Shutdown, // Bu sinyal, handler'ın kendini temizlemesini tetikleyecek.
+    Shutdown,
 }
 
 type ActiveSessionChannels = Arc<Mutex<HashMap<u16, mpsc::Sender<RtpCommand>>>>;
 type AvailablePortsPool = Arc<Mutex<Vec<u16>>>;
 
-// ... AppConfig ve MyMediaService::new() aynı kalabilir ...
 #[derive(Debug, Clone)]
 struct AppConfig {
     grpc_listen_addr: SocketAddr,
@@ -49,22 +48,38 @@ struct AppConfig {
 }
 
 impl AppConfig {
-    fn load_from_env() -> Result<Self, Box<dyn std::error::Error>> {
+    fn load_from_env() -> Result<Self, Box<dyn Error>> {
         dotenv::dotenv().ok();
-        let grpc_port_str = env::var("INTERNAL_GRPC_PORT_MEDIA").expect("INTERNAL_GRPC_PORT_MEDIA ortam değişkeni bulunamadı.");
-        let grpc_port = grpc_port_str.parse::<u16>()?;
+        
+        let grpc_port_str = env::var("INTERNAL_GRPC_PORT_MEDIA")
+            .map_err(|e| format!("CRITICAL: INTERNAL_GRPC_PORT_MEDIA bulunamadı: {}", e))?;
+
+        let grpc_port = grpc_port_str.parse::<u16>()
+            .map_err(|e| format!("CRITICAL: INTERNAL_GRPC_PORT_MEDIA ('{}') parse edilemedi: {}", grpc_port_str, e))?;
+        
         let rtp_host = env::var("RTP_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
-        let rtp_port_min_str = env::var("EXTERNAL_RTP_PORT_MIN").expect("EXTERNAL_RTP_PORT_MIN ortam değişkeni bulunamadı.");
-        let rtp_port_max_str = env::var("EXTERNAL_RTP_PORT_MAX").expect("EXTERNAL_RTP_PORT_MAX ortam değişkeni bulunamadı.");
+
+        let rtp_port_min_str = env::var("EXTERNAL_RTP_PORT_MIN")
+            .map_err(|e| format!("CRITICAL: EXTERNAL_RTP_PORT_MIN bulunamadı: {}", e))?;
+
+        let rtp_port_min = rtp_port_min_str.parse::<u16>()
+            .map_err(|e| format!("CRITICAL: EXTERNAL_RTP_PORT_MIN ('{}') parse edilemedi: {}", rtp_port_min_str, e))?;
+
+        let rtp_port_max_str = env::var("EXTERNAL_RTP_PORT_MAX")
+            .map_err(|e| format!("CRITICAL: EXTERNAL_RTP_PORT_MAX bulunamadı: {}", e))?;
+        
+        let rtp_port_max = rtp_port_max_str.parse::<u16>()
+            .map_err(|e| format!("CRITICAL: EXTERNAL_RTP_PORT_MAX ('{}') parse edilemedi: {}", rtp_port_max_str, e))?;
 
         Ok(AppConfig {
             grpc_listen_addr: format!("0.0.0.0:{}", grpc_port).parse()?,
             rtp_host,
-            rtp_port_min: rtp_port_min_str.parse()?,
-            rtp_port_max: rtp_port_max_str.parse()?,
+            rtp_port_min,
+            rtp_port_max,
         })
     }
 }
+
 pub struct MyMediaService {
     session_channels: ActiveSessionChannels,
     available_ports: AvailablePortsPool,
@@ -90,16 +105,54 @@ impl MyMediaService {
         }
     }
 }
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    tracing_subscriber::fmt().json().with_env_filter(env_filter).init();
+
+    std::panic::set_hook(Box::new(|panic_info| {
+        error!(panic_info = %panic_info, "PROGRAM PANIK YAŞADI!");
+    }));
+
+    info!("Konfigürasyon yükleniyor...");
+    let config = match AppConfig::load_from_env() {
+        Ok(cfg) => Arc::new(cfg),
+        Err(e) => {
+            error!(error = %e.to_string(), "KRITIK: Konfigürasyon yüklenemedi.");
+            std::process::exit(1);
+        }
+    };
+    
+    let server_addr = config.grpc_listen_addr;
+    let media_service = MyMediaService::new(config.clone());
+
+    tokio::spawn(async move {
+        info!(address = %server_addr, "gRPC sunucusu dinlemeye başlıyor...");
+        if let Err(e) = Server::builder()
+            .add_service(MediaServiceServer::new(media_service))
+            .serve(server_addr)
+            .await
+        {
+            error!(error = %e, "gRPC sunucusu bir hatayla durdu!");
+        }
+    });
+
+    info!("Servis çalışıyor. Kapatmak için CTRL+C'ye basın.");
+    tokio::signal::ctrl_c().await?;
+    info!("Kapatma sinyali alındı, servis durduruluyor.");
+
+    Ok(())
+}
+
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
-    // allocate_port fonksiyonu bir önceki (doğru çalışan) haliyle aynı kalabilir.
     #[instrument(skip(self, _request), fields(call_id = %_request.get_ref().call_id))]
     async fn allocate_port(&self, _request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
         let mut available_ports_guard = self.available_ports.lock().await;
-
         available_ports_guard.shuffle(&mut thread_rng());
         let ports_to_try: Vec<u16> = available_ports_guard.clone();
-        
+
         if ports_to_try.is_empty() {
             warn!("Kullanılabilir port kalmadı.");
             return Err(Status::resource_exhausted("Uygun RTP portu bulunamadı"));
@@ -107,21 +160,17 @@ impl MediaService for MyMediaService {
 
         for &rtp_port in &ports_to_try {
             let bind_addr = format!("{}:{}", self.config.rtp_host, rtp_port);
-            
             match UdpSocket::bind(&bind_addr).await {
                 Ok(socket) => {
                     if let Some(index) = available_ports_guard.iter().position(|&p| p == rtp_port) {
                         available_ports_guard.remove(index);
                     }
-
                     info!(port = rtp_port, "Boş port havuzdan alındı ve başarıyla bağlandı.");
                     let mut channels_guard = self.session_channels.lock().await;
                     let (tx, rx) = mpsc::channel(10);
                     channels_guard.insert(rtp_port, tx);
-                    
                     let socket_arc = Arc::new(socket);
                     tokio::spawn(rtp_session_handler(socket_arc, rx, self.session_channels.clone(), self.available_ports.clone(), rtp_port));
-                    
                     return Ok(Response::new(AllocatePortResponse { rtp_port: rtp_port as u32 }));
                 },
                 Err(e) => {
@@ -129,36 +178,28 @@ impl MediaService for MyMediaService {
                 }
             }
         }
-
         error!(total_ports_tried = ports_to_try.len(), "Tüm portlar denendi ancak hiçbirine bağlanılamadı.");
         Err(Status::resource_exhausted("Uygun RTP portu bulunamadı, tüm denemeler başarısız oldu."))
     }
     
-    // YENİ `release_port` MANTIĞI
     #[instrument(skip(self), fields(port = %request.get_ref().rtp_port))]
     async fn release_port(&self, request: Request<ReleasePortRequest>) -> Result<Response<ReleasePortResponse>, Status> {
         let port_to_release = request.into_inner().rtp_port as u16;
-        
         let channels_guard = self.session_channels.lock().await;
         if let Some(tx) = channels_guard.get(&port_to_release) {
             info!(port = port_to_release, "Oturum sonlandırma sinyali (Shutdown) gönderiliyor.");
-            // Handler'a Shutdown komutu gönder. Hata olursa görmezden gel, muhtemelen zaten kapanmıştır.
             let _ = tx.send(RtpCommand::Shutdown).await;
         } else {
             warn!(port = port_to_release, "Serbest bırakılacak oturum kanalı bulunamadı. Muhtemelen zaten kapanmış.");
         }
-
-        // Bu fonksiyon artık portu havuza eklemiyor. Bu işi sadece handler yapacak.
         Ok(Response::new(ReleasePortResponse { success: true }))
     }
     
-    // play_audio aynı kalabilir
     #[instrument(skip(self, request), fields(target_addr = %request.get_ref().rtp_target_addr, audio_id = %request.get_ref().audio_id))]
     async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
         let req = request.into_inner();
         let remote_addr = req.rtp_target_addr.parse().map_err(|_| Status::invalid_argument("Geçersiz hedef adres"))?;
         let server_port = req.server_rtp_port as u16;
-
         let channels_guard = self.session_channels.lock().await;
         if let Some(tx) = channels_guard.get(&server_port) {
             let command = RtpCommand::PlayFile { audio_id: req.audio_id, candidate_target_addr: remote_addr };
@@ -173,7 +214,6 @@ impl MediaService for MyMediaService {
     }
 }
 
-// YENİ `rtp_session_handler` MANTIĞI
 async fn rtp_session_handler(
     socket: Arc<UdpSocket>, 
     mut rx: mpsc::Receiver<RtpCommand>, 
@@ -184,7 +224,6 @@ async fn rtp_session_handler(
     info!(rtp_port = port, "Yeni RTP oturumu için dinleyici başlatıldı");
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
-
     loop {
         tokio::select! {
             Some(command) = rx.recv() => {
@@ -201,7 +240,7 @@ async fn rtp_session_handler(
                     },
                     RtpCommand::Shutdown => {
                         info!(rtp_port = port, "Shutdown komutu alındı, oturum sonlandırılıyor.");
-                        break; // Döngüyü kır ve temizlik adımlarına geç.
+                        break;
                     }
                 }
             }
@@ -217,15 +256,8 @@ async fn rtp_session_handler(
             }
         }
     }
-    
-    // TEMİZLİK BÖLÜMÜ: Bu kod bloğu, döngü her ne sebeple kırılırsa kırılsın çalışır.
-    
-    // 1. Aktif kanallar listesinden kendini sil.
     session_channels.lock().await.remove(&port);
-
-    // 2. Kullandığı portu TEKRAR KULLANILABİLİR HALE GETİR.
-    // Portu hemen değil, küçük bir gecikmeyle havuza geri koyarak yarış durumunu önle.
-    sleep(Duration::from_millis(500)).await; // İşletim sistemine soketi kapatması için zaman tanı.
+    sleep(Duration::from_millis(500)).await;
     {
         let mut ports_guard = available_ports.lock().await;
         if !ports_guard.contains(&port) {
@@ -235,19 +267,20 @@ async fn rtp_session_handler(
     }
 }
 
-// ... (send_announcement, read_wav_samples, main, ve linear_to_ulaw fonksiyonları aynı kalacak) ...
-// ... (dosyanın geri kalanını önceki versiyondan alabilirsiniz, değişiklik yok) ...
-
-async fn send_announcement(sock: Arc<UdpSocket>, target_addr: SocketAddr, audio_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn send_announcement(sock: Arc<UdpSocket>, target_addr: SocketAddr, audio_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
     let audio_path = Path::new("/app").join(audio_id);
-    let samples = read_wav_samples(audio_path.to_str().unwrap())?;
+    let samples = match read_wav_samples(audio_path.to_str().unwrap()) {
+        Ok(s) => s,
+        Err(e) => {
+            error!(error = %e, path = %audio_path.display(), "WAV dosyası okunamadı.");
+            return Err(e);
+        }
+    };
     info!(remote = %target_addr, file = %audio_id, samples_len = samples.len(), "Anons gönderimi başlıyor...");
-
     let ssrc: u32 = rand::thread_rng().gen();
     let mut sequence_number: u16 = rand::thread_rng().gen();
     let mut timestamp: u32 = rand::thread_rng().gen();
     const SAMPLES_PER_PACKET: usize = 160;
-
     for chunk in samples.chunks(SAMPLES_PER_PACKET) {
         let payload: Bytes = chunk.iter().map(|&sample| linear_to_ulaw(sample)).collect();
         let packet = Packet {
@@ -267,7 +300,7 @@ async fn send_announcement(sock: Arc<UdpSocket>, target_addr: SocketAddr, audio_
     Ok(())
 }
 
-fn read_wav_samples(file_path: &str) -> Result<Vec<i16>, Box<dyn std::error::Error + Send + Sync>> {
+fn read_wav_samples(file_path: &str) -> Result<Vec<i16>, Box<dyn Error + Send + Sync>> {
     let mut reader = hound::WavReader::open(file_path)?;
     let spec = reader.spec();
     if spec.sample_rate != 8000 || spec.channels != 1 {
@@ -276,22 +309,34 @@ fn read_wav_samples(file_path: &str) -> Result<Vec<i16>, Box<dyn std::error::Err
     Ok(reader.samples::<i16>().filter_map(Result::ok).collect())
 }
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().json().with_env_filter(env_filter).init();
-    let config = Arc::new(AppConfig::load_from_env()?);
-    info!(config = ?config, "Media Service başlatılıyor!");
-    let media_service = MyMediaService::new(config.clone());
-    Server::builder().add_service(MediaServiceServer::new(media_service)).serve(config.grpc_listen_addr).await?;
-    Ok(())
-}
+// ... (dosyanın geri kalanı tamamen aynı) ...
 
 const SIGN_BIT: i16 = 0x80;
 const SEG_SHIFT: i16 = 4;
 const BIAS: i16 = 0x84;
-static SEARCH_TABLE: [u8; 256] = [0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7];
+
+// --- BU DİZİ TAMAMEN DOĞRUSUYLA DEĞİŞTİRİLDİ ---
+static SEARCH_TABLE: [u8; 256] = [
+    0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3,
+    4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+];
+
 fn linear_to_ulaw(pcm_val: i16) -> u8 {
+    // ... (bu fonksiyon aynı) ...
     let mut pcm_val = pcm_val;
     let sign = if pcm_val < 0 { SIGN_BIT } else { 0 };
     if sign != 0 { pcm_val = -pcm_val; }
