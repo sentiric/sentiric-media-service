@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{sleep, Duration};
-
+use tokio::runtime::Runtime; 
 use bytes::Bytes;
 use futures::future;
 use rand::seq::SliceRandom;
@@ -104,99 +104,85 @@ impl MyMediaService {
 }
 
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("✅ Uygulama başladı!");
+// BU MAKROYU KALDIRIN: #[tokio::main]
+// Fonksiyonu SENKRON `fn main()` yapın.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Manuel olarak bir Tokio runtime oluşturuyoruz.
+    let rt = Runtime::new()?;
 
-    dotenvy::dotenv().ok();
-    
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    // Tüm asenkron kodumuzu bu runtime'ın içinde çalıştırıyoruz.
+    rt.block_on(async {
+        println!("✅ Uygulama başladı!");
 
-    std::panic::set_hook(Box::new(|panic_info| {
-        error!(panic_info = %panic_info, "PROGRAM PANIK YAŞADI! UYGULAMA DURDURULACAK.");
-    }));
+        dotenvy::dotenv().ok();
+        
+        let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+        tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
-    info!("Konfigürasyon yükleniyor...");
-    let config = match AppConfig::load_from_env() {
-        Ok(cfg) => Arc::new(cfg),
-        Err(e) => {
-            println!("Konfigürasyon hatası: {}", e); // <-- ekle
-            error!(error = %e.to_string(), "KRITIK: Konfigürasyon yüklenemedi. Uygulama 10 saniye bekleyip kapanacak.");
-            sleep(Duration::from_secs(10)).await;
-            std::process::exit(1);
-        }
-    };
-    
-    info!(config = ?config, "Media Service hazırlanıyor...");
-    let media_service = MyMediaService::new(config.clone());
-    let server_addr = config.grpc_listen_addr;
-    let session_channels_for_shutdown = media_service.session_channels.clone();
-
-    // Sunucuyu ayrı bir tokio task'ı (arka plan görevi) içinde başlatıyoruz.
-    let server_handle = tokio::spawn(async move {
-        info!(address = %server_addr, "gRPC sunucusu dinlemeye başlıyor...");
-        if let Err(e) = Server::builder()
-            .add_service(MediaServiceServer::new(media_service))
-            .serve(server_addr)
-            .await
-        {
-            error!(error = %e, "gRPC sunucusu bir hatayla durdu!");
-        }
-    });
-
-    // Ana thread, bir kapatma sinyali (CTRL+C veya `docker stop`) gelene kadar bekler.
-    shutdown_signal().await;
-    info!("Kapatma sinyali alındı. Graceful shutdown başlatılıyor...");
-    
-    // Arka plandaki sunucu görevini sonlandırıyoruz.
-    server_handle.abort();
-
-    // Aktif RTP oturumlarını nazikçe kapatıyoruz.
-    info!("Tüm aktif RTP oturumlarına kapatma komutu gönderiliyor...");
-    let channels = session_channels_for_shutdown.lock().await;
-    let mut shutdown_tasks = Vec::new();
-
-    for (port, tx) in channels.iter() {
-        info!(rtp_port = port, "Oturuma Shutdown komutu gönderiliyor.");
-        let tx_clone = tx.clone();
-        shutdown_tasks.push(tokio::spawn(async move {
-            let _ = tx_clone.send_timeout(RtpCommand::Shutdown, Duration::from_secs(1)).await;
+        std::panic::set_hook(Box::new(|panic_info| {
+            error!(panic_info = %panic_info, "PROGRAM PANIK YAŞADI! UYGULAMA DURDURULACAK.");
         }));
-    }
-    
-    future::join_all(shutdown_tasks).await;
 
-    info!("Tüm oturumlar kapatıldı. Servis 2 saniye içinde sonlanacak.");
-    sleep(Duration::from_secs(2)).await;
-    info!("Servis başarıyla durduruldu.");
+        info!("Konfigürasyon yükleniyor...");
+        let config = match AppConfig::load_from_env() {
+            Ok(cfg) => Arc::new(cfg),
+            Err(e) => {
+                println!("Konfigürasyon hatası: {}", e);
+                error!(error = %e.to_string(), "KRITIK: Konfigürasyon yüklenemedi. Uygulama 10 saniye bekleyip kapanacak.");
+                // sleep'i tokio'dan std'ye çeviriyoruz
+                std::thread::sleep(Duration::from_secs(10));
+                std::process::exit(1);
+            }
+        };
+        
+        info!(config = ?config, "Media Service hazırlanıyor...");
+        let media_service = MyMediaService::new(config.clone());
+        let server_addr = config.grpc_listen_addr;
+
+        // Sunucuyu ayrı bir tokio task'ı (arka plan görevi) içinde başlatıyoruz.
+        tokio::spawn(async move {
+            info!(address = %server_addr, "gRPC sunucusu dinlemeye başlıyor...");
+            if let Err(e) = Server::builder()
+                .add_service(MediaServiceServer::new(media_service))
+                .serve(server_addr)
+                .await
+            {
+                error!(error = %e, "gRPC sunucusu bir hatayla durdu!");
+            }
+        });
+
+        // Ana thread, koşulsuz olarak sonsuza kadar bekleyecek.
+        info!("Ana thread sonsuz beklemeye alındı. Servis çalışıyor...");
+        futures::future::pending::<()>().await;
+    });
 
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install Ctrl+C handler");
-    };
+// // shutdown_signal fonksiyonunu da geri getirin.
+// async fn shutdown_signal() {
+//     let ctrl_c = async {
+//         tokio::signal::ctrl_c()
+//             .await
+//             .expect("Failed to install Ctrl+C handler");
+//     };
 
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("Failed to install signal handler")
-            .recv()
-            .await;
-    };
+//     #[cfg(unix)]
+//     let terminate = async {
+//         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+//             .expect("Failed to install signal handler")
+//             .recv()
+//             .await;
+//     };
 
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
+//     #[cfg(not(unix))]
+//     let terminate = std::future::pending::<()>();
 
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
-}
+//     tokio::select! {
+//         _ = ctrl_c => {},
+//         _ = terminate => {},
+//     }
+// }
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
@@ -352,7 +338,7 @@ async fn send_announcement(sock: Arc<UdpSocket>, target_addr: SocketAddr, audio_
 }
 
 async fn send_announcement_internal(sock: Arc<UdpSocket>, target_addr: SocketAddr, audio_id: &str) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let audio_path_str = format!("/app/assets/audio/{}.wav", audio_id);
+    let audio_path_str = format!("/app/{}", audio_id);
     let samples = match read_wav_samples(&audio_path_str) {
         Ok(s) => s,
         Err(e) => {

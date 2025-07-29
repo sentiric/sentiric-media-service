@@ -1,23 +1,19 @@
-
 services:
   media-service:
     container_name: sentiric_media_service
 
-    # build ve image aynı anda kullanılabilir ama dikkatle
     build:
       context: .
       dockerfile: Dockerfile
-      target: ${DOCKER_TARGET:-development}
+      # Artık DOCKER_TARGET yok.
 
-    image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
+    # image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
 
-    environment:
-      - RUST_BACKTRACE=1
-      - RUST_LOG=info,sentiric_media_service=debug
-      - INTERNAL_GRPC_PORT_MEDIA=50052
-      - EXTERNAL_RTP_PORT_MIN=10000
-      - EXTERNAL_RTP_PORT_MAX=10010
-      - RTP_HOST=0.0.0.0
+    env_file:
+      - .env
+    
+    # tty: true kalsın, iyi bir alışkanlıktır.
+    tty: true
 
     ports:
       - "${EXTERNAL_RTP_PORT_MIN:-10000}-${EXTERNAL_RTP_PORT_MAX:-10010}:${EXTERNAL_RTP_PORT_MIN:-10000}-${EXTERNAL_RTP_PORT_MAX:-10010}/udp"
