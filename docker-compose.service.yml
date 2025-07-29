@@ -1,19 +1,30 @@
+
 services:
   media-service:
-    image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
+    container_name: sentiric_media_service
+
+    # build ve image aynı anda kullanılabilir ama dikkatle
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: sentiric_media_service
-    # Bu servis için özel .env dosyasını yükler
-    env_file:
-      - ./.env
-    # Ana .env dosyasından PUBLIC_IP'yi alır (opsiyonel ama iyi pratik)
+      target: ${DOCKER_TARGET:-development}
+
+    image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
+
     environment:
-      - PUBLIC_IP=${PUBLIC_IP}
+      - RUST_BACKTRACE=1
+      - RUST_LOG=info,sentiric_media_service=debug
+      - INTERNAL_GRPC_PORT_MEDIA=50052
+      - EXTERNAL_RTP_PORT_MIN=10000
+      - EXTERNAL_RTP_PORT_MAX=10010
+      - RTP_HOST=0.0.0.0
+
     ports:
-      # Dış RTP port aralığını, içerideki aynı aralığa yönlendiriyoruz.
-      - "${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}:${EXTERNAL_RTP_PORT_MIN}-${EXTERNAL_RTP_PORT_MAX}/udp"
-      # gRPC portunu test için dışarı açmak gerekebilir
+      - "${EXTERNAL_RTP_PORT_MIN:-10000}-${EXTERNAL_RTP_PORT_MAX:-10010}:${EXTERNAL_RTP_PORT_MIN:-10000}-${EXTERNAL_RTP_PORT_MAX:-10010}/udp"
       - "50052:50052"
+
+    mem_limit: 256m
+    cpus: 0.5
+
     restart: always
+    init: true

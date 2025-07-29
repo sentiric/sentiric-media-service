@@ -8,13 +8,15 @@ tokio = { version = "1", features = ["full"] }
 tonic = "0.11"
 prost = "0.12"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-dotenv = "0.15"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] } # json özelliği gerekmiyorsa kaldırılabilir
+dotenvy = "0.15" 
 rand = "0.8"
 hound = "3.5"
-bytes = "1.0"
+bytes = "1" # "1.0" yerine "1" yazmak daha yaygındır
 rtp = "0.6"
 webrtc-util = { version = "0.7", features = ["marshal"] }
+backtrace = "0.3" # Bu artık derleyiciyle uyumlu olmalı
+futures = "0.3" # EKLENECEK OLAN SATIR
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"

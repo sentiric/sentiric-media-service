@@ -1,4 +1,11 @@
+# Git dosyalarını yoksay
+.git
+.gitignore
+
+# Rust'ın derleme çıktılarını yoksay
+# Bunlar konteyner İÇİNDE oluşturulmalı, DIŞARIDAN gönderilmemeli!
 target/
-.git/
-.github/
-*.local*
+
+# IDE/Editör özel dosyaları
+.vscode/
+.idea/
