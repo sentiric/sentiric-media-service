@@ -1,18 +1,19 @@
+# docker-compose.service.yml (NİHAİ)
+
 services:
   media-service:
-    container_name: sentiric_media_service
 
     build:
       context: .
       dockerfile: Dockerfile
-      # Artık DOCKER_TARGET yok.
-
-    # image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/sentiric-media-service:${TAG:-latest}
 
     env_file:
       - .env
     
-    # tty: true kalsın, iyi bir alışkanlıktır.
+    environment:
+      # Asset'lerin Docker içindeki ana klasörünü belirtiyoruz.
+      - ASSETS_BASE_PATH=/app/assets
+
     tty: true
 
     ports:
