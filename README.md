@@ -45,3 +45,16 @@ Bu komut, `Cargo.lock` dosyasını oluşturacak ve gerekli tüm kütüphaneleri 
     ```bash
     docker logs -f sentiric_media_service
     ```
+---
+
+## 🚀 Performans ve Kapasite Planlaması
+
+Servis, yüksek eş zamanlılık ve düşük kaynak tüketimi hedeflenerek tasarlanmıştır. Yapılan stres testleri, aşağıdaki konfigürasyon önerilerini ortaya koymuştur.
+
+### CPU & Bellek
+Servisin ana performans darboğazı CPU'dur. Standart bir production ortamı için **0.5 vCPU** ve **256 MB Bellek** ideal bir başlangıç noktasıdır. Bu konfigürasyon, saniyede ~55 çağrılık patlamalı bir trafiği stabil bir şekilde yönetebilir.
+
+### RTP Port Aralığı
+Port çakışmalarını önlemek için, `docker-compose.yml` veya ortam değişkenlerinizde **250-300 portluk** bir aralık (`EXTERNAL_RTP_PORT_MIN=10000`, `EXTERNAL_RTP_PORT_MAX=10600` gibi) tanımlanması önerilir. Çok geniş aralıklar (1000+) Docker'ın başlatılmasında sorunlara yol açabilir.
+
+Daha detaylı performans analizi ve test sonuçları için `PERFORMANCE.md` dosyasına bakınız.
