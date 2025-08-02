@@ -18,24 +18,22 @@ COPY src ./src
 RUN cargo build --release
 
 # Asset'leri klonla
-RUN git clone --depth 1 https://github.com/sentiric/sentiric-assets.git assets_repo
+RUN git clone --depth 1 https://github.com/sentiric/sentiric-assets.git assets
 
 
 # --- STAGE 2: Final (Minimal) Image ---
 # Bu aşama, SADECE builder'dan gerekli dosyaları alarak son imajı oluşturur.
 FROM debian:bookworm-slim
 
-# Çalışma dizinini oluştur
+RUN apt-get update && apt-get install -y netcat-openbsd ca-certificates && rm -rf /var/lib/apt/lists/*
+
+ARG SERVICE_NAME
 WORKDIR /app
 
-# 1. Adım: Builder'dan derlenmiş binary'yi kopyala
-COPY --from=builder /app/target/release/sentiric-media-service .
+COPY --from=builder /app/assets/audio ./assets/audio
 
-# 2. Adım: Builder'dan asset'leri kopyala
-COPY --from=builder /app/assets_repo/audio ./assets/audio
+COPY --from=builder /app/target/release/${SERVICE_NAME} .
 
-EXPOSE 50052/tcp
-EXPOSE 10000-10010/udp
+COPY --from=builder /app/target/release/${SERVICE_NAME} /app/main
 
-# Uygulamayı çalıştır
-CMD ["./sentiric-media-service"]
+ENTRYPOINT ["/app/main"]

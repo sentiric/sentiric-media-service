@@ -1,24 +1,20 @@
-# docker-compose.service.yml (NİHAİ)
-
 services:
   media-service:
 
     build:
       context: .
       dockerfile: Dockerfile
-
-    env_file:
-      - .env
-    
-    environment:
-      # Asset'lerin Docker içindeki ana klasörünü belirtiyoruz.
-      - ASSETS_BASE_PATH=/app/assets
+      args:
+        SERVICE_NAME: sentiric-media-service
+    env_file: ./.env
+    volumes:
+      - ../sentiric-infrastructure/tls/certs:/etc/sentiric/tls:ro
 
     tty: true
 
     ports:
-      - "${EXTERNAL_RTP_PORT_MIN:-10000}-${EXTERNAL_RTP_PORT_MAX:-10600}:${EXTERNAL_RTP_PORT_MIN:-10000}-${EXTERNAL_RTP_PORT_MAX:-10600}/udp"
-      - "50052:50052"
+      - "${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}:${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}/udp"
+      - "${MEDIA_SERVICE_GRPC_PORT}:${MEDIA_SERVICE_GRPC_PORT}"
 
     mem_limit: 256m
     cpus: 0.5

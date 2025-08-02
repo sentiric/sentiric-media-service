@@ -42,3 +42,15 @@ Servis, yüksek eş zamanlılık altında port çakışmalarını önlemek için
 Performans testleri, projenin `sentiric-cli` reposunda bulunan `realistic_test_call.py` script'i ile gerçekleştirilmiştir. Bu script, değişken çağrı süreleri ve Poisson dağılımına uygun patlamalı trafik üreterek gerçek dünya senaryolarını simüle eder.
 
 Detaylı test sonuçları ve senaryolar için projenin `docs/realistic_test.md` dosyasına bakınız.
+
+---
+
+```bash
+cargo run --release
+cargo run --example call_simulator --release
+
+cargo run --example agent_client
+cargo run --example dialplan_client
+cargo run --example sip_signaling_client
+cargo run --example user_client
+```
