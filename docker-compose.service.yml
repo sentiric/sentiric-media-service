@@ -6,7 +6,9 @@ services:
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: sentiric-media-service
-    env_file: ./.env
+    env_file: 
+      - ./.env
+      - ./docker.env
     volumes:
       - ../sentiric-infrastructure/tls/certs:/etc/sentiric/tls:ro
 
