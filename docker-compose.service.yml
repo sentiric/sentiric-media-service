@@ -1,25 +1,41 @@
+
+networks:
+  sentiric-net:
+    name: ${NETWORK_NAME:-sentiric-net}
+    driver: bridge
+
 services:
   media-service:
-
+    
+    image: ${DOCKER_REGISTRY:-ghcr.io/sentiric}/media-service:${TAG:-latest}    
+    
     build:
       context: .
       dockerfile: Dockerfile
       args:
         SERVICE_NAME: sentiric-media-service
+
     env_file: 
       - ./.env
       - ./docker.env
+
     volumes:
       - ../sentiric-infrastructure/tls/certs:/etc/sentiric/tls:ro
-
-    tty: true
 
     ports:
       - "${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}:${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}/udp"
       - "${MEDIA_SERVICE_GRPC_PORT}:${MEDIA_SERVICE_GRPC_PORT}"
 
+    networks:
+      - sentiric-net
+
+    tty: true
+    init: true
+
+    profiles:
+      - telekom
+
     mem_limit: 256m
     cpus: 0.5
 
     restart: always
-    init: true
