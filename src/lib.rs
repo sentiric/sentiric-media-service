@@ -21,6 +21,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tonic::transport::Server;
 use tracing::{info, warn};
+// YENİ: Gerekli `tracing_subscriber` bileşenlerini import ediyoruz
 use tracing_subscriber::EnvFilter;
 
 use state::PortManager;
@@ -29,11 +30,22 @@ use state::PortManager;
 pub async fn run() -> Result<()> {
     dotenvy::dotenv().ok();
     
+    // --- YENİ LOGLAMA KURULUMU ---
+    let env = std::env::var("ENV").unwrap_or_else(|_| "production".to_string());
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sentiric_media_service=debug"));
-    tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    
+    let subscriber_builder = tracing_subscriber::fmt().with_env_filter(env_filter);
+
+    if env == "development" {
+        // Geliştirme: Renkli, okunabilir, satır numaralı loglar
+        subscriber_builder.with_target(true).with_line_number(true).init();
+    } else {
+        // Üretim: Yapılandırılmış JSON logları
+        subscriber_builder.json().with_current_span(true).with_span_list(true).init();
+    }
+    // --- BİTTİ ---
     
     info!("Konfigürasyon yükleniyor...");
-    // DÜZELTME BURADA: Sondaki gereksiz '?' kaldırıldı.
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
     let tls_config = tls::load_server_tls_config().await

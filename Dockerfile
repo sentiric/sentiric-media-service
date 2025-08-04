@@ -14,7 +14,7 @@ RUN mkdir -p src && echo "fn main() {}" > src/main.rs
 RUN cargo fetch
 
 # Kaynak kodunu kopyala ve derle
-COPY src ./src
+COPY . .
 RUN cargo build --release
 
 # Asset'leri klonla

@@ -32,3 +32,25 @@ services:
         - telekom
 
       restart: always
+
+      mem_limit: 200m
+      cpus: 0.3            
+
+  builder-shell:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    working_dir: /app
+    env_file: 
+      - ./.env
+      - ./docker.env       
+    volumes:
+      - ../sentiric-infrastructure/tls/certs:/etc/sentiric/tls:ro
+    networks:
+      - sentiric-net
+    profiles:
+      - dev
+    command: ["bash"]
+    tty: true
+    stdin_open: true
