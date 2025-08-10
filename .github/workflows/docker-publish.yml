@@ -1,55 +1,64 @@
-# Bu workflow'un adı
-name: Docker Image CI for Media Service
+# =================================================================
+#    SENTIRIC PLATFORM - STANDART CI/CD DOCKER YAYINLAMA (v3.1 - Düzeltilmiş)
+# =================================================================
+# Bu CI/CD dosyası:
+# 1. Submodule'leri (örn: sentiric-contracts) otomatik olarak çeker.
+# 2. Dockerfile'a SERVICE_NAME argümanını dinamik olarak gönderir.
+# 3. Docker build'lerini cache ile hızlandırır.
+# 4. GitHub Actions ifade sözdizimi hatasını düzeltir.
+# =================================================================
+name: Docker Image CI
 
-# Bu workflow ne zaman çalışacak?
 on:
-  # 'main' branch'ine her push yapıldığında
   push:
     branches: [ "main" ]
-  # Ayrıca, GitHub arayüzünden manuel olarak da tetiklenebilir
   workflow_dispatch:
 
 jobs:
   build_and_push:
-    # İşlemin çalışacağı sanal sunucu
     runs-on: ubuntu-latest
-
-    # Bu işin, paketleri ghcr.io'ya yazma ve repoyu okuma izni olduğunu belirtiyoruz
     permissions:
       contents: read
       packages: write
 
     steps:
-      # --- Adım 1: Repoyu ve İçindeki Submodule'leri Klonla ---
-      # 'submodules: recursive' parametresi, .gitmodules dosyasında tanımlı olan
-      # 'core-interfaces' reposunu otomatik olarak klonlayacaktır. Bu en önemli değişiklik.
-      - name: Checkout repository with submodules
+      # Adım 1: Repoyu ve tüm alt modüllerini klonla
+      - name: Check out the repo with submodules
         uses: actions/checkout@v4
         with:
           submodules: 'recursive'
 
-      # --- Adım 2: Docker Buildx Kurulumu ---
+      # Adım 2: Docker Buildx'i kur
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # --- Adım 3: GitHub Container Registry'ye Giriş Yap ---
+      # Adım 3: GitHub Container Registry'ye giriş yap
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      
+      # Adım 4: Repo adından servis adını çıkar (DÜZELTİLMİŞ YÖNTEM)
+      - name: Extract service name from repository name
+        id: get_service_name
+        # Önce tam repo adını bir shell değişkenine alıyoruz,
+        # sonra shell'in kendi özelliğini kullanarak kesiyoruz.
+        run: |
+          REPO_NAME="${{ github.repository }}"
+          echo "SERVICE_NAME=${REPO_NAME#*/}" >> $GITHUB_ENV
 
-      # --- Adım 4: Docker İmajını Oluştur ve Yayınla ---
+      # Adım 5: Docker imajını oluştur, cache'le ve yayınla
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          # Derleme için kullanılacak Dockerfile'ın bulunduğu klasör (projenin ana dizini)
           context: .
-          # İmajı GHCR'ye gönder
           push: true
-          # İmajı etiketle. Örnek: ghcr.io/sentiric/sentiric-media-service:latest
           tags: ghcr.io/${{ github.repository }}:latest
-          # Derleme sırasında önbellek kullanarak gelecekteki build'leri hızlandırır
+          # build-args ile Dockerfile'a doğru SERVICE_NAME'i gönder
+          build-args: |
+            SERVICE_NAME=${{ env.SERVICE_NAME }}
+          # Derleme katmanlarını cache'leyerek sonraki build'leri hızlandır
           cache-from: type=gha
           cache-to: type=gha,mode=max
