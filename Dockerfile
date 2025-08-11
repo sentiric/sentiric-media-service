@@ -34,6 +34,4 @@ COPY --from=builder /app/assets/audio ./assets/audio
 
 COPY --from=builder /app/target/release/${SERVICE_NAME} .
 
-COPY --from=builder /app/target/release/${SERVICE_NAME} /app/main
-
-ENTRYPOINT ["/app/main"]
+ENTRYPOINT ["./sentiric-media-service"]
