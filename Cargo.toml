@@ -27,7 +27,7 @@ chrono = "0.4.31"
 # DÜZELTME: sentiric-contracts versiyonunu güncelliyoruz
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.5.2" 
+tag = "v1.6.0" 
 package = "sentiric-contracts"
 
 [dev-dependencies]
