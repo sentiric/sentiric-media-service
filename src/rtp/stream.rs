@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,12 +11,22 @@ use tracing::{error, info, instrument};
 use rtp::header::Header;
 use rtp::packet::Packet;
 use webrtc_util::marshal::Marshal;
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, WindowFunction, SincInterpolationType};
+use rubato::{Resampler, SincFixedIn, SincInterpolationType, SincInterpolationParameters, WindowFunction};
+
+// --- EKSİK İMPORTLAR BURAYA EKLENDİ ---
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
+use symphonia::core::errors::Error as SymphoniaError;
+use symphonia::core::formats::FormatOptions;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::MetadataOptions;
+use symphonia::core::probe::Hint;
+// --- ---
 
 use crate::audio::{self, AudioCache, linear_to_ulaw};
 use crate::config::AppConfig;
 
-const TARGET_SAMPLE_RATE: usize = 8000;
+const TARGET_SAMPLE_RATE: u32 = 8000;
 
 #[instrument(skip_all, fields(remote = %target_addr, uri))]
 pub async fn send_announcement_from_uri(
@@ -25,7 +36,6 @@ pub async fn send_announcement_from_uri(
     cache: AudioCache, 
     config: Arc<AppConfig>
 ) {
-    // Log kirliliğini önlemek için URI'nin sadece şemasını ve başlangıcını logla
     let uri_preview = audio_uri.chars().take(70).collect::<String>();
     tracing::Span::current().record("uri", &uri_preview.as_str());
     info!("Anons gönderimi başlıyor...");
@@ -33,9 +43,8 @@ pub async fn send_announcement_from_uri(
     let result = if audio_uri.starts_with("file:///") {
         let file_path = audio_uri.strip_prefix("file:///").unwrap_or(&audio_uri);
         load_from_file_and_send(&sock, target_addr, file_path, &cache, &config).await
-    } else if audio_uri.starts_with("data:audio/wav;base64,") {
-        let base64_data = audio_uri.strip_prefix("data:audio/wav;base64,").unwrap();
-        load_from_base64_and_send(&sock, target_addr, base64_data).await
+    } else if audio_uri.starts_with("data:") {
+        load_from_data_uri_and_send(&sock, target_addr, &audio_uri).await
     } else {
         Err(anyhow!("Desteklenmeyen URI şeması: {}", uri_preview))
     };
@@ -45,44 +54,74 @@ pub async fn send_announcement_from_uri(
     }
 }
 
-async fn load_from_base64_and_send(
+async fn load_from_data_uri_and_send(
     sock: &Arc<UdpSocket>, 
     target_addr: SocketAddr, 
-    base64_data: &str
+    data_uri: &str
 ) -> Result<()> {
-    info!("Base64 verisinden ses yükleniyor...");
-    let wav_bytes = general_purpose::STANDARD.decode(base64_data).context("Base64 verisi çözümlenemedi")?;
-    
-    let mut reader = hound::WavReader::new(std::io::Cursor::new(wav_bytes)).context("WAV verisi ayrıştırılamadı")?;
-    let spec = reader.spec();
-    let source_sample_rate = spec.sample_rate as usize;
-    
-    let samples_f32: Vec<f32> = reader.samples::<i16>().collect::<Result<Vec<_>, _>>()?.into_iter().map(|s| s as f32 / 32768.0).collect();
+    info!("Data URI'sinden ses yükleniyor...");
+    let (_media_type, base64_data) = data_uri
+        .strip_prefix("data:")
+        .and_then(|s| s.split_once(";base64,"))
+        .context("Geçersiz data URI formatı")?;
 
+    let audio_bytes = general_purpose::STANDARD.decode(base64_data).context("Base64 verisi çözümlenemedi")?;
+    
+    let samples = decode_audio_with_symphonia(audio_bytes)?;
+    
+    send_rtp_stream(sock, target_addr, &samples).await
+}
+
+fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
+    let mss = MediaSourceStream::new(Box::new(Cursor::new(audio_bytes)), Default::default());
+    let hint = Hint::new();
+    let meta_opts: MetadataOptions = Default::default();
+    let fmt_opts: FormatOptions = Default::default();
+    let probed = symphonia::default::get_probe().format(&hint, mss, &fmt_opts, &meta_opts)?;
+
+    let mut format = probed.format;
+    let track = format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).context("Uyumlu ses kanalı bulunamadı")?;
+
+    let source_sample_rate = track.codec_params.sample_rate.context("Örnekleme oranı bulunamadı")?;
+    let decoder_opts: DecoderOptions = Default::default();
+    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts)?;
+
+    let mut all_samples_f32: Vec<f32> = Vec::new();
+    loop {
+        match format.next_packet() {
+            Ok(packet) => {
+                let decoded = decoder.decode(&packet)?;
+                let mut sample_buf = SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
+                sample_buf.copy_interleaved_ref(decoded);
+                all_samples_f32.extend_from_slice(sample_buf.samples());
+            }
+            Err(SymphoniaError::IoError(ref err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    
     let resampled_samples: Vec<i16> = if source_sample_rate != TARGET_SAMPLE_RATE {
         info!(from = source_sample_rate, to = TARGET_SAMPLE_RATE, "Ses yeniden örnekleniyor...");
         let params = SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: WindowFunction::BlackmanHarris2,
+            sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256, window: WindowFunction::BlackmanHarris2,
         };
         let mut resampler = SincFixedIn::<f32>::new(
             TARGET_SAMPLE_RATE as f64 / source_sample_rate as f64,
             2.0,
             params,
-            samples_f32.len(),
+            all_samples_f32.len(),
             1,
         )?;
-        let resampled_f32 = resampler.process(&[samples_f32], None)?.remove(0);
+        let resampled_f32 = resampler.process(&[all_samples_f32], None)?.remove(0);
         resampled_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect::<Vec<i16>>()
     } else {
-        samples_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect::<Vec<i16>>()
+        all_samples_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect::<Vec<i16>>()
     };
 
-    send_rtp_stream(sock, target_addr, &resampled_samples).await
+    Ok(resampled_samples)
 }
+
 
 async fn load_from_file_and_send(
     sock: &Arc<UdpSocket>, 

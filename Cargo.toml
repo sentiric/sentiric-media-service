@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1", features = ["full"] }
 prost = "0.12.3"
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
@@ -22,13 +22,14 @@ rustls-pemfile = "2.1.0"
 tokio-rustls = "0.25.0"
 tonic = { version = "0.11.0", features = ["tls"] }
 chrono = "0.4.31"
-base64 = "0.22.1" # <-- HATA GİDERİLDİ: Eksik bağımlılığı ekliyoruz.
-rubato = "0.14.1" # <-- YENİ BAĞIMLILIK
+base64 = "0.22.1"
+rubato = "0.14.1"
+# YENİ BAĞIMLILIK: MP3 ve diğer formatları çözmek için
+symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
 
-# DÜZELTME: sentiric-contracts versiyonunu güncelliyoruz
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.7.5" 
+tag = "v1.7.5"
 package = "sentiric-contracts"
 
 [dev-dependencies]
