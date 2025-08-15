@@ -2,12 +2,12 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tracing::{info, instrument}; // 'warn' import'u kaldırıldı.
+use tracing::{info, instrument};
 
 use crate::audio::AudioCache;
 use crate::config::AppConfig;
 use crate::rtp::command::RtpCommand;
-use crate::rtp::stream::send_announcement;
+use crate::rtp::stream::send_announcement_from_uri; // Düzeltme: Yeni fonksiyonu çağır
 use crate::state::PortManager;
 
 #[instrument(skip_all, fields(rtp_port = port))]
@@ -28,12 +28,12 @@ pub async fn rtp_session_handler(
             biased;
             Some(command) = rx.recv() => {
                 match command {
-                    RtpCommand::PlayFile { audio_id, candidate_target_addr } => {
+                    RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr } => { // Düzeltme
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
-                        tokio::spawn(send_announcement(
+                        tokio::spawn(send_announcement_from_uri( // Düzeltme
                             socket.clone(),
                             target,
-                            audio_id,
+                            audio_uri, // Düzeltme
                             audio_cache.clone(),
                             config.clone(),
                         ));

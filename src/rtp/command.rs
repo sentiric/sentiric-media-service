@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 
 #[derive(Debug)]
 pub enum RtpCommand {
-    PlayFile {
-        audio_id: String,
+    PlayAudioUri { // Düzeltme: PlayFile -> PlayAudioUri
+        audio_uri: String,
         candidate_target_addr: SocketAddr,
     },
     Shutdown,

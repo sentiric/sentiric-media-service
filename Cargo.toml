@@ -7,7 +7,6 @@ edition = "2021"
 tokio = { version = "1.47.1", features = ["full"] }
 prost = "0.12.3"
 tracing = "0.1.40"
-# DÜZELTME: "json" özelliğini (feature) ekliyoruz.
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
 dotenvy = "0.15.7"
 rand = "0.8.5"
@@ -23,11 +22,13 @@ rustls-pemfile = "2.1.0"
 tokio-rustls = "0.25.0"
 tonic = { version = "0.11.0", features = ["tls"] }
 chrono = "0.4.31"
+base64 = "0.22.1" # <-- HATA GİDERİLDİ: Eksik bağımlılığı ekliyoruz.
+rubato = "0.14.1" # <-- YENİ BAĞIMLILIK
 
 # DÜZELTME: sentiric-contracts versiyonunu güncelliyoruz
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.6.2" 
+tag = "v1.7.5" 
 package = "sentiric-contracts"
 
 [dev-dependencies]
