@@ -31,10 +31,15 @@ services:
         - default
         - telekom
 
-      restart: always
-
       mem_limit: 200m
-      cpus: 0.3            
+      cpus: 0.3
+      healthcheck:
+        test: ["CMD", "nc", "-z", "localhost", "50052"]
+        interval: 10s
+        timeout: 5s
+        retries: 5
+        start_period: 10s # Servisin başlaması için biraz zaman tanı
+      restart: always                  
 
   builder-shell:
     build:
