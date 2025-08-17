@@ -29,7 +29,7 @@ symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.7.5"
+tag = "v1.7.6"
 package = "sentiric-contracts"
 
 [dev-dependencies]
