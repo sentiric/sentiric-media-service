@@ -1,8 +1,10 @@
+// ========== FILE: sentiric-media-service/src/grpc/service.rs ==========
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, instrument, warn};
 
@@ -32,15 +34,9 @@ impl MyMediaService {
     }
 }
 
-// URI şemasını çıkarmak için yardımcı fonksiyon
 fn extract_uri_scheme(uri: &str) -> &str {
-    if let Some(scheme_end) = uri.find(':') {
-        &uri[..scheme_end]
-    } else {
-        "unknown"
-    }
+    if let Some(scheme_end) = uri.find(':') { &uri[..scheme_end] } else { "unknown" }
 }
-
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
@@ -68,12 +64,8 @@ impl MediaService for MyMediaService {
                     self.port_manager.add_session(port_to_try, tx).await;
                     
                     tokio::spawn(rtp_session_handler(
-                        Arc::new(socket),
-                        rx,
-                        self.port_manager.clone(),
-                        self.audio_cache.clone(),
-                        self.config.clone(),
-                        port_to_try,
+                        Arc::new(socket), rx, self.port_manager.clone(),
+                        self.audio_cache.clone(), self.config.clone(), port_to_try,
                     ));
                     return Ok(Response::new(AllocatePortResponse { rtp_port: port_to_try as u32 }));
                 },
@@ -106,14 +98,10 @@ impl MediaService for MyMediaService {
         port = request.get_ref().server_rtp_port,
         uri_scheme = extract_uri_scheme(&request.get_ref().audio_uri)
     ))]
- async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
+    async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
         
-        // DİKKAT: Artık `instrument` makrosu bu bilgiyi gösterdiği için bu manuel loga gerek yok.
-        // let uri_preview = &req.audio_uri;
-        // info!(uri_preview = %uri_preview.chars().take(100).collect::<String>(), "PlayAudio isteği alındı.");
-
         let tx = self.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| Status::not_found(format!("Belirtilen porta ({}) ait aktif oturum yok.", rtp_port)))?;
 
@@ -123,18 +111,33 @@ impl MediaService for MyMediaService {
                 Status::invalid_argument("Geçersiz hedef adres formatı")
             })?;
         
+        // --- YENİ AKIŞ KONTROL MANTIĞI ---
+        // 1. Önce mevcut çalmayı durdurmak için bir komut gönder (eğer varsa).
+        if tx.send(RtpCommand::StopAudio).await.is_err() {
+             error!(port = rtp_port, "StopAudio komutu gönderilemedi, kanal kapalı olabilir.");
+             return Err(Status::internal("RTP oturum kanalı kapalı."));
+        }
+
+        // 2. Yeni çalma işlemi için yeni bir iptal token'ı oluştur.
+        let cancellation_token = CancellationToken::new();
+        
         let command = RtpCommand::PlayAudioUri { 
             audio_uri: req.audio_uri, 
             candidate_target_addr: target_addr,
+            cancellation_token: cancellation_token.clone(),
         };
         
-        tx.send(command).await
-            .map_err(|e| {
-                error!(error = %e, port = rtp_port, "RTP oturum kanalı kapalı.");
-                Status::internal("RTP oturum kanalı kapalı.")
-            })?;
-            
+        if tx.send(command).await.is_err() {
+            error!(port = rtp_port, "PlayAudioUri komutu gönderilemedi, kanal kapalı.");
+            return Err(Status::internal("RTP oturum kanalı kapalı."));
+        }
         info!(port = rtp_port, "PlayAudio komutu sıraya alındı.");
-        Ok(Response::new(PlayAudioResponse { success: true, message: "Playback queued".to_string() }))
+
+        // `agent-service`'in beklemesini sağlamak için, ses çalma işlemi iptal edilene kadar bekleyeceğiz.
+        // Bu, `send_announcement_from_uri` içinden anons bitince veya dışarıdan yeni komut gelince tetiklenir.
+        cancellation_token.cancelled().await;
+        info!(port = rtp_port, "Anons çalma işlemi tamamlandı veya yeni bir komutla iptal edildi.");
+            
+        Ok(Response::new(PlayAudioResponse { success: true, message: "Playback completed or was interrupted.".to_string() }))
     }
 }
