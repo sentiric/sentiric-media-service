@@ -34,7 +34,7 @@ tokio-util = { version = "0.7", features = ["full"] }
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
 # Kontrat versiyonunu 1.7.6 olarak güncelliyoruz.
-tag = "v1.7.6"
+tag = "v1.7.7"
 package = "sentiric-contracts"
 
 [dev-dependencies]
