@@ -25,16 +25,15 @@ chrono = "0.4.31"
 base64 = "0.22.1"
 rubato = "0.14.1"
 symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
-
-# --- NİHAİ DÜZELTME BURADA ---
-# Tek tek feature'lar yerine "full" özelliğini kullanarak
-# CancellationToken dahil tüm alt özellikleri aktive ediyoruz.
 tokio-util = { version = "0.7", features = ["full"] }
+# YENİ: Streaming için gerekli
+tokio-stream = { version = "0.1.15", features = ["sync"] }
+
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-# Kontrat versiyonunu 1.7.6 olarak güncelliyoruz.
-tag = "v1.7.7"
+# Kontrat versiyonunu güncelliyoruz.
+tag = "v1.7.8"
 package = "sentiric-contracts"
 
 [dev-dependencies]

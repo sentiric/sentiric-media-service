@@ -1,16 +1,19 @@
 // ========== FILE: sentiric-media-service/src/grpc/service.rs ==========
 use std::collections::HashMap;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
+use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt}; // YENİ: Stream'e .map() metodunu eklemek için bu trait'i import ediyoruz.
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{error, info, instrument, warn};
+// use bytes::Bytes; // KALDIRILDI: Bu import artık kullanılmıyor.
 
 use crate::{
     AllocatePortRequest, AllocatePortResponse, MediaService, PlayAudioRequest, PlayAudioResponse,
-    ReleasePortRequest, ReleasePortResponse,
+    ReleasePortRequest, ReleasePortResponse, RecordAudioRequest, AudioChunk,
 };
 use crate::audio::AudioCache;
 use crate::config::AppConfig;
@@ -111,14 +114,11 @@ impl MediaService for MyMediaService {
                 Status::invalid_argument("Geçersiz hedef adres formatı")
             })?;
         
-        // --- YENİ AKIŞ KONTROL MANTIĞI ---
-        // 1. Önce mevcut çalmayı durdurmak için bir komut gönder (eğer varsa).
         if tx.send(RtpCommand::StopAudio).await.is_err() {
              error!(port = rtp_port, "StopAudio komutu gönderilemedi, kanal kapalı olabilir.");
              return Err(Status::internal("RTP oturum kanalı kapalı."));
         }
 
-        // 2. Yeni çalma işlemi için yeni bir iptal token'ı oluştur.
         let cancellation_token = CancellationToken::new();
         
         let command = RtpCommand::PlayAudioUri { 
@@ -132,12 +132,37 @@ impl MediaService for MyMediaService {
             return Err(Status::internal("RTP oturum kanalı kapalı."));
         }
         info!(port = rtp_port, "PlayAudio komutu sıraya alındı.");
-
-        // `agent-service`'in beklemesini sağlamak için, ses çalma işlemi iptal edilene kadar bekleyeceğiz.
-        // Bu, `send_announcement_from_uri` içinden anons bitince veya dışarıdan yeni komut gelince tetiklenir.
+        
         cancellation_token.cancelled().await;
         info!(port = rtp_port, "Anons çalma işlemi tamamlandı veya yeni bir komutla iptal edildi.");
             
         Ok(Response::new(PlayAudioResponse { success: true, message: "Playback completed or was interrupted.".to_string() }))
+    }
+
+    type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<AudioChunk, Status>> + Send>>;
+
+    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
+    async fn record_audio(
+        &self,
+        request: Request<RecordAudioRequest>,
+    ) -> Result<Response<Self::RecordAudioStream>, Status> {
+        let req = request.into_inner();
+        let rtp_port = req.server_rtp_port as u16;
+
+        let session_tx = self.port_manager.get_session_sender(rtp_port).await
+            .ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
+
+        let (stream_tx, stream_rx) = mpsc::channel(32);
+
+        let command = RtpCommand::StartRecording { stream_sender: stream_tx };
+        session_tx.send(command).await
+            .map_err(|_| Status::internal("Kayıt başlatma komutu gönderilemedi."))?;
+        
+        info!("Ses kaydı stream'i başlatıldı.");
+
+        let output_stream = ReceiverStream::new(stream_rx)
+            .map(|res| res.map(|bytes| AudioChunk { audio_data: bytes.into() }));
+
+        Ok(Response::new(Box::pin(output_stream)))
     }
 }
