@@ -62,11 +62,14 @@ pub async fn rtp_session_handler(
                             info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı.");
                             actual_remote_addr = Some(addr);
                         }
+                        // --- KRİTİK DÜZELTME BURADA ---
                         if let Some(sender) = &recording_sender {
+                            // RTP payload'ını (header hariç) al ve Bytes nesnesine kopyala
                             let payload = Bytes::copy_from_slice(&buf[12..len]);
+                            // Payload'ı gRPC stream'ine gönder
                             if sender.send(Ok(payload)).await.is_err() {
                                 warn!("Kayıt stream'i istemci tarafından kapatıldı, kayıt durduruluyor.");
-                                recording_sender = None;
+                                recording_sender = None; // Kanal kapandı, daha fazla gönderme.
                             }
                         }
                     }
