@@ -5,7 +5,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use tracing::{info, instrument, warn}; // 'debug' kaldırıldı
+use tracing::{debug, info, instrument, warn}; // 'debug'ı tekrar ekliyoruz
 use bytes::Bytes;
 
 use crate::audio::AudioCache;
@@ -62,14 +62,12 @@ pub async fn rtp_session_handler(
                             info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı.");
                             actual_remote_addr = Some(addr);
                         }
-                        // --- KRİTİK DÜZELTME BURADA ---
                         if let Some(sender) = &recording_sender {
-                            // RTP payload'ını (header hariç) al ve Bytes nesnesine kopyala
                             let payload = Bytes::copy_from_slice(&buf[12..len]);
-                            // Payload'ı gRPC stream'ine gönder
+                            debug!(bytes = payload.len(), "RTP payload'ı agent-service'e gönderiliyor.");
                             if sender.send(Ok(payload)).await.is_err() {
                                 warn!("Kayıt stream'i istemci tarafından kapatıldı, kayıt durduruluyor.");
-                                recording_sender = None; // Kanal kapandı, daha fazla gönderme.
+                                recording_sender = None;
                             }
                         }
                     }
