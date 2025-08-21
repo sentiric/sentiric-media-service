@@ -1,61 +1,22 @@
+# docker-compose.service.yml
+# Geliştirme ortamı
+
 networks:
-  sentiric-net:
-    name: ${NETWORK_NAME:-sentiric-net}
-    driver: bridge
+  sentiric-net: { name: "${NETWORK_NAME:-sentiric-net}", driver: bridge }
 
 
 services:
-  media-service: 
-
-      build:
-        context: .
-        dockerfile: Dockerfile
-        args:
-          SERVICE_NAME: sentiric-media-service
-
-      env_file: 
-        - ./.env
-        - ./docker.env        
-
-      volumes:
-        - ../sentiric-config/tls/certs:/etc/sentiric/tls:ro
-
-      ports:
-        - "${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}:${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}/udp"
-        # - "${MEDIA_SERVICE_GRPC_PORT}:${MEDIA_SERVICE_GRPC_PORT}"
-
-      networks:
-        - sentiric-net
-      
-      profiles:
-        - default
-        - telekom
-
-      mem_limit: 200m
-      cpus: 0.3
-      healthcheck:
-        test: ["CMD", "nc", "-z", "localhost", "50052"]
-        interval: 10s
-        timeout: 5s
-        retries: 5
-        start_period: 10s # Servisin başlaması için biraz zaman tanı
-      restart: always                  
-
-  builder-shell:
-    build:
-      context: .
-      dockerfile: Dockerfile
-      target: builder
-    working_dir: /app
-    env_file: 
-      - ./.env
-      - ./docker.env       
-    volumes:
-      - ../sentiric-config/tls/certs:/etc/sentiric/tls:ro
-    networks:
-      - sentiric-net
-    profiles:
-      - dev
-    command: ["bash"]
-    tty: true
-    stdin_open: true
+  # --- TELEKOM & MEDYA KATMANI ---
+  media-service:
+    build: { context: ../sentiric-media-service }
+    env_file: ["${ENV_FILE_PATH}"]
+    volumes: ["${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"]
+    ports: ["${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}:${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}/udp"]
+    networks: [sentiric-net]
+    restart: always
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50052"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s

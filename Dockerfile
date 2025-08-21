@@ -10,13 +10,8 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-# Bağımlılıkları önbelleğe al
-COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release
-
-# Kaynak kodunu kopyala ve derle
 COPY . .
+
 RUN cargo build --release
 
 # Asset'leri klonla
@@ -27,10 +22,11 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y netcat-openbsd ca-certificates && rm -rf /var/lib/apt/lists/*
 
-ARG SERVICE_NAME
+
 WORKDIR /app
 
 COPY --from=builder /app/assets/audio ./assets/audio
-COPY --from=builder /app/target/release/${SERVICE_NAME} .
-USER 10001
+
+COPY --from=builder /app/target/release/sentiric-media-service .
+
 ENTRYPOINT ["./sentiric-media-service"]
