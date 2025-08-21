@@ -1,11 +1,34 @@
-# Git dosyalarını yoksay
+# Git ile ilgili dosyalar
 .git
 .gitignore
 
-# Rust'ın derleme çıktılarını yoksay
-# Bunlar konteyner İÇİNDE oluşturulmalı, DIŞARIDAN gönderilmemeli!
-target/
-
-# IDE/Editör özel dosyaları
+# Editor / IDE ayarları
 .vscode/
 .idea/
+*.swp
+
+# Sistem dosyaları
+.DS_Store
+Thumbs.db
+
+# Derleme çıktıları
+/target/
+
+# Cargo geçici dosyaları
+**/*.rs.bk
+Cargo.lock # (duruma göre, açıklaması aşağıda)
+.cargo/
+
+# Test ve coverage çıktıları
+*.profraw
+*.gcda
+*.gcno
+*.gcov
+
+# Ortam dosyaları (gizli kalması gereken)
+.env
+.env.*
+
+# Docker-compose vs.
+docker-compose.yml
+docker-compose.override.yml
