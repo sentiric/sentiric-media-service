@@ -1,6 +1,7 @@
-// ========== FILE: sentiric-media-service/src/rtp/stream.rs ==========
+// ========== FILE: sentiric-media-service/src/rtp/stream.rs (Nihai Akıllı Sürüm) ==========
 use std::io::Cursor;
 use std::net::SocketAddr;
+use std::path::PathBuf; // PathBuf'ı kullanmak daha güvenli
 use std::sync::Arc;
 use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
@@ -44,24 +45,13 @@ pub async fn send_announcement_from_uri(
 
     // --- YENİ VE DAHA SAĞLAM URI İŞLEME MANTIĞI ---
     let result = if let Some(path_part) = audio_uri.strip_prefix("file://") {
-        // "file://" den sonraki kısmı al (ister // olsun ister ///)
-        // Eğer yol / ile başlıyorsa, mutlak yoldur. Değilse, görecelidir.
-        let final_path = if path_part.starts_with('/') {
-            path_part.to_string()
-        } else {
-            // Göreceli yolları assets_base_path ile birleştir.
-            // Bu, hem agent-service'ten gelen "audio/..." hem de
-            // sip-signaling'den gelen "assets/audio/..." yollarını doğru işler.
-            format!("{}/{}", config.assets_base_path, path_part)
-        };
-        load_from_file_and_send(&sock, target_addr, &final_path, &cache, &config, token).await
+        // "file://" den sonraki kısmı al
+        load_from_file_and_send(&sock, target_addr, path_part.trim_start_matches('/'), &cache, &config, token).await
     } else if audio_uri.starts_with("data:") {
         load_from_data_uri_and_send(&sock, target_addr, &audio_uri, token).await
     } else {
         Err(anyhow!("Desteklenmeyen URI şeması: {}", uri_preview))
     };
-    // --- BİTTİ ---
-
 
     if let Err(e) = result {
         if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() || e.to_string().contains("cancelled") {
@@ -72,6 +62,21 @@ pub async fn send_announcement_from_uri(
     }
 }
 
+async fn load_from_file_and_send(
+    sock: &Arc<UdpSocket>,
+    target_addr: SocketAddr,
+    relative_path: &str, // Artık bu her zaman göreceli bir yol
+    cache: &AudioCache,
+    config: &AppConfig,
+    token: CancellationToken,
+) -> Result<()> {
+    // Gelen göreceli yolu, config'deki base path ile birleştirerek mutlak yolu oluşturuyoruz.
+    let mut final_path = PathBuf::from(&config.assets_base_path);
+    final_path.push(relative_path);
+
+    let samples = audio::load_or_get_from_cache(cache, &final_path).await?;
+    send_rtp_stream(sock, target_addr, &samples, token).await
+}
 
 async fn load_from_data_uri_and_send(
     sock: &Arc<UdpSocket>,
@@ -93,18 +98,6 @@ async fn load_from_data_uri_and_send(
     send_rtp_stream(sock, target_addr, &samples, token).await
 }
 
-async fn load_from_file_and_send(
-    sock: &Arc<UdpSocket>,
-    target_addr: SocketAddr,
-    audio_id: &str,
-    cache: &AudioCache,
-    config: &AppConfig,
-    token: CancellationToken,
-) -> Result<()> {
-    let samples = audio::load_or_get_from_cache(cache, audio_id, &config.assets_base_path).await?;
-    send_rtp_stream(sock, target_addr, &samples, token).await
-}
-
 async fn send_rtp_stream(
     sock: &Arc<UdpSocket>,
     target_addr: SocketAddr,
@@ -118,9 +111,10 @@ async fn send_rtp_stream(
 
     for chunk in samples.chunks(SAMPLES_PER_PACKET) {
         tokio::select! {
+            biased;
             _ = token.cancelled() => {
                 info!("RTP akışı dışarıdan iptal edildi.");
-                return Ok(()); // Bu bir hata değil, beklenen bir durum.
+                return Ok(());
             }
             _ = sleep(Duration::from_millis(20)) => {
                 let packet = Packet {
@@ -128,7 +122,6 @@ async fn send_rtp_stream(
                     payload: chunk.iter().map(|&s| linear_to_ulaw(s)).collect(),
                 };
                 if let Err(e) = sock.send_to(&packet.marshal()?, target_addr).await {
-                    // Bağlantı reddedilirse (örn: istemci kapandıysa) logla ama panic yapma.
                     warn!(error = %e, "RTP paketi gönderilemedi.");
                     break;
                 }
@@ -138,7 +131,6 @@ async fn send_rtp_stream(
         }
     }
     info!("Anons gönderimi tamamlandı.");
-    // Anons bittiğinde de token'ı iptal et ki bekleyen `play_audio` RPC'si sonlansın.
     token.cancel();
     Ok(())
 }
