@@ -19,15 +19,25 @@ pub async fn load_or_get_from_cache(
     }
 
     info!("Ses dosyası diskten okunuyor ve önbelleğe alınıyor.");
-    let mut path = PathBuf::from(assets_base_path);
-    path.push(audio_id); // audio_id neyse onu ekler
-    let path_str = path.to_str().context("Geçersiz dosya yolu karakterleri")?;
+    
+    // --- YENİ MANTIK BURADA ---
+    // Eğer audio_id mutlak bir yolsa (/ ile başlıyorsa) onu kullan,
+    // değilse, base path'e göre birleştir.
+    let final_path = if audio_id.starts_with('/') {
+        PathBuf::from(audio_id)
+    } else {
+        let mut path = PathBuf::from(assets_base_path);
+        path.push(audio_id);
+        path
+    };
+    // --- BİTTİ ---
+
+    let path_str = final_path.to_str().context("Geçersiz dosya yolu karakterleri")?;
     debug!(path = path_str, "Oluşturulan dosya yolu.");
 
-    // hound kütüphanesi senkron olduğu için, IO yoğun işlemi blocking task'e taşıyalım.
     let audio_id_owned = audio_id.to_string();
     let new_samples = tokio::task::spawn_blocking(move || {
-        hound::WavReader::open(path)?.samples::<i16>().collect::<Result<Vec<_>, _>>()
+        hound::WavReader::open(final_path)?.samples::<i16>().collect::<Result<Vec<_>, _>>()
     }).await??;
     
     let new_samples_arc = Arc::new(new_samples);
