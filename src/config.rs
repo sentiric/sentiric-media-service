@@ -11,19 +11,34 @@ pub struct AppConfig {
     pub rtp_port_max: u16,
     pub rtp_port_quarantine_duration: Duration,
     pub assets_base_path: String,
-    pub env: String, // YENİ
-    pub rust_log: String, // YENİ
+    pub env: String,
+    pub rust_log: String,
 }
 
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
-        let grpc_port: u16 = env::var("MEDIA_SERVICE_GRPC_PORT")?.parse()?;
-        let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN")?.parse()?;
-        let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX")?.parse()?;
-        if rtp_port_min >= rtp_port_max { bail!(...); }
+        let grpc_port: u16 = env::var("MEDIA_SERVICE_GRPC_PORT")
+            .context("MEDIA_SERVICE_GRPC_PORT eksik")?
+            .parse()?;
+            
+        let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN")
+            .context("RTP_SERVICE_PORT_MIN eksik")?
+            .parse()?;
+            
+        let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX")
+            .context("RTP_SERVICE_PORT_MAX eksik")?
+            .parse()?;
+            
+        // --- DÜZELTME BURADA ---
+        // '...' yerine geçerli bir hata mesajı yazıyoruz.
+        if rtp_port_min >= rtp_port_max {
+            bail!("RTP port aralığı geçersiz: min ({}) >= max ({}).", rtp_port_min, rtp_port_max);
+        }
 
         let quarantine_seconds: u64 = env::var("RTP_SERVICE_PORT_QUARANTINE_SECONDS")
-            .unwrap_or_else(|_| "60".to_string()).parse()?;
+            .unwrap_or_else(|_| "60".to_string())
+            .parse()
+            .context("RTP_SERVICE_PORT_QUARANTINE_SECONDS geçerli bir sayı olmalı")?;
 
         Ok(AppConfig {
             grpc_listen_addr: format!("[::]:{}", grpc_port).parse()?,

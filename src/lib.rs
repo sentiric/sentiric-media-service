@@ -1,4 +1,3 @@
-// File: sentiric-media-service/src/lib.rs (Nihai Sürüm)
 pub mod config;
 pub mod state;
 pub mod grpc;
@@ -23,16 +22,12 @@ use tracing_subscriber::EnvFilter;
 use state::PortManager;
 
 pub async fn run() -> Result<()> {
-    // --- YENİ VE DOĞRU BAŞLANGIÇ SIRASI ---
-    // 1. Önce .env dosyasını yükle.
     dotenvy::dotenv().ok();
     
-    // 2. Ardından, ortam değişkenlerini kullanarak konfigürasyonu yükle.
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
-    // 3. Şimdi, konfigürasyondan gelen ENV ve RUST_LOG değerleriyle loglamayı kur.
     let env_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info,sentiric_media_service=debug"))?;
+        .or_else(|_| EnvFilter::try_new(&config.rust_log))?;
     
     let subscriber_builder = tracing_subscriber::fmt().with_env_filter(env_filter);
 
@@ -41,8 +36,7 @@ pub async fn run() -> Result<()> {
     } else {
         subscriber_builder.json().with_current_span(true).with_span_list(true).init();
     }
-    // --- BİTTİ ---
-
+    
     info!("Konfigürasyon başarıyla yüklendi.");
 
     let tls_config = tls::load_server_tls_config().await
