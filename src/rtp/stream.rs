@@ -36,23 +36,34 @@ pub async fn send_announcement_from_uri(
     audio_uri: String,
     cache: AudioCache,
     config: Arc<AppConfig>,
-    token: CancellationToken, // İptal token'ını parametre olarak al
+    token: CancellationToken,
 ) {
     let uri_preview = audio_uri.chars().take(70).collect::<String>();
     tracing::Span::current().record("uri", &uri_preview.as_str());
     info!("Anons gönderimi başlıyor...");
 
-    let result = if audio_uri.starts_with("file:///") {
-        let file_path = audio_uri.strip_prefix("file:///").unwrap_or(&audio_uri);
-        load_from_file_and_send(&sock, target_addr, file_path, &cache, &config, token).await
+    // --- YENİ VE DAHA SAĞLAM URI İŞLEME MANTIĞI ---
+    let result = if let Some(path_part) = audio_uri.strip_prefix("file://") {
+        // "file://" den sonraki kısmı al (ister // olsun ister ///)
+        // Eğer yol / ile başlıyorsa, mutlak yoldur. Değilse, görecelidir.
+        let final_path = if path_part.starts_with('/') {
+            path_part.to_string()
+        } else {
+            // Göreceli yolları assets_base_path ile birleştir.
+            // Bu, hem agent-service'ten gelen "audio/..." hem de
+            // sip-signaling'den gelen "assets/audio/..." yollarını doğru işler.
+            format!("{}/{}", config.assets_base_path, path_part)
+        };
+        load_from_file_and_send(&sock, target_addr, &final_path, &cache, &config, token).await
     } else if audio_uri.starts_with("data:") {
         load_from_data_uri_and_send(&sock, target_addr, &audio_uri, token).await
     } else {
         Err(anyhow!("Desteklenmeyen URI şeması: {}", uri_preview))
     };
+    // --- BİTTİ ---
+
 
     if let Err(e) = result {
-        // İptal hatalarını 'warn' olarak logla, diğerlerini 'error' olarak
         if e.downcast_ref::<tokio::time::error::Elapsed>().is_some() || e.to_string().contains("cancelled") {
             warn!(error = ?e, "Anons gönderimi iptal edildi veya zaman aşımına uğradı.");
         } else {
@@ -60,6 +71,7 @@ pub async fn send_announcement_from_uri(
         }
     }
 }
+
 
 async fn load_from_data_uri_and_send(
     sock: &Arc<UdpSocket>,
