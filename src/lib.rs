@@ -1,6 +1,4 @@
-// src/lib.rs
-
-// 1. Modülleri tanımla
+// File: sentiric-media-service/src/lib.rs (Nihai Sürüm)
 pub mod config;
 pub mod state;
 pub mod grpc;
@@ -8,8 +6,6 @@ pub mod rtp;
 pub mod audio;
 pub mod tls;
 
-// 2. Gerekli tipleri dışarıya aç (Public API)
-// YENİ: RecordAudioRequest ve AudioChunk'ı ekliyoruz
 pub use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
     AllocatePortRequest, AllocatePortResponse, PlayAudioRequest, PlayAudioResponse,
@@ -26,23 +22,28 @@ use tracing_subscriber::EnvFilter;
 
 use state::PortManager;
 
-// Ana çalıştırma fonksiyonu: Servisin tüm yaşam döngüsünü yönetir.
 pub async fn run() -> Result<()> {
+    // --- YENİ VE DOĞRU BAŞLANGIÇ SIRASI ---
+    // 1. Önce .env dosyasını yükle.
     dotenvy::dotenv().ok();
     
-    let env = std::env::var("ENV").unwrap_or_else(|_| "production".to_string());
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info,sentiric_media_service=debug"));
+    // 2. Ardından, ortam değişkenlerini kullanarak konfigürasyonu yükle.
+    let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
+
+    // 3. Şimdi, konfigürasyondan gelen ENV ve RUST_LOG değerleriyle loglamayı kur.
+    let env_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new("info,sentiric_media_service=debug"))?;
     
     let subscriber_builder = tracing_subscriber::fmt().with_env_filter(env_filter);
 
-    if env == "development" {
+    if config.env == "development" {
         subscriber_builder.with_target(true).with_line_number(true).init();
     } else {
         subscriber_builder.json().with_current_span(true).with_span_list(true).init();
     }
-    
-    info!("Konfigürasyon yükleniyor...");
-    let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
+    // --- BİTTİ ---
+
+    info!("Konfigürasyon başarıyla yüklendi.");
 
     let tls_config = tls::load_server_tls_config().await
         .context("TLS konfigürasyonu yüklenemedi")?;
