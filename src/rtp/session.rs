@@ -1,15 +1,15 @@
-// ========== FILE: sentiric-media-service/src/rtp/session.rs ==========
+// File: sentiric-media-service/src/rtp/session.rs
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use tracing::{debug, info, instrument, warn}; // 'debug'ı tekrar ekliyoruz
+use tracing::{debug, info, instrument, warn};
 use bytes::Bytes;
 
 use crate::audio::AudioCache;
-use crate::config::AppConfig;
+use crate.config::AppConfig;
 use crate::rtp::command::RtpCommand;
 use crate::rtp::stream::send_announcement_from_uri;
 use crate::state::PortManager;
@@ -35,7 +35,10 @@ pub async fn rtp_session_handler(
             Some(command) = rx.recv() => {
                 match command {
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token } => {
-                        if let Some(token) = current_playback_token.take() { token.cancel(); }
+                        if let Some(token) = current_playback_token.take() {
+                            info!("Devam eden bir anons var, iptal ediliyor.");
+                            token.cancel();
+                        }
                         current_playback_token = Some(cancellation_token.clone());
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
                         tokio::spawn(send_announcement_from_uri(socket.clone(), target, audio_uri, audio_cache.clone(), config.clone(), cancellation_token));
@@ -45,7 +48,10 @@ pub async fn rtp_session_handler(
                         recording_sender = Some(stream_sender);
                     },
                     RtpCommand::StopAudio => {
-                        if let Some(token) = current_playback_token.take() { token.cancel(); }
+                        if let Some(token) = current_playback_token.take() {
+                            info!("Anons çalma komutu dışarıdan durduruldu.");
+                            token.cancel();
+                        }
                     },
                     RtpCommand::Shutdown => {
                         info!("Shutdown komutu alındı, oturum sonlandırılıyor.");
@@ -57,14 +63,13 @@ pub async fn rtp_session_handler(
             },
             result = socket.recv_from(&mut buf) => {
                 if let Ok((len, addr)) = result {
-                    if len > 12 { // RTP başlığı en az 12 byte'dır
+                    if len > 12 {
                         if actual_remote_addr.is_none() {
                             info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı.");
                             actual_remote_addr = Some(addr);
                         }
                         if let Some(sender) = &recording_sender {
                             let payload = Bytes::copy_from_slice(&buf[12..len]);
-                            debug!(bytes = payload.len(), "RTP payload'ı agent-service'e gönderiliyor.");
                             if sender.send(Ok(payload)).await.is_err() {
                                 warn!("Kayıt stream'i istemci tarafından kapatıldı, kayıt durduruluyor.");
                                 recording_sender = None;

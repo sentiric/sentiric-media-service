@@ -1,15 +1,12 @@
-// ========== FILE: sentiric-media-service/src/grpc/service.rs ==========
+// File: sentiric-media-service/src/grpc/service.rs
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
-use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt}; // YENİ: Stream'e .map() metodunu eklemek için bu trait'i import ediyoruz.
+use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-use tracing::{error, info, instrument, warn};
-// use bytes::Bytes; // KALDIRILDI: Bu import artık kullanılmıyor.
+use tracing::{error, info, instrument};
 
 use crate::{
     AllocatePortRequest, AllocatePortResponse, MediaService, PlayAudioRequest, PlayAudioResponse,
@@ -29,20 +26,14 @@ pub struct MyMediaService {
 
 impl MyMediaService {
     pub fn new(config: Arc<AppConfig>, port_manager: PortManager) -> Self {
-        Self {
-            port_manager,
-            config,
-            audio_cache: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self { port_manager, config, audio_cache: Arc::new(Mutex::new(HashMap::new())) }
     }
 }
-
-fn extract_uri_scheme(uri: &str) -> &str {
-    if let Some(scheme_end) = uri.find(':') { &uri[..scheme_end] } else { "unknown" }
-}
+fn extract_uri_scheme(uri: &str) -> &str { if let Some(scheme_end) = uri.find(':') { &uri[..scheme_end] } else { "unknown" } }
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
+
     #[instrument(skip(self, _request), fields(call_id = %_request.get_ref().call_id))]
     async fn allocate_port(&self, _request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
         const MAX_RETRIES: u8 = 5;
@@ -96,7 +87,7 @@ impl MediaService for MyMediaService {
         }
         Ok(Response::new(ReleasePortResponse { success: true }))
     }
-    
+
     #[instrument(skip(self, request), fields(
         port = request.get_ref().server_rtp_port,
         uri_scheme = extract_uri_scheme(&request.get_ref().audio_uri)

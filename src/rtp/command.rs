@@ -1,4 +1,4 @@
-// ========== FILE: sentiric-media-service/src/rtp/command.rs ==========
+// File: sentiric-media-service/src/rtp/command.rs
 use std::net::SocketAddr;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -13,9 +13,7 @@ pub enum RtpCommand {
         cancellation_token: CancellationToken,
     },
     StopAudio,
-    // YENİ: Ses kaydını başlatmak için komut
     StartRecording {
-        // Gelen ses verisini bu kanala göndereceğiz
         stream_sender: mpsc::Sender<Result<Bytes, Status>>,
     },
     Shutdown,
