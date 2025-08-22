@@ -1,15 +1,13 @@
-// File: src/rtp/session.rs
+// File: sentiric-media-service/src/rtp/session.rs
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-// DÜZELTME: Kullanılmayan 'debug' import'u kaldırıldı.
 use tracing::{info, instrument, warn, error};
 use bytes::Bytes;
 
-// DÜZELTME: Kullanılmayan `linear_to_ulaw` import'u kaldırıldı.
 use crate::audio::AudioCache;
 use crate::config::AppConfig;
 use crate::rtp::command::{RtpCommand, AudioFrame};
@@ -48,6 +46,7 @@ pub async fn rtp_session_handler(
     config: Arc<AppConfig>,
     port: u16,
 ) {
+
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
@@ -120,9 +119,13 @@ pub async fn rtp_session_handler(
 fn resample_and_encode_wav(pcmu_payload: &[u8], target_sample_rate: u32) -> Result<Bytes, anyhow::Error> {
     const SOURCE_SAMPLE_RATE: u32 = 8000;
     
+    // 1. PCMU'dan 16-bit PCM'e dönüştür
     let pcm_samples: Vec<i16> = pcmu_payload.iter().map(|&byte| ULAW_TO_PCM[byte as usize]).collect();
+    
+    // 2. PCM'i f32'ye dönüştür
     let pcm_f32: Vec<f32> = pcm_samples.iter().map(|&s| s as f32 / 32768.0).collect();
 
+    // 3. Yeniden örnekle (resample)
     let resampled_f32 = if target_sample_rate != SOURCE_SAMPLE_RATE {
         let params = SincInterpolationParameters {
             sinc_len: 256,
@@ -143,8 +146,10 @@ fn resample_and_encode_wav(pcmu_payload: &[u8], target_sample_rate: u32) -> Resu
         pcm_f32
     };
 
+    // 4. f32'yi tekrar i16'ya dönüştür
     let resampled_i16: Vec<i16> = resampled_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect();
 
+    // 5. WAV formatında belleğe yaz
     let spec = WavSpec {
         channels: 1,
         sample_rate: target_sample_rate,
@@ -152,8 +157,11 @@ fn resample_and_encode_wav(pcmu_payload: &[u8], target_sample_rate: u32) -> Resu
         sample_format: hound::SampleFormat::Int,
     };
     let mut cursor = Cursor::new(Vec::new());
+    // DİKKAT: hound'un WavWriter'ı doğal olarak Little-Endian yazar, bu yüzden ek bir işleme gerek yok.
+    // Ancak, emin olmak için bunu açıkça yapabiliriz.
     let mut writer = WavWriter::new(&mut cursor, spec)?;
     for sample in resampled_i16 {
+        // to_le_bytes() ile Little-Endian formatında olduğundan emin oluyoruz.
         writer.write_sample(sample)?;
     }
     writer.finalize()?;
