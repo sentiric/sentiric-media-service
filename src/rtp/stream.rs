@@ -1,7 +1,7 @@
-// ========== FILE: sentiric-media-service/src/rtp/stream.rs (Nihai Akıllı Sürüm) ==========
+// File: sentiric-media-service/src/rtp/stream.rs (Nihai Derleme Düzeltmesi)
 use std::io::Cursor;
 use std::net::SocketAddr;
-use std::path::PathBuf; // PathBuf'ı kullanmak daha güvenli
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
@@ -43,9 +43,7 @@ pub async fn send_announcement_from_uri(
     tracing::Span::current().record("uri", &uri_preview.as_str());
     info!("Anons gönderimi başlıyor...");
 
-    // --- YENİ VE DAHA SAĞLAM URI İŞLEME MANTIĞI ---
     let result = if let Some(path_part) = audio_uri.strip_prefix("file://") {
-        // "file://" den sonraki kısmı al
         load_from_file_and_send(&sock, target_addr, path_part.trim_start_matches('/'), &cache, &config, token).await
     } else if audio_uri.starts_with("data:") {
         load_from_data_uri_and_send(&sock, target_addr, &audio_uri, token).await
@@ -61,70 +59,31 @@ pub async fn send_announcement_from_uri(
         }
     }
 }
-
-async fn load_from_file_and_send(
-    sock: &Arc<UdpSocket>,
-    target_addr: SocketAddr,
-    relative_path: &str, // Artık bu her zaman göreceli bir yol
-    cache: &AudioCache,
-    config: &AppConfig,
-    token: CancellationToken,
-) -> Result<()> {
-    // Gelen göreceli yolu, config'deki base path ile birleştirerek mutlak yolu oluşturuyoruz.
+async fn load_from_file_and_send(sock: &Arc<UdpSocket>, target_addr: SocketAddr, relative_path: &str, cache: &AudioCache, config: &AppConfig, token: CancellationToken) -> Result<()> {
     let mut final_path = PathBuf::from(&config.assets_base_path);
     final_path.push(relative_path);
-
     let samples = audio::load_or_get_from_cache(cache, &final_path).await?;
     send_rtp_stream(sock, target_addr, &samples, token).await
 }
-
-async fn load_from_data_uri_and_send(
-    sock: &Arc<UdpSocket>,
-    target_addr: SocketAddr,
-    data_uri: &str,
-    token: CancellationToken,
-) -> Result<()> {
+async fn load_from_data_uri_and_send(sock: &Arc<UdpSocket>, target_addr: SocketAddr, data_uri: &str, token: CancellationToken) -> Result<()> {
     info!("Data URI'sinden ses yükleniyor...");
-    let (_media_type, base64_data) = data_uri
-        .strip_prefix("data:")
-        .and_then(|s| s.split_once(";base64,"))
-        .context("Geçersiz data URI formatı")?;
-
-    let audio_bytes = general_purpose::STANDARD
-        .decode(base64_data)
-        .context("Base64 verisi çözümlenemedi")?;
-
+    let (_media_type, base64_data) = data_uri.strip_prefix("data:").and_then(|s| s.split_once(";base64,")).context("Geçersiz data URI formatı")?;
+    let audio_bytes = general_purpose::STANDARD.decode(base64_data).context("Base64 verisi çözümlenemedi")?;
     let samples = decode_audio_with_symphonia(audio_bytes)?;
     send_rtp_stream(sock, target_addr, &samples, token).await
 }
-
-async fn send_rtp_stream(
-    sock: &Arc<UdpSocket>,
-    target_addr: SocketAddr,
-    samples: &[i16],
-    token: CancellationToken,
-) -> Result<()> {
+async fn send_rtp_stream(sock: &Arc<UdpSocket>, target_addr: SocketAddr, samples: &[i16], token: CancellationToken) -> Result<()> {
     let ssrc: u32 = rand::thread_rng().gen();
     let mut sequence_number: u16 = rand::thread_rng().gen();
     let mut timestamp: u32 = rand::thread_rng().gen();
     const SAMPLES_PER_PACKET: usize = 160;
-
     for chunk in samples.chunks(SAMPLES_PER_PACKET) {
         tokio::select! {
             biased;
-            _ = token.cancelled() => {
-                info!("RTP akışı dışarıdan iptal edildi.");
-                return Ok(());
-            }
+            _ = token.cancelled() => { info!("RTP akışı dışarıdan iptal edildi."); return Ok(()); }
             _ = sleep(Duration::from_millis(20)) => {
-                let packet = Packet {
-                    header: Header { version: 2, payload_type: 0, sequence_number, timestamp, ssrc, ..Default::default() },
-                    payload: chunk.iter().map(|&s| linear_to_ulaw(s)).collect(),
-                };
-                if let Err(e) = sock.send_to(&packet.marshal()?, target_addr).await {
-                    warn!(error = %e, "RTP paketi gönderilemedi.");
-                    break;
-                }
+                let packet = Packet { header: Header { version: 2, payload_type: 0, sequence_number, timestamp, ssrc, ..Default::default() }, payload: chunk.iter().map(|&s| linear_to_ulaw(s)).collect(), };
+                if let Err(e) = sock.send_to(&packet.marshal()?, target_addr).await { warn!(error = %e, "RTP paketi gönderilemedi."); break; }
                 sequence_number = sequence_number.wrapping_add(1);
                 timestamp = timestamp.wrapping_add(SAMPLES_PER_PACKET as u32);
             }
@@ -134,21 +93,17 @@ async fn send_rtp_stream(
     token.cancel();
     Ok(())
 }
-
 fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
     let mss = MediaSourceStream::new(Box::new(Cursor::new(audio_bytes)), Default::default());
     let hint = Hint::new();
     let meta_opts: MetadataOptions = Default::default();
     let fmt_opts: FormatOptions = Default::default();
     let probed = symphonia::default::get_probe().format(&hint, mss, &fmt_opts, &meta_opts)?;
-
     let mut format = probed.format;
     let track = format.tracks().iter().find(|t| t.codec_params.codec != CODEC_TYPE_NULL).context("Uyumlu ses kanalı bulunamadı")?;
-
     let source_sample_rate = track.codec_params.sample_rate.context("Örnekleme oranı bulunamadı")?;
     let decoder_opts: DecoderOptions = Default::default();
     let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &decoder_opts)?;
-
     let mut all_samples_f32: Vec<f32> = Vec::new();
     loop {
         match format.next_packet() {
@@ -162,21 +117,12 @@ fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
             Err(e) => return Err(e.into()),
         }
     }
-    
     let resampled_samples: Vec<i16> = if source_sample_rate != TARGET_SAMPLE_RATE {
         info!(from = source_sample_rate, to = TARGET_SAMPLE_RATE, "Ses yeniden örnekleniyor...");
-        let params = SincInterpolationParameters {
-            sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256, window: WindowFunction::BlackmanHarris2,
-        };
-        let mut resampler = SincFixedIn::<f32>::new(
-            TARGET_SAMPLE_RATE as f64 / source_sample_rate as f64, 2.0, params, all_samples_f32.len(), 1,
-        )?;
+        let params = SincInterpolationParameters { sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear, oversampling_factor: 256, window: WindowFunction::BlackmanHarris2, };
+        let mut resampler = SincFixedIn::<f32>::new(TARGET_SAMPLE_RATE as f64 / source_sample_rate as f64, 2.0, params, all_samples_f32.len(), 1,)?;
         let resampled_f32 = resampler.process(&[all_samples_f32], None)?.remove(0);
         resampled_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect::<Vec<i16>>()
-    } else {
-        all_samples_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect::<Vec<i16>>()
-    };
-
+    } else { all_samples_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect::<Vec<i16>>() };
     Ok(resampled_samples)
 }
