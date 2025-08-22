@@ -1,21 +1,24 @@
-// File: sentiric-media-service/src/grpc/service.rs (Nihai Derleme Düzeltmesi)
+// File: src/grpc/service.rs
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket; // Derleme hatası için EKLENDİ
+use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-use tracing::{error, info, instrument, warn}; // warn import'u EKLENDİ
+use tracing::{error, info, instrument, warn};
+
+use sentiric_contracts::sentiric::media::v1::RecordAudioResponse;
 
 use crate::{
     AllocatePortRequest, AllocatePortResponse, MediaService, PlayAudioRequest, PlayAudioResponse,
-    ReleasePortRequest, ReleasePortResponse, RecordAudioRequest, AudioChunk,
+    ReleasePortRequest, ReleasePortResponse, RecordAudioRequest,
 };
 use crate::audio::AudioCache;
 use crate::config::AppConfig;
+// DÜZELTME: Kullanılmayan AudioFrame import'u kaldırıldı.
 use crate::rtp::command::RtpCommand;
 use crate::rtp::session::rtp_session_handler;
 use crate::state::PortManager;
@@ -93,17 +96,31 @@ impl MediaService for MyMediaService {
         Ok(Response::new(PlayAudioResponse { success: true, message: "Playback completed or was interrupted.".to_string() }))
     }
 
-    type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<AudioChunk, Status>> + Send>>;
+    type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
     #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
     async fn record_audio(&self, request: Request<RecordAudioRequest>) -> Result<Response<Self::RecordAudioStream>, Status> {
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
-        let session_tx = self.port_manager.get_session_sender(rtp_port).await.ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
+        let session_tx = self.port_manager.get_session_sender(rtp_port).await
+            .ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
+        
         let (stream_tx, stream_rx) = mpsc::channel(32);
-        let command = RtpCommand::StartRecording { stream_sender: stream_tx };
+        
+        let command = RtpCommand::StartRecording {
+            stream_sender: stream_tx,
+            target_sample_rate: req.target_sample_rate,
+        };
+
         session_tx.send(command).await.map_err(|_| Status::internal("Kayıt başlatma komutu gönderilemedi."))?;
         info!("Ses kaydı stream'i başlatıldı.");
-        let output_stream = ReceiverStream::new(stream_rx).map(|res| res.map(|bytes| AudioChunk { audio_data: bytes.into() }));
+        
+        let output_stream = ReceiverStream::new(stream_rx).map(|res| {
+            res.map(|frame| RecordAudioResponse {
+                audio_data: frame.data.into(),
+                media_type: frame.media_type,
+            })
+        });
+
         Ok(Response::new(Box::pin(output_stream)))
     }
 }

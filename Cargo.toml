@@ -23,17 +23,19 @@ tokio-rustls = "0.25.0"
 tonic = { version = "0.11.0", features = ["tls"] }
 chrono = "0.4.31"
 base64 = "0.22.1"
+# YENİ: Yeniden örnekleme (resampling) için
 rubato = "0.14.1"
+# YENİ: WAV formatında yazmak için
+lewton = "0.10.2"
 symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
 tokio-util = { version = "0.7", features = ["full"] }
-# YENİ: Streaming için gerekli
 tokio-stream = { version = "0.1.15", features = ["sync"] }
 
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-# Kontrat versiyonunu güncelliyoruz.
-tag = "v1.7.8"
+# YENİ KONTRAKT VERSİYONU
+tag = "v1.8.0" 
 package = "sentiric-contracts"
 
 [dev-dependencies]

@@ -5,10 +5,11 @@ pub mod rtp;
 pub mod audio;
 pub mod tls;
 
+// DÜZELTME: Artık AudioChunk yok, RecordAudioResponse var
 pub use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
     AllocatePortRequest, AllocatePortResponse, PlayAudioRequest, PlayAudioResponse,
-    ReleasePortRequest, ReleasePortResponse, RecordAudioRequest, AudioChunk,
+    ReleasePortRequest, ReleasePortResponse, RecordAudioRequest, RecordAudioResponse,
 };
 pub use config::AppConfig;
 pub use grpc::service::MyMediaService;
@@ -20,6 +21,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use state::PortManager;
+
 
 pub async fn run() -> Result<()> {
     dotenvy::dotenv().ok();
