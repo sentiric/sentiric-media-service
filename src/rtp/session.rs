@@ -46,7 +46,6 @@ pub async fn rtp_session_handler(
     config: Arc<AppConfig>,
     port: u16,
 ) {
-
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
@@ -58,6 +57,7 @@ pub async fn rtp_session_handler(
             biased;
             Some(command) = rx.recv() => {
                 match command {
+                    
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token } => {
                         if let Some(token) = current_playback_token.take() { info!("Devam eden bir anons var, iptal ediliyor."); token.cancel(); }
                         current_playback_token = Some(cancellation_token.clone());
@@ -86,10 +86,12 @@ pub async fn rtp_session_handler(
                         if let Some((sender, target_rate_opt)) = &recording_sender {
                             let pcmu_payload = &buf[12..len];
                             
+                            // --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
                             let audio_frame = if let Some(target_rate) = target_rate_opt {
-                                match resample_and_encode_wav(pcmu_payload, *target_rate) {
-                                    Ok(wav_bytes) => {
-                                        AudioFrame { data: wav_bytes, media_type: "audio/wav".to_string() }
+                                match process_audio_chunk(pcmu_payload, *target_rate) {
+                                    Ok(pcm_bytes) => {
+                                        // Artık media_type "audio/l16" (raw pcm)
+                                        AudioFrame { data: pcm_bytes, media_type: format!("audio/l16;rate={}", target_rate) }
                                     },
                                     Err(e) => {
                                         error!(error = %e, "Ses verisi işlenemedi.");
@@ -97,8 +99,10 @@ pub async fn rtp_session_handler(
                                     }
                                 }
                             } else {
+                                // Hedef sample rate yoksa, ham PCMU gönder
                                 AudioFrame { data: Bytes::copy_from_slice(pcmu_payload), media_type: "audio/pcmu".to_string() }
                             };
+                            // --- DEĞİŞİKLİK BİTİYOR ---
 
                             if sender.send(Ok(audio_frame)).await.is_err() {
                                 warn!("Kayıt stream'i istemci tarafından kapatıldı, kayıt durduruluyor.");
@@ -114,6 +118,37 @@ pub async fn rtp_session_handler(
     info!("RTP oturumu temizleniyor...");
     port_manager.remove_session(port).await;
     port_manager.quarantine_port(port).await;
+}
+
+fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: u32) -> Result<Bytes, anyhow::Error> {
+    const SOURCE_SAMPLE_RATE: u32 = 8000;
+    
+    let pcm_samples: Vec<i16> = pcmu_payload.iter().map(|&byte| ULAW_TO_PCM[byte as usize]).collect();
+    let pcm_f32: Vec<f32> = pcm_samples.iter().map(|&s| s as f32 / 32768.0).collect();
+
+    let resampled_f32 = if target_sample_rate != SOURCE_SAMPLE_RATE {
+        let params = SincInterpolationParameters {
+            sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear,
+            oversampling_factor: 256, window: WindowFunction::BlackmanHarris2,
+        };
+        let mut resampler = SincFixedIn::<f32>::new(
+            target_sample_rate as f64 / SOURCE_SAMPLE_RATE as f64, 2.0, params,
+            pcm_f32.len(), 1,
+        )?;
+        resampler.process(&[pcm_f32], None)?.remove(0)
+    } else {
+        pcm_f32
+    };
+
+    let resampled_i16: Vec<i16> = resampled_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect();
+
+    // i16 vektörünü doğrudan byte vektörüne dönüştür (Little-Endian)
+    let mut bytes = Vec::with_capacity(resampled_i16.len() * 2);
+    for sample in resampled_i16 {
+        bytes.extend_from_slice(&sample.to_le_bytes());
+    }
+    
+    Ok(Bytes::from(bytes))
 }
 
 fn resample_and_encode_wav(pcmu_payload: &[u8], target_sample_rate: u32) -> Result<Bytes, anyhow::Error> {
