@@ -7,8 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::{error, info, instrument, warn};
 use bytes::Bytes;
-use std::fs::File;
-use std::io::Write;
+// Düzeltme: Artık kullanılmayan importları kaldırdık.
 use hound::{WavWriter, WavSpec};
 
 use crate::audio::AudioCache;
@@ -25,15 +24,15 @@ const ULAW_TO_PCM: [i16; 256] = [
      -7932,  -7676,  -7420,  -7164,  -6908,  -6652,  -6396,  -6140, -5884,  -5628,  -5372,  -5116,  -4860,  -4604,  -4348,  -4092,
      -3900,  -3772,  -3644,  -3516,  -3388,  -3260,  -3132,  -3004, -2876,  -2748,  -2620,  -2492,  -2364,  -2236,  -2108,  -1980,
      -1884,  -1820,  -1756,  -1692,  -1628,  -1564,  -1500,  -1436, -1372,  -1308,  -1244,  -1180,  -1116,  -1052,   -988,   -924,
-      -876,   -844,   -812,   -780,   -748,   -716,   -684,   -652, -620,   -588,   -556,   -524,   -492,   -460,   -428,   -396,
-      -372,   -356,   -340,   -324,   -308,   -292,   -276,   -260, -244,   -228,   -212,   -196,   -180,   -164,   -148,   -132,
-      -120,   -112,   -104,    -96,    -88,    -80,    -72,    -64,  -56,    -48,    -40,    -32,    -24,    -16,     -8,      0,
+      -876,   -844,   -812,    -780,   -748,   -716,   -684,   -652, -620,   -588,   -556,   -524,   -492,   -460,   -428,   -396,
+      -372,   -356,   -340,    -324,   -308,   -292,   -276,   -260, -244,   -228,   -212,   -196,   -180,   -164,   -148,   -132,
+      -120,   -112,   -104,     -96,     -88,     -80,     -72,     -64,  -56,    -48,    -40,    -32,    -24,    -16,     -8,      0,
      32124,  31100,  30076,  29052,  28028,  27004,  25980,  24956, 23932,  22908,  21884,  20860,  19836,  18812,  17788,  16764,
      15996,  15484,  14972,  14460,  13948,  13436,  12924,  12412, 11900,  11388,  10876,  10364,   9852,   9340,   8828,   8316,
       7932,   7676,   7420,   7164,   6908,   6652,   6396,   6140,  5884,   5628,   5372,   5116,   4860,   4604,   4348,   4092,
-      3900,   3772,   3644,   3516,   3388,   3260,   3132,   3004,  2876,   2748,   -2620,  2492,   2364,   2236,   2108,   1980,
+      3900,   3772,   3644,   3516,   3388,   3260,   3132,   3004,  2876,   2748,  -2620,   2492,   2364,   2236,   2108,   1980,
       1884,   1820,   1756,   1692,   1628,   1564,   1500,   1436,  1372,   1308,   1244,   1180,   1116,   1052,    988,    924,
-       876,    844,    812,    780,    748,    716,    684,    652,   620,    588,   -556,   524,   -492,   -460,    428,    396,
+       876,    844,    812,    780,    748,    716,    684,    652,   620,    588,   -556,    524,   -492,   -460,    428,    396,
        372,    356,    340,    324,    308,    292,    276,    260,   244,    228,    212,    196,    180,    164,    148,    132,
        120,    112,    104,     96,     88,     80,     72,     64,    56,     48,     40,     32,     24,     16,      8,      0
 ];
@@ -49,7 +48,6 @@ pub async fn rtp_session_handler(
 ) {
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
     
-    // --- HATA AYIKLAMA İÇİN DOSYA YAZMA KODU ---
     let wav_filename = format!("/tmp/call_dump_port_{}.wav", port);
     let spec = WavSpec {
         channels: 1,
@@ -57,10 +55,10 @@ pub async fn rtp_session_handler(
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let writer = WavWriter::create(&wav_filename, spec).ok();
-    let wav_writer = Arc::new(Mutex::new(writer));
+    // Düzeltme: WavWriter'ı bir Option içinde saklıyoruz
+    let writer_option = WavWriter::create(&wav_filename, spec).ok();
+    let wav_writer = Arc::new(Mutex::new(writer_option));
     info!(filename = %wav_filename, "Debug: Gelen ve işlenen ses bu dosyaya kaydedilecek.");
-    // --- HATA AYIKLAMA KODU SONU ---
 
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
@@ -107,13 +105,12 @@ pub async fn rtp_session_handler(
                             let audio_frame = if let Some(target_rate) = target_rate_opt {
                                 match process_audio_chunk(pcmu_payload, *target_rate) {
                                     Ok((pcm_bytes, pcm_samples_i16)) => {
-                                        // --- HATA AYIKLAMA İÇİN DOSYA YAZMA ---
-                                        if let Some(mut writer_guard) = wav_writer.lock().await.as_mut() {
-                                            for sample in pcm_samples_i16 {
-                                                let _ = writer_guard.write_sample(sample);
+                                        // Düzeltme: `mut` uyarısını kaldırmak için guard'ı `as_mut` ile alıyoruz.
+                                        if let Some(writer_guard) = wav_writer.lock().await.as_mut() {
+                                            for sample in &pcm_samples_i16 {
+                                                let _ = writer_guard.write_sample(*sample);
                                             }
                                         }
-                                        // --- HATA AYIKLAMA KODU SONU ---
                                         AudioFrame { data: pcm_bytes, media_type: format!("audio/l16;rate={}", target_rate) }
                                     },
                                     Err(e) => {
@@ -136,16 +133,15 @@ pub async fn rtp_session_handler(
         }
     }
     
-    // --- HATA AYIKLAMA İÇİN DOSYAYI KAPATMA ---
-    if let Some(mut writer_guard) = wav_writer.lock().await.as_mut() {
-        if let Err(e) = writer_guard.finalize() {
+    // Düzeltme: `take()` metodu ile WavWriter'ın sahipliğini alıp tüketiyoruz.
+    if let Some(writer) = wav_writer.lock().await.take() {
+        if let Err(e) = writer.finalize() {
             error!(error = %e, "Debug WAV dosyası finalize edilemedi.");
         } else {
             info!(filename = %wav_filename, "Debug: Ses kaydı tamamlandı ve dosya kapatıldı.");
         }
     }
-    // --- HATA AYIKLAMA KODU SONU ---
-
+    
     info!("RTP oturumu temizleniyor...");
     port_manager.remove_session(port).await;
     port_manager.quarantine_port(port).await;
