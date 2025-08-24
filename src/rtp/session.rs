@@ -16,7 +16,7 @@ use crate::rtp::stream::send_announcement_from_uri;
 use crate::state::PortManager;
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 
-// Düzeltilmiş PCMU (G.711 μ-law) to 16-bit PCM dönüşüm tablosu
+// PCMU (G.711 μ-law) to 16-bit PCM dönüşüm tablosu - DOĞRU VERSİYON
 const ULAW_TO_PCM: [i16; 256] = [
     -32124, -31100, -30076, -29052, -28028, -27004, -25980, -24956,
     -23932, -22908, -21884, -20860, -19836, -18812, -17788, -16764,
@@ -52,99 +52,6 @@ const ULAW_TO_PCM: [i16; 256] = [
         56,     48,     40,     32,     24,     16,      8,      0
 ];
 
-// Resampler için yardımcı struct
-struct AudioResampler {
-    resampler: Option<SincFixedIn<f32>>,
-    source_rate: u32,
-}
-
-impl AudioResampler {
-    fn new() -> Self {
-        Self {
-            resampler: None,
-            source_rate: 8000,
-        }
-    }
-
-    fn process(&mut self, pcm_f32: &[f32], target_rate: u32) -> Result<Vec<f32>, anyhow::Error> {
-        if target_rate == self.source_rate {
-            return Ok(pcm_f32.to_vec());
-        }
-
-        let ratio = target_rate as f64 / self.source_rate as f64;
-        
-        // Resampler'ı sadece gerekirse yeniden oluştur
-        if self.resampler.is_none() {
-            let params = SincInterpolationParameters {
-                sinc_len: 256,
-                f_cutoff: 0.95,
-                interpolation: SincInterpolationType::Linear,
-                oversampling_factor: 256,
-                window: WindowFunction::BlackmanHarris2,
-            };
-            
-            self.resampler = Some(SincFixedIn::new(
-                ratio,
-                2.0,
-                params,
-                pcm_f32.len(),
-                1,
-            )?);
-        }
-
-        let resampled = self.resampler.as_mut().unwrap().process(&[pcm_f32.to_vec()], None)?;
-        Ok(resampled.into_iter().next().unwrap_or_default())
-    }
-}
-
-// İşlenmiş audio verisi için yardımcı struct
-struct ProcessedAudio {
-    data: Bytes,
-    media_type: String,
-    samples: Vec<i16>,
-}
-
-impl From<ProcessedAudio> for AudioFrame {
-    fn from(val: ProcessedAudio) -> Self {
-        AudioFrame {
-            data: val.data,
-            media_type: val.media_type,
-        }
-    }
-}
-
-// WAV writer için yardımcı struct
-struct WavWriterHandle {
-    writer: Option<WavWriter<std::io::BufWriter<std::fs::File>>>,
-    filename: String,
-}
-
-impl WavWriterHandle {
-    fn new(filename: &str, spec: WavSpec) -> Result<Self, hound::Error> {
-        let writer = WavWriter::create(filename, spec)?;
-        Ok(Self {
-            writer: Some(writer),
-            filename: filename.to_string(),
-        })
-    }
-
-    async fn write_samples(&mut self, samples: &[i16]) -> Result<(), hound::Error> {
-        if let Some(writer) = &mut self.writer {
-            for &sample in samples {
-                writer.write_sample(sample)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn finalize(mut self) -> Result<(), hound::Error> {
-        if let Some(writer) = self.writer.take() {
-            writer.finalize()?;
-        }
-        Ok(())
-    }
-}
-
 #[instrument(skip_all, fields(rtp_port = port))]
 pub async fn rtp_session_handler(
     socket: Arc<UdpSocket>,
@@ -156,7 +63,7 @@ pub async fn rtp_session_handler(
 ) {
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
     
-    // WAV writer'ı oluştur
+    // WAV dosyasını oluştur
     let wav_filename = format!("/tmp/call_dump_port_{}.wav", port);
     let spec = WavSpec {
         channels: 1,
@@ -165,35 +72,22 @@ pub async fn rtp_session_handler(
         sample_format: hound::SampleFormat::Int,
     };
     
-    let wav_writer = match WavWriterHandle::new(&wav_filename, spec) {
+    let writer = match WavWriter::create(&wav_filename, spec) {
         Ok(writer) => {
             info!(filename = %wav_filename, "Debug: Gelen ve işlenen ses bu dosyaya kaydedilecek.");
-            Arc::new(Mutex::new(Some(writer)))
+            Some(writer)
         }
         Err(e) => {
             error!(error = %e, "WAV dosyası oluşturulamadı");
-            Arc::new(Mutex::new(None))
+            None
         }
     };
     
-    let mut resampler = AudioResampler::new();
+    let wav_writer = Arc::new(Mutex::new(writer));
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
     let mut current_playback_token: Option<CancellationToken> = None;
     let mut recording_sender: Option<(mpsc::Sender<Result<AudioFrame, Status>>, Option<u32>)> = None;
-
-    // Temizlik için scopeguard
-    let wav_writer_clone = wav_writer.clone();
-    let _cleanup_guard = scopeguard::guard((), move |_| {
-        let mut writer_guard = futures::executor::block_on(wav_writer_clone.lock());
-        if let Some(writer) = writer_guard.take() {
-            if let Err(e) = writer.finalize() {
-                error!(error = %e, "Debug WAV dosyası finalize edilemedi.");
-            } else {
-                info!(filename = %wav_filename, "Debug: Ses kaydı tamamlandı ve dosya kapatıldı.");
-            }
-        }
-    });
 
     loop {
         tokio::select! {
@@ -207,7 +101,6 @@ pub async fn rtp_session_handler(
                         }
                         current_playback_token = Some(cancellation_token.clone());
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
-                        
                         tokio::spawn(send_announcement_from_uri(
                             socket.clone(),
                             target,
@@ -254,21 +147,35 @@ pub async fn rtp_session_handler(
                         if let Some((sender, target_rate_opt)) = &recording_sender {
                             let pcmu_payload = &buf[12..len];
                             
-                            match process_audio_data(pcmu_payload, *target_rate_opt, &mut resampler) {
-                                Ok(processed_audio) => {
-                                    // WAV yazma işlemini arka plana al
+                            let audio_frame_result = process_audio_chunk(pcmu_payload, *target_rate_opt);
+                            
+                            match audio_frame_result {
+                                Ok((pcm_bytes, pcm_samples_i16)) => {
+                                    // WAV dosyasına yaz
                                     let wav_writer_clone = wav_writer.clone();
-                                    let samples = processed_audio.samples.clone();
+                                    let samples = pcm_samples_i16.clone();
                                     tokio::spawn(async move {
                                         let mut writer_guard = wav_writer_clone.lock().await;
                                         if let Some(writer) = writer_guard.as_mut() {
-                                            if let Err(e) = writer.write_samples(&samples).await {
-                                                error!(error = %e, "WAV yazma hatası");
+                                            for sample in &samples {
+                                                if let Err(e) = writer.write_sample(*sample) {
+                                                    error!(error = %e, "WAV yazma hatası");
+                                                    break;
+                                                }
                                             }
                                         }
                                     });
 
-                                    if sender.send(Ok(processed_audio.into())).await.is_err() {
+                                    let audio_frame = AudioFrame {
+                                        data: pcm_bytes,
+                                        media_type: if target_rate_opt.is_some() {
+                                            format!("audio/l16;rate={}", target_rate_opt.unwrap())
+                                        } else {
+                                            "audio/pcmu".to_string()
+                                        },
+                                    };
+
+                                    if sender.send(Ok(audio_frame)).await.is_err() {
                                         warn!("Kayıt stream'i istemci tarafından kapatıldı, kayıt durduruluyor.");
                                         recording_sender = None;
                                     }
@@ -287,61 +194,70 @@ pub async fn rtp_session_handler(
         }
     }
     
+    // WAV dosyasını düzgünce kapat
+    let mut writer_guard = wav_writer.lock().await;
+    if let Some(writer) = writer_guard.take() {
+        match writer.finalize() {
+            Ok(_) => info!(filename = %wav_filename, "Debug: Ses kaydı tamamlandı ve dosya kapatıldı."),
+            Err(e) => error!(error = %e, "Debug WAV dosyası finalize edilemedi."),
+        }
+    }
+    
     info!("RTP oturumu temizleniyor...");
     port_manager.remove_session(port).await;
     port_manager.quarantine_port(port).await;
 }
 
-fn process_audio_data(
-    pcmu_payload: &[u8],
-    target_rate: Option<u32>,
-    resampler: &mut AudioResampler,
-) -> Result<ProcessedAudio, anyhow::Error> {
+fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: Option<u32>) -> Result<(Bytes, Vec<i16>), anyhow::Error> {
     const SOURCE_SAMPLE_RATE: u32 = 8000;
     
-    // μ-law to PCM dönüşümü
     let pcm_samples_i16: Vec<i16> = pcmu_payload.iter()
         .map(|&byte| ULAW_TO_PCM[byte as usize])
         .collect();
-
-    let target_rate = target_rate.unwrap_or(SOURCE_SAMPLE_RATE);
     
-    // Hedef sample rate kaynakla aynıysa dönüşüm gerekmez
+    // Eğer target sample rate belirtilmemişse veya kaynakla aynıysa, dönüşüm yapma
+    let target_rate = target_sample_rate.unwrap_or(SOURCE_SAMPLE_RATE);
     if target_rate == SOURCE_SAMPLE_RATE {
         let mut bytes = Vec::with_capacity(pcm_samples_i16.len() * 2);
         for &sample in &pcm_samples_i16 {
             bytes.extend_from_slice(&sample.to_le_bytes());
         }
-        
-        return Ok(ProcessedAudio {
-            data: Bytes::from(bytes),
-            media_type: format!("audio/l16;rate={}", target_rate),
-            samples: pcm_samples_i16,
-        });
+        return Ok((Bytes::from(bytes), pcm_samples_i16));
     }
 
-    // PCM to F32 conversion (normalize)
+    // PCM to F32 conversion
     let pcm_f32: Vec<f32> = pcm_samples_i16.iter()
         .map(|&sample| sample as f32 / 32768.0)
         .collect();
 
     // Resampling
-    let resampled_f32 = resampler.process(&pcm_f32, target_rate)?;
+    let params = SincInterpolationParameters {
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
+    };
     
-    // F32 to PCM conversion (denormalize)
+    let mut resampler = SincFixedIn::<f32>::new(
+        target_rate as f64 / SOURCE_SAMPLE_RATE as f64,
+        2.0,
+        params,
+        pcm_f32.len(),
+        1,
+    )?;
+    
+    let resampled_f32 = resampler.process(&[pcm_f32], None)?.remove(0);
+    
+    // F32 to PCM conversion
     let resampled_i16: Vec<i16> = resampled_f32.into_iter()
         .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
         .collect();
 
-    // PCM samples to bytes
     let mut bytes = Vec::with_capacity(resampled_i16.len() * 2);
     for &sample in &resampled_i16 {
         bytes.extend_from_slice(&sample.to_le_bytes());
     }
     
-    Ok(ProcessedAudio {
-        data: Bytes::from(bytes),
-        media_type: format!("audio/l16;rate={}", target_rate),
-        samples: resampled_i16,
-    })
+    Ok((Bytes::from(bytes), resampled_i16))
 }
