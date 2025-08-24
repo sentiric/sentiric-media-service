@@ -79,23 +79,31 @@ pub async fn rtp_session_handler(
             result = socket.recv_from(&mut buf) => {
                 if let Ok((len, addr)) = result {
                     if len > 12 {
-                        if actual_remote_addr.is_none() { info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı."); actual_remote_addr = Some(addr); }
+                        if actual_remote_addr.is_none() { 
+                            info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı.");
+                            actual_remote_addr = Some(addr);
+                        }
+
                         if let Some((sender, target_rate_opt)) = &recording_sender {
                             let pcmu_payload = &buf[12..len];
                             
+                            // --- YENİ ve DOĞRU SES İŞLEME AKIŞI ---
                             let audio_frame = if let Some(target_rate) = target_rate_opt {
+                                // Sadece hedef rate istendiğinde bu karmaşık işlemi yap
                                 match process_audio_chunk(pcmu_payload, *target_rate) {
                                     Ok(pcm_bytes) => {
                                         AudioFrame { data: pcm_bytes, media_type: format!("audio/l16;rate={}", target_rate) }
                                     },
                                     Err(e) => {
                                         error!(error = %e, "Ses verisi işlenemedi.");
-                                        continue;
+                                        continue; // Bu chunk'ı atla
                                     }
                                 }
                             } else {
+                                // Hedef rate istenmiyorsa, ham veriyi gönder
                                 AudioFrame { data: Bytes::copy_from_slice(pcmu_payload), media_type: "audio/pcmu".to_string() }
                             };
+                            // --- YENİ AKIŞ SONU ---
 
                             if sender.send(Ok(audio_frame)).await.is_err() {
                                 warn!("Kayıt stream'i istemci tarafından kapatıldı, kayıt durduruluyor.");
@@ -113,11 +121,14 @@ pub async fn rtp_session_handler(
     port_manager.quarantine_port(port).await;
 }
 
+// YENİ ve DOĞRU SES İŞLEME FONKSİYONU
 fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: u32) -> Result<Bytes, anyhow::Error> {
     const SOURCE_SAMPLE_RATE: u32 = 8000;
     
+    // Adım 1: G.711 u-law (8-bit) verisini 16-bit PCM'e dönüştür.
     let pcm_samples: Vec<i16> = pcmu_payload.iter().map(|&byte| ULAW_TO_PCM[byte as usize]).collect();
     
+    // Eğer hedef zaten 8000Hz ise, sadece byte'a çevirip gönder (bu senaryoda olmaz ama güvenlik için)
     if target_sample_rate == SOURCE_SAMPLE_RATE {
         let mut bytes = Vec::with_capacity(pcm_samples.len() * 2);
         for sample in pcm_samples {
@@ -126,22 +137,34 @@ fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: u32) -> Result<B
         return Ok(Bytes::from(bytes));
     }
 
+    // Adım 2: Örnekleme oranını yükseltmek (upsample) için veriyi f32 formatına çevir.
     let mut pcm_f32: Vec<f32> = Vec::with_capacity(pcm_samples.len());
     for &sample in pcm_samples.iter() {
         pcm_f32.push(sample as f32 / 32768.0);
     }
 
+    // Adım 3: Rubato kütüphanesi ile yeniden örnekle (8kHz -> 16kHz).
     let params = SincInterpolationParameters {
-        sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear,
-        oversampling_factor: 256, window: WindowFunction::BlackmanHarris2,
+        sinc_len: 256,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 256,
+        window: WindowFunction::BlackmanHarris2,
     };
     let mut resampler = SincFixedIn::<f32>::new(
-        target_sample_rate as f64 / SOURCE_SAMPLE_RATE as f64, 2.0, params,
-        pcm_f32.len(), 1,
+        target_sample_rate as f64 / SOURCE_SAMPLE_RATE as f64, // Örn: 16000/8000 = 2.0
+        2.0, // Asenkron arayüz için 2 saniyelik bir chunk boyutu
+        params,
+        pcm_f32.len(),
+        1, // Mono kanal
     )?;
     
     let resampled_f32 = resampler.process(&[pcm_f32], None)?.remove(0);
-    let resampled_i16: Vec<i16> = resampled_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect();
+    
+    // Adım 4: f32 verisini tekrar 16-bit PCM byte dizisine çevir.
+    let resampled_i16: Vec<i16> = resampled_f32.into_iter()
+        .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+        .collect();
 
     let mut bytes = Vec::with_capacity(resampled_i16.len() * 2);
     for sample in resampled_i16 {
