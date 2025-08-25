@@ -19,9 +19,7 @@ use anyhow::{Context, Result};
 use tonic::transport::Server;
 use std::net::SocketAddr;
 use crate::metrics::start_metrics_server;
-use tracing::{info, warn, 
-    // error
-};
+use tracing::{info, warn, error};
 use tracing_subscriber::{
     prelude::*,
     EnvFilter,
@@ -33,9 +31,13 @@ use state::{AppState, PortManager};
 
 
 pub async fn run() -> Result<()> {
-    dotenvy::from_filename("development.env").ok();
-    dotenvy::dotenv().ok();
-    
+    // --- NİHAİ KONFİGÜRASYON YÜKLEYİCİ ---
+    // Sadece 'development.env' dosyasını yüklemeyi dener. 
+    // Eğer dosya yoksa (Docker ortamı gibi), hiçbir şey yapmaz ve hata vermez.
+    // Bu, yerel geliştirme için dosya kullanımına izin verirken, Docker'da
+    // sadece ortam değişkenlerine güvenmemizi sağlar.
+    let _ = dotenvy::from_filename("development.env");
+
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
     let metrics_addr = SocketAddr::new(
