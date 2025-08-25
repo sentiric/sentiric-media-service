@@ -13,6 +13,9 @@ pub struct AppConfig {
     pub assets_base_path: String,
     pub env: String,
     pub rust_log: String,
+    // YENİ: Debug için esnek alanlar
+    pub debug_wav_path_template: String, // Boş string ise kayıt kapalı demektir.
+    pub debug_wav_sample_rate: u32,
 }
 
 impl AppConfig {
@@ -29,16 +32,24 @@ impl AppConfig {
             .context("RTP_SERVICE_PORT_MAX eksik")?
             .parse()?;
             
-        // --- DÜZELTME BURADA ---
-        // '...' yerine geçerli bir hata mesajı yazıyoruz.
         if rtp_port_min >= rtp_port_max {
             bail!("RTP port aralığı geçersiz: min ({}) >= max ({}).", rtp_port_min, rtp_port_max);
         }
 
         let quarantine_seconds: u64 = env::var("RTP_SERVICE_PORT_QUARANTINE_SECONDS")
-            .unwrap_or_else(|_| "60".to_string())
+            .unwrap_or_else(|_| "5".to_string())
             .parse()
             .context("RTP_SERVICE_PORT_QUARANTINE_SECONDS geçerli bir sayı olmalı")?;
+
+        // YENİ: Debug ayarlarını ortam değişkenlerinden oku
+        let debug_wav_path_template = env::var("DEBUG_WAV_PATH_TEMPLATE")
+            // Varsayılan olarak boş string, yani kayıt kapalı.
+            .unwrap_or_else(|_| "".to_string()); 
+
+        let debug_wav_sample_rate = env::var("DEBUG_WAV_SAMPLE_RATE")
+            .unwrap_or_else(|_| "16000".to_string())
+            .parse::<u32>()
+            .context("DEBUG_WAV_SAMPLE_RATE geçerli bir sayı olmalı")?;
 
         Ok(AppConfig {
             grpc_listen_addr: format!("[::]:{}", grpc_port).parse()?,
@@ -49,6 +60,9 @@ impl AppConfig {
             rtp_port_quarantine_duration: Duration::from_secs(quarantine_seconds),
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            // YENİ: Yeni alanları struct'a ata
+            debug_wav_path_template,
+            debug_wav_sample_rate,
         })
     }
 }

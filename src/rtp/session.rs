@@ -1,8 +1,11 @@
 // File: sentiric-media-service/src/rtp/session.rs
 use std::net::SocketAddr;
 use std::sync::Arc;
-// YENİ: std::env'i import ediyoruz
 use std::env;
+// YENİ: Dosya sistemi işlemleri için
+use std::fs;
+use std::path::Path;
+
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -31,35 +34,48 @@ pub async fn rtp_session_handler(
 ) {
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
     
-    // DEĞİŞİKLİK: Platforma özel geçici dosya dizinini kullanıyoruz.
-    // Windows'ta C:\Users\YourUser\AppData\Local\Temp gibi bir yer olacak.
-    // Linux'ta /tmp olacak.
-    let mut temp_path = env::temp_dir();
-    temp_path.push(format!("call_dump_port_{}.wav", port));
-    let wav_filename = temp_path.to_string_lossy().to_string();
+    let mut wav_writer = None;
+    let mut wav_filename = String::new();
 
-    let spec = WavSpec {
-        channels: 1,
-        // ÖNEMLİ DÜZELTME: Debug WAV dosyasının örnekleme oranını,
-        // process_audio_chunk'in ürettiği orana göre ayarlamalıyız.
-        // Şimdilik 16000 varsayıyoruz, çünkü genellikle bu hedeflenir.
-        sample_rate: 16000, 
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    
-    let writer = match WavWriter::create(&wav_filename, spec) {
-        Ok(writer) => {
-            info!(filename = %wav_filename, "Debug: Gelen ve işlenen ses bu dosyaya kaydedilecek.");
-            Some(writer)
+    // YENİ: Sadece path template'i boş DEĞİLSE kayıt yap.
+    if !config.debug_wav_path_template.is_empty() {
+        // {temp} ve {port} yer tutucularını değiştir
+        let temp_dir_str = env::temp_dir().to_string_lossy().to_string();
+        wav_filename = config.debug_wav_path_template
+            .replace("{temp}", &temp_dir_str)
+            .replace("{port}", &port.to_string());
+        
+        // Dosyanın yazılacağı dizinin var olduğundan emin ol
+        if let Some(parent_dir) = Path::new(&wav_filename).parent() {
+            if !parent_dir.exists() {
+                if let Err(e) = fs::create_dir_all(parent_dir) {
+                    error!(error = %e, path = ?parent_dir, "Debug WAV dizini oluşturulamadı.");
+                    // Hata durumunda wav_writer None olarak kalacak ve program devam edecek.
+                }
+            }
         }
-        Err(e) => {
-            error!(error = %e, "WAV dosyası oluşturulamadı");
-            None
+        
+        // Sadece dizin oluşturma başarılıysa dosyayı oluşturmayı dene
+        if Path::new(&wav_filename).parent().map_or(false, |p| p.exists()) {
+            let spec = WavSpec {
+                channels: 1,
+                sample_rate: config.debug_wav_sample_rate,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            
+            match WavWriter::create(&wav_filename, spec) {
+                Ok(writer) => {
+                    info!(filename = %wav_filename, "Debug: Gelen ve işlenen ses bu dosyaya kaydedilecek.");
+                    wav_writer = Some(Arc::new(Mutex::new(Some(writer))));
+                }
+                Err(e) => {
+                    error!(error = %e, filename = %wav_filename, "Debug WAV dosyası oluşturulamadı");
+                }
+            };
         }
-    };
+    }
     
-    let wav_writer = Arc::new(Mutex::new(writer));
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
     let mut current_playback_token: Option<CancellationToken> = None;
@@ -123,23 +139,26 @@ pub async fn rtp_session_handler(
                         if let Some((sender, target_rate_opt)) = &recording_sender {
                             let pcmu_payload = &buf[12..len];
                             
+                            // YAZIM HATASI DÜZELTMESİ (ÖNCEKİ ADIMDAN)
                             let audio_frame_result = process_audio_chunk(pcmu_payload, *target_rate_opt);
                             
                             match audio_frame_result {
                                 Ok((pcm_bytes, pcm_samples_i16)) => {
-                                    // WAV dosyasına yaz
-                                    let wav_writer_clone = wav_writer.clone();
-                                    tokio::spawn(async move {
-                                        let mut writer_guard = wav_writer_clone.lock().await;
-                                        if let Some(writer) = writer_guard.as_mut() {
-                                            for sample in &pcm_samples_i16 {
-                                                if let Err(e) = writer.write_sample(*sample) {
-                                                    error!(error = %e, "WAV yazma hatası");
-                                                    break;
+                                    // YENİ: Sadece wav_writer varsa yazma işlemini yap
+                                    if let Some(writer_arc) = &wav_writer {
+                                        let wav_writer_clone = writer_arc.clone();
+                                        tokio::spawn(async move {
+                                            let mut writer_guard = wav_writer_clone.lock().await;
+                                            if let Some(writer) = writer_guard.as_mut() {
+                                                for sample in &pcm_samples_i16 {
+                                                    if let Err(e) = writer.write_sample(*sample) {
+                                                        error!(error = %e, "WAV yazma hatası");
+                                                        break;
+                                                    }
                                                 }
                                             }
-                                        }
-                                    });
+                                        });
+                                    }
 
                                     let audio_frame = AudioFrame {
                                         data: pcm_bytes,
@@ -169,11 +188,14 @@ pub async fn rtp_session_handler(
         }
     }
     
-    let mut writer_guard = wav_writer.lock().await;
-    if let Some(writer) = writer_guard.take() {
-        match writer.finalize() {
-            Ok(_) => info!(filename = %wav_filename, "Debug: Ses kaydı tamamlandı ve dosya kapatıldı."),
-            Err(e) => error!(error = %e, "Debug WAV dosyası finalize edilemedi."),
+    // YENİ: Sadece wav_writer varsa finalize et
+    if let Some(writer_arc) = wav_writer {
+        let mut writer_guard = writer_arc.lock().await;
+        if let Some(writer) = writer_guard.take() {
+            match writer.finalize() {
+                Ok(_) => info!(filename = %wav_filename, "Debug: Ses kaydı tamamlandı ve dosya kapatıldı."),
+                Err(e) => error!(error = %e, "Debug WAV dosyası finalize edilemedi."),
+            }
         }
     }
     
@@ -182,6 +204,7 @@ pub async fn rtp_session_handler(
     port_manager.quarantine_port(port).await;
 }
 
+// YAZIM HATASI DÜZELTMESİ (ÖNCEKİ ADIMDAN)
 fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: Option<u32>) -> Result<(Bytes, Vec<i16>), anyhow::Error> {
     const SOURCE_SAMPLE_RATE: u32 = 8000;
     
@@ -190,7 +213,7 @@ fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: Option<u32>) -> 
         .collect();
     
     let target_rate = target_sample_rate.unwrap_or(SOURCE_SAMPLE_RATE);
-    if target_rate == SOURCE_SAMPLE_rate {
+    if target_rate == SOURCE_SAMPLE_RATE {
         let mut bytes = Vec::with_capacity(pcm_samples_i16.len() * 2);
         for &sample in &pcm_samples_i16 {
             bytes.extend_from_slice(&sample.to_le_bytes());
