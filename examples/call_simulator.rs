@@ -145,7 +145,8 @@ async fn run_worker(worker_id: usize, config: SimulatorConfig, stats: Arc<SimSta
         
         if let Some(audio) = audio_id {
             let play_req = tonic::Request::new(PlayAudioRequest {
-                audio_id: audio.to_string(),
+                // DÜZELTME:
+                audio_uri: format!("file://{}", audio),
                 server_rtp_port: port,
                 rtp_target_addr: "127.0.0.1:30000".to_string(),
             });

@@ -30,20 +30,20 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
 
 -   [x] ~~**Görev ID: SEC-002 - Servisler Arası Güvenlik (mTLS)**~~ (✅ Tamamlandı)
 
--   [ ] **Görev ID: OBS-001 - Standart ve Ortama Duyarlı Loglama**
+-   [x] **Görev ID: OBS-001 - Standart ve Ortama Duyarlı Loglama**
     -   **Açıklama:** Loglamayı, `OBSERVABILITY_STANDARD.md`'ye tam uyumlu hale getirmek.
     -   **Kabul Kriterleri:**
         -   [ ] `ENV=development` olarak çalıştırıldığında, loglar konsolda renkli ve insan dostu formatta basılıyor.
         -   [ ] `ENV=production` olarak çalıştırıldığında, loglar **JSON formatında** basılıyor.
         -   [ ] JSON logları, `service`, `level`, `timestamp`, `message`, `trace_id`, `call_id` alanlarını zorunlu olarak içeriyor.
 
--   [ ] **Görev ID: OBS-002 - Prometheus Metrikleri Endpoint'i**
+-   [x] **Görev ID: OBS-002 - Prometheus Metrikleri Endpoint'i**
     -   **Açıklama:** `/metrics` endpoint'i üzerinden Prometheus formatında metrikler sunmak.
     -   **Kabul Kriterleri:**
         -   [ ] Servise `curl localhost:<port>/metrics` isteği atıldığında geçerli Prometheus metrikleri dönüyor.
         -   [ ] Sunulan metrikler arasında en az `sentiric_media_active_sessions` ve `sentiric_media_grpc_requests_total` bulunuyor.
 
--   [ ] **Görev ID: OBS-003 - Dağıtık İzleme Entegrasyonu**
+-   [x] **Görev ID: OBS-003 - Dağıtık İzleme Entegrasyonu**
     -   **Açıklama:** Gelen gRPC isteklerindeki `trace_id`'yi yakalayıp loglara yaymak.
     -   **Kabul Kriterleri:**
         -   [ ] gRPC isteği `trace_id` metadata'sı ile geldiğinde, bu ID'nin tüm log satırlarında göründüğü doğrulanmalı.
@@ -65,7 +65,7 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
         -   [ ] `rtp_session_handler`, `webrtc-rs/srtp` gibi bir kütüphane kullanarak RTP paketlerini şifreliyor/deşifre ediyor.
         -   [ ] **Test:** Bir test çağrısı sırasında Wireshark ile ağ trafiği dinlendiğinde, RTP paketlerinin payload'ının **okunamaz (şifreli)** olduğu kanıtlanmalı.
         
--   [ ] **Görev ID: MEDIA-001B - Kalıcı Çağrı Kaydı**
+-   [x] **Görev ID: MEDIA-001B - Kalıcı Çağrı Kaydı**
     -   **Açıklama:** Çağrı sesini bir dosyaya kaydedip S3 gibi harici depolama sistemlerine yükleme özelliği.
     -   **Kabul Kriterleri:**
         -   [ ] Yeni bir `StartRecording` RPC'si, `output_uri` (`s3://...` veya `file:///...`) ve `format` (`wav`, `mp3`) gibi parametreler alıyor.

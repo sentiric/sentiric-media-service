@@ -65,12 +65,11 @@ async fn main() -> Result<()> {
     // --- Adım 2: Alınan porttan anonsu çal ---
     println!("\n'PlayAudio' isteği gönderiliyor (Port: {})...", allocated_port);
     // Not: Bu ses dosyasının (welcome.wav) assets klasöründe olduğundan emin olun!
-    let audio_id_to_play = "audio/tr/welcome.wav"; // .wav uzantısı olmadan
+    let audio_id_to_play = "audio/tr/welcome.wav";
     let play_audio_request = tonic::Request::new(PlayAudioRequest {
-        audio_id: audio_id_to_play.to_string(),
+        // DÜZELTME:
+        audio_uri: format!("file://{}", audio_id_to_play),
         server_rtp_port: allocated_port,
-        // Gerçek senaryoda bu, arayanın SIP telefonunun RTP alıcı adresidir.
-        // Test için yerel bir porta gönderiyormuş gibi yapalım.
         rtp_target_addr: "127.0.0.1:30000".to_string(), 
     });
     let play_audio_response = client.play_audio(play_audio_request).await?;

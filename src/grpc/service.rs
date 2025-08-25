@@ -1,4 +1,3 @@
-// File: src/grpc/service.rs
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,18 +9,17 @@ use tonic::{Request, Response, Status};
 use tracing::{error, info, instrument, warn};
 use metrics::{counter, gauge};
 use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
-
-use sentiric_contracts::sentiric::media::v1::RecordAudioResponse;
+use hound::{WavSpec, SampleFormat};
 
 use crate::{
     AllocatePortRequest, AllocatePortResponse, MediaService, PlayAudioRequest, PlayAudioResponse,
-    ReleasePortRequest, ReleasePortResponse, RecordAudioRequest,
+    ReleasePortRequest, ReleasePortResponse, RecordAudioRequest, RecordAudioResponse,
+    StartRecordingRequest, StartRecordingResponse, StopRecordingRequest, StopRecordingResponse,
 };
 use crate::config::AppConfig;
-use crate::rtp::command::RtpCommand;
-use crate::rtp::session::rtp_session_handler;
+use crate::rtp::command::{RtpCommand, RecordingSession};
+use crate::rtp::session::{rtp_session_handler, RtpSessionConfig};
 use crate::state::AppState;
-
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -35,36 +33,21 @@ impl MyMediaService {
 }
 
 fn extract_uri_scheme(uri: &str) -> &str { 
-    if let Some(scheme_end) = uri.find(':') { 
-        &uri[..scheme_end] 
-    } else { 
-        "unknown" 
-    } 
+    if let Some(scheme_end) = uri.find(':') { &uri[..scheme_end] } else { "unknown" } 
 }
 
 fn get_trace_id_from_metadata<T>(request: &Request<T>) -> String {
-    request
-        .metadata()
-        .get("x-trace-id")
+    request.metadata().get("x-trace-id")
         .and_then(|value| value.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| "trace-id-not-found".to_string())
 }
 
-
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
-    #[instrument(
-        skip(self, request),
-        fields(
-            service = "media-service",
-            call_id = %request.get_ref().call_id,
-            trace_id = %get_trace_id_from_metadata(&request)
-        )
-    )]
+    #[instrument(skip(self, request), fields(service = "media-service", call_id = %request.get_ref().call_id, trace_id = %get_trace_id_from_metadata(&request)))]
     async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
-        
         let call_id = request.get_ref().call_id.clone();
         info!(call_id = %call_id, "Port tahsis isteği alındı.");
         const MAX_RETRIES: u8 = 5;
@@ -84,14 +67,15 @@ impl MediaService for MyMediaService {
                     gauge!(ACTIVE_SESSIONS).increment(1.0);
                     let (tx, rx) = mpsc::channel(10);
                     self.app_state.port_manager.add_session(port_to_try, tx).await;
-                    tokio::spawn(rtp_session_handler(
-                        Arc::new(socket), 
-                        rx, 
-                        self.app_state.port_manager.clone(), 
-                        self.app_state.audio_cache.clone(), 
-                        self.config.clone(), 
-                        port_to_try,
-                    ));
+                    
+                    let session_config = RtpSessionConfig {
+                        port_manager: self.app_state.port_manager.clone(),
+                        audio_cache: self.app_state.audio_cache.clone(),
+                        app_config: self.config.clone(),
+                        port: port_to_try,
+                    };
+                    
+                    tokio::spawn(rtp_session_handler(Arc::new(socket), rx, session_config));
                     return Ok(Response::new(AllocatePortResponse { rtp_port: port_to_try as u32 }));
                 },
                 Err(e) => {
@@ -125,14 +109,13 @@ impl MediaService for MyMediaService {
     #[instrument(skip(self, request), fields(port = request.get_ref().server_rtp_port, uri_scheme = extract_uri_scheme(&request.get_ref().audio_uri)))]
     async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "play_audio").increment(1);
-
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
         let tx = self.app_state.port_manager.get_session_sender(rtp_port).await.ok_or_else(|| Status::not_found(format!("Belirtilen porta ({}) ait aktif oturum yok.", rtp_port)))?;
         let target_addr = req.rtp_target_addr.parse().map_err(|e| { error!(error = %e, addr = %req.rtp_target_addr, "Geçersiz hedef adres formatı."); Status::invalid_argument("Geçersiz hedef adres formatı") })?;
         if tx.send(RtpCommand::StopAudio).await.is_err() { error!(port = rtp_port, "StopAudio komutu gönderilemedi, kanal kapalı olabilir."); return Err(Status::internal("RTP oturum kanalı kapalı.")); }
         let cancellation_token = CancellationToken::new();
-        let command = RtpCommand::PlayAudioUri { audio_uri: req.audio_uri, candidate_target_addr: target_addr, cancellation_token: cancellation_token.clone(), };
+        let command = RtpCommand::PlayAudioUri { audio_uri: req.audio_uri, candidate_target_addr: target_addr, cancellation_token: cancellation_token.clone() };
         if tx.send(command).await.is_err() { error!(port = rtp_port, "PlayAudioUri komutu gönderilemedi, kanal kapalı."); return Err(Status::internal("RTP oturum kanalı kapalı.")); }
         info!(port = rtp_port, "PlayAudio komutu sıraya alındı.");
         cancellation_token.cancelled().await;
@@ -144,7 +127,6 @@ impl MediaService for MyMediaService {
     #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
     async fn record_audio(&self, request: Request<RecordAudioRequest>) -> Result<Response<Self::RecordAudioStream>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "record_audio").increment(1);
-
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
@@ -168,5 +150,42 @@ impl MediaService for MyMediaService {
         });
 
         Ok(Response::new(Box::pin(output_stream)))
+    }
+
+    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port, uri = %request.get_ref().output_uri))]
+    async fn start_recording(&self, request: Request<StartRecordingRequest>) -> Result<Response<StartRecordingResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "start_recording").increment(1);
+        let req = request.into_inner();
+        let rtp_port = req.server_rtp_port as u16;
+        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
+            .ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
+        let spec = WavSpec {
+            channels: 1,
+            sample_rate: req.sample_rate.unwrap_or(16000),
+            bits_per_sample: 16,
+            sample_format: SampleFormat::Int,
+        };
+        let recording_session = RecordingSession {
+            output_uri: req.output_uri,
+            spec,
+            samples: Vec::new(),
+        };
+        let command = RtpCommand::StartPermanentRecording(recording_session);
+        session_tx.send(command).await.map_err(|_| Status::internal("Kalıcı kayıt komutu gönderilemedi."))?;
+        info!("Kalıcı kayıt komutu başarıyla gönderildi.");
+        Ok(Response::new(StartRecordingResponse { success: true }))
+    }
+
+    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
+    async fn stop_recording(&self, request: Request<StopRecordingRequest>) -> Result<Response<StopRecordingResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "stop_recording").increment(1);
+        let req = request.into_inner();
+        let rtp_port = req.server_rtp_port as u16;
+        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
+            .ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
+        let command = RtpCommand::StopPermanentRecording;
+        session_tx.send(command).await.map_err(|_| Status::internal("Kalıcı kayıt durdurma komutu gönderilemedi."))?;
+        info!("Kalıcı kayıt durdurma komutu başarıyla gönderildi.");
+        Ok(Response::new(StopRecordingResponse { success: true }))
     }
 }

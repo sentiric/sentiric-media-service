@@ -1555,8 +1555,8 @@ dependencies = [
 
 [[package]]
 name = "sentiric-contracts"
-version = "1.8.0"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.8.0#e6709b0393cdfe3939172dc079ffc7a8189ed602"
+version = "1.8.2"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.8.2#98ec1a5237138f8726aab8c3ddefaf63e1779be6"
 dependencies = [
  "prost",
  "serde",
@@ -1577,7 +1577,6 @@ dependencies = [
  "futures",
  "hound",
  "hyper",
- "lazy_static",
  "lewton",
  "metrics",
  "metrics-exporter-prometheus",
