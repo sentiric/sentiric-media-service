@@ -1,9 +1,16 @@
 # --- STAGE 1: Builder ---
 FROM rust:1.88-slim-bookworm AS builder
 
-# Gerekli derleme araçlarını ve YENİ olarak buf CLI'ı kuruyoruz.
+# Gerekli derleme araçlarını, buf CLI'ı ve YENİ olarak OpenSSL geliştirme dosyalarını kuruyoruz.
 RUN apt-get update && \
-    apt-get install -y protobuf-compiler git curl && \
+    apt-get install -y \
+    protobuf-compiler \
+    git \
+    curl \
+    # openssl-sys crate'inin derlenmesi için gerekli
+    libssl-dev \
+    pkg-config \
+    && \
     curl -sSL https://github.com/bufbuild/buf/releases/latest/download/buf-Linux-x86_64 -o /usr/local/bin/buf && \
     chmod +x /usr/local/bin/buf && \
     rm -rf /var/lib/apt/lists/*
