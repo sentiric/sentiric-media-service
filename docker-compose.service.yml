@@ -13,8 +13,9 @@ services:
     volumes:
       - ../sentiric-media-record:/sentiric-media-record:rw"
       - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
-    ports:
+    ports: 
       - "${MEDIA_SERVICE_PORT}:${MEDIA_SERVICE_PORT}"
+      - "${MEDIA_SERVICE_METRICS_PORT}:${MEDIA_SERVICE_METRICS_PORT}"      
       - "${MEDIA_SERVICE_GRPC_PORT}:${MEDIA_SERVICE_GRPC_PORT}"
       - "${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}:${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}/udp"
     networks: [sentiric-net]
