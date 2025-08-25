@@ -7,8 +7,9 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-// DÜZELTME: Kullanılmayan 'Instrument' import'unu kaldırıyoruz.
 use tracing::{error, info, instrument, warn};
+use metrics::{counter, gauge};
+use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
 
 use sentiric_contracts::sentiric::media::v1::RecordAudioResponse;
 
@@ -33,7 +34,6 @@ impl MyMediaService {
     }
 }
 
-// DÜZELTME: Yanlışlıkla silinen yardımcı fonksiyonu geri ekliyoruz.
 fn extract_uri_scheme(uri: &str) -> &str { 
     if let Some(scheme_end) = uri.find(':') { 
         &uri[..scheme_end] 
@@ -63,6 +63,8 @@ impl MediaService for MyMediaService {
         )
     )]
     async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
+        
         let call_id = request.get_ref().call_id.clone();
         info!(call_id = %call_id, "Port tahsis isteği alındı.");
         const MAX_RETRIES: u8 = 5;
@@ -79,6 +81,7 @@ impl MediaService for MyMediaService {
             match UdpSocket::bind(format!("{}:{}", self.config.rtp_host, port_to_try)).await {
                 Ok(socket) => {
                     info!(port = port_to_try, "Port başarıyla bağlandı ve oturum başlatılıyor.");
+                    gauge!(ACTIVE_SESSIONS).increment(1.0);
                     let (tx, rx) = mpsc::channel(10);
                     self.app_state.port_manager.add_session(port_to_try, tx).await;
                     tokio::spawn(rtp_session_handler(
@@ -104,16 +107,25 @@ impl MediaService for MyMediaService {
     
     #[instrument(skip(self), fields(port = %request.get_ref().rtp_port))]
     async fn release_port(&self, request: Request<ReleasePortRequest>) -> Result<Response<ReleasePortResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "release_port").increment(1);
+        
         let port = request.into_inner().rtp_port as u16;
         if let Some(tx) = self.app_state.port_manager.get_session_sender(port).await {
             info!(port, "Oturum sonlandırma sinyali gönderiliyor.");
-            if tx.send(RtpCommand::Shutdown).await.is_err() { warn!(port, "Shutdown komutu gönderilemedi (kanal zaten kapalı olabilir)."); }
-        } else { warn!(port, "Serbest bırakılacak oturum bulunamadı veya çoktan kapatılmış."); }
+            if tx.send(RtpCommand::Shutdown).await.is_err() { 
+                warn!(port, "Shutdown komutu gönderilemedi (kanal zaten kapalı olabilir).");
+                gauge!(ACTIVE_SESSIONS).decrement(1.0);
+            }
+        } else { 
+            warn!(port, "Serbest bırakılacak oturum bulunamadı veya çoktan kapatılmış."); 
+        }
         Ok(Response::new(ReleasePortResponse { success: true }))
     }
     
     #[instrument(skip(self, request), fields(port = request.get_ref().server_rtp_port, uri_scheme = extract_uri_scheme(&request.get_ref().audio_uri)))]
     async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "play_audio").increment(1);
+
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
         let tx = self.app_state.port_manager.get_session_sender(rtp_port).await.ok_or_else(|| Status::not_found(format!("Belirtilen porta ({}) ait aktif oturum yok.", rtp_port)))?;
@@ -131,6 +143,8 @@ impl MediaService for MyMediaService {
     type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
     #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
     async fn record_audio(&self, request: Request<RecordAudioRequest>) -> Result<Response<Self::RecordAudioStream>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "record_audio").increment(1);
+
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await

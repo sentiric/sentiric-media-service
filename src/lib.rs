@@ -4,6 +4,7 @@ pub mod grpc;
 pub mod rtp;
 pub mod audio;
 pub mod tls;
+pub mod metrics;
 
 pub use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
@@ -16,8 +17,11 @@ pub use grpc::service::MyMediaService;
 use std::sync::Arc;
 use anyhow::{Context, Result};
 use tonic::transport::Server;
-use tracing::{info, warn};
-// YENİ: Subscriber'ı ve Layer'ları daha detaylı kontrol etmek için importlar
+use std::net::SocketAddr;
+use crate::metrics::start_metrics_server;
+use tracing::{info, warn, 
+    // error
+};
 use tracing_subscriber::{
     prelude::*,
     EnvFilter,
@@ -34,35 +38,31 @@ pub async fn run() -> Result<()> {
     
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
-    // --- YENİ VE GELİŞMİŞ LOGLAMA KURULUMU ---
+    let metrics_addr = SocketAddr::new(
+        "0.0.0.0".parse().unwrap(),
+        config.metrics_port,
+    );
+    start_metrics_server(metrics_addr);
+
     let env_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(&config.rust_log))?;
     
     let subscriber = Registry::default().with(env_filter);
 
     if config.env == "development" {
-        // Geliştirme ortamı: İnsan dostu, renkli loglar
         let fmt_layer = fmt::layer()
             .with_target(true)
             .with_line_number(true)
-            // Span olaylarını (oluşturma, girme, çıkma) daha detaylı göster
             .with_span_events(FmtSpan::FULL);
-        
         subscriber.with(fmt_layer).init();
-
     } else {
-        // Üretim ortamı: Anayasaya uygun, yapılandırılmış JSON logları
         let fmt_layer = fmt::layer()
             .json()
-            // Span'lerdeki alanları JSON loglarına otomatik ekle
             .with_current_span(true)
             .with_span_list(true);
-
         subscriber.with(fmt_layer).init();
     }
-    // --- LOGLAMA KURULUMU SONU ---
     
-    // Loglamanın doğru bir şekilde başlatıldığını göstermek için bu logu taşıdık.
     info!(service_name = "sentiric-media-service", "Loglama altyapısı başlatıldı.");
     info!("Konfigürasyon başarıyla yüklendi.");
 
@@ -85,11 +85,12 @@ pub async fn run() -> Result<()> {
     let server_addr = config.grpc_listen_addr;
     info!(address = %server_addr, "Güvenli gRPC sunucusu dinlemeye başlıyor...");
 
-    Server::builder()
+    let grpc_server = Server::builder()
         .tls_config(tls_config)?
         .add_service(MediaServiceServer::new(media_service))
-        .serve_with_shutdown(server_addr, shutdown_signal())
-        .await?;
+        .serve_with_shutdown(server_addr, shutdown_signal());
+
+    grpc_server.await?;
 
     info!("Servis başarıyla durduruldu.");
     Ok(())
