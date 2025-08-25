@@ -5,7 +5,6 @@ pub mod rtp;
 pub mod audio;
 pub mod tls;
 
-// DÜZELTME: Artık AudioChunk yok, RecordAudioResponse var
 pub use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
     AllocatePortRequest, AllocatePortResponse, PlayAudioRequest, PlayAudioResponse,
@@ -20,11 +19,14 @@ use tonic::transport::Server;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-use state::PortManager;
+use state::{AppState, PortManager};
 
 
 pub async fn run() -> Result<()> {
-    dotenvy::dotenv().ok();
+    // .env dosyasını yüklemeye çalışıyoruz, hata olursa yoksayıyoruz.
+    // Artık 'development.env' dosyasını doğru formatta olduğu için bu çalışacak.
+    dotenvy::from_filename("development.env").ok();
+    dotenvy::dotenv().ok(); // Ek olarak standart .env'yi de arayabilir.
     
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
@@ -45,14 +47,15 @@ pub async fn run() -> Result<()> {
         .context("TLS konfigürasyonu yüklenemedi")?;
 
     let port_manager = PortManager::new(config.rtp_port_min, config.rtp_port_max);
+    let app_state = AppState::new(port_manager.clone());
 
-    let reclamation_manager = port_manager.clone();
+    let reclamation_manager = app_state.port_manager.clone();
     let quarantine_duration = config.rtp_port_quarantine_duration;
     tokio::spawn(async move {
         reclamation_manager.run_reclamation_task(quarantine_duration).await;
     });
 
-    let media_service = MyMediaService::new(config.clone(), port_manager);
+    let media_service = MyMediaService::new(config.clone(), app_state);
 
     info!(config = ?config, "Media Service hazırlanıyor...");
     

@@ -13,8 +13,15 @@ use sentiric_contracts::sentiric::media::v1::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Önce .env dosyasını yükleyelim ki sertifika yollarını okuyabilelim.
-    dotenvy::dotenv().ok();
+    // DEĞİŞİKLİK: .ok() yerine, sonucu kontrol edip hata varsa panic'e zorluyoruz.
+    match dotenvy::from_filename("development.env") {
+        Ok(_) => println!("'development.env' dosyası istemci için başarıyla yüklendi."),
+        Err(e) => {
+            // Test istemcisi için panic! daha uygundur, çünkü loglama altyapısı kurulmamış olabilir.
+            panic!("'development.env' dosyası yüklenemedi: {}", e);
+        }
+    };
+
     println!("--- Agent Service İstemci Simülasyonu Başlatılıyor ---");
 
     // 1. .env dosyasından gerekli sertifika yollarını ve adresi oku

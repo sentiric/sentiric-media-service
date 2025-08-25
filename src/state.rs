@@ -3,11 +3,34 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info};
+
+use crate::audio::AudioCache;
 use crate::rtp::command::RtpCommand;
 
 type SessionChannels = Arc<Mutex<HashMap<u16, mpsc::Sender<RtpCommand>>>>;
 type PortsPool = Arc<Mutex<Vec<u16>>>;
 type QuarantinedPorts = Arc<Mutex<Vec<(u16, Instant)>>>;
+
+//=================================================
+// YENİ: MERKEZİ UYGULAMA DURUMU (APPSTATE)
+//=================================================
+#[derive(Clone)]
+pub struct AppState {
+    pub port_manager: PortManager,
+    pub audio_cache: AudioCache,
+    // Gelecekte eklenecekler:
+    // pub conference_manager: ConferenceManager,
+}
+
+impl AppState {
+    pub fn new(port_manager: PortManager) -> Self {
+        Self {
+            port_manager,
+            audio_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+}
+//=================================================
 
 #[derive(Clone)]
 pub struct PortManager {
