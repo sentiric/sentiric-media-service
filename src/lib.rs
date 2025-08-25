@@ -17,30 +17,53 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use tonic::transport::Server;
 use tracing::{info, warn};
-use tracing_subscriber::EnvFilter;
+// YENİ: Subscriber'ı ve Layer'ları daha detaylı kontrol etmek için importlar
+use tracing_subscriber::{
+    prelude::*,
+    EnvFilter,
+    fmt::{self, format::FmtSpan},
+    Registry
+};
 
 use state::{AppState, PortManager};
 
 
 pub async fn run() -> Result<()> {
-    // .env dosyasını yüklemeye çalışıyoruz, hata olursa yoksayıyoruz.
-    // Artık 'development.env' dosyasını doğru formatta olduğu için bu çalışacak.
     dotenvy::from_filename("development.env").ok();
-    dotenvy::dotenv().ok(); // Ek olarak standart .env'yi de arayabilir.
+    dotenvy::dotenv().ok();
     
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
+    // --- YENİ VE GELİŞMİŞ LOGLAMA KURULUMU ---
     let env_filter = EnvFilter::try_from_default_env()
         .or_else(|_| EnvFilter::try_new(&config.rust_log))?;
     
-    let subscriber_builder = tracing_subscriber::fmt().with_env_filter(env_filter);
+    let subscriber = Registry::default().with(env_filter);
 
     if config.env == "development" {
-        subscriber_builder.with_target(true).with_line_number(true).init();
+        // Geliştirme ortamı: İnsan dostu, renkli loglar
+        let fmt_layer = fmt::layer()
+            .with_target(true)
+            .with_line_number(true)
+            // Span olaylarını (oluşturma, girme, çıkma) daha detaylı göster
+            .with_span_events(FmtSpan::FULL);
+        
+        subscriber.with(fmt_layer).init();
+
     } else {
-        subscriber_builder.json().with_current_span(true).with_span_list(true).init();
+        // Üretim ortamı: Anayasaya uygun, yapılandırılmış JSON logları
+        let fmt_layer = fmt::layer()
+            .json()
+            // Span'lerdeki alanları JSON loglarına otomatik ekle
+            .with_current_span(true)
+            .with_span_list(true);
+
+        subscriber.with(fmt_layer).init();
     }
+    // --- LOGLAMA KURULUMU SONU ---
     
+    // Loglamanın doğru bir şekilde başlatıldığını göstermek için bu logu taşıdık.
+    info!(service_name = "sentiric-media-service", "Loglama altyapısı başlatıldı.");
     info!("Konfigürasyon başarıyla yüklendi.");
 
     let tls_config = tls::load_server_tls_config().await

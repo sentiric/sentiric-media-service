@@ -7,6 +7,7 @@ use tokio::sync::mpsc;
 use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
+// DÜZELTME: Kullanılmayan 'Instrument' import'unu kaldırıyoruz.
 use tracing::{error, info, instrument, warn};
 
 use sentiric_contracts::sentiric::media::v1::RecordAudioResponse;
@@ -18,11 +19,10 @@ use crate::{
 use crate::config::AppConfig;
 use crate::rtp::command::RtpCommand;
 use crate::rtp::session::rtp_session_handler;
-// YENİ: AppState'i import ediyoruz
 use crate::state::AppState;
 
+
 pub struct MyMediaService {
-    // DEĞİŞİKLİK: Ayrı ayrı durumlar yerine tek bir AppState tutuyoruz.
     app_state: AppState,
     config: Arc<AppConfig>,
 }
@@ -32,15 +32,41 @@ impl MyMediaService {
         Self { app_state, config }
     }
 }
-fn extract_uri_scheme(uri: &str) -> &str { if let Some(scheme_end) = uri.find(':') { &uri[..scheme_end] } else { "unknown" } }
+
+// DÜZELTME: Yanlışlıkla silinen yardımcı fonksiyonu geri ekliyoruz.
+fn extract_uri_scheme(uri: &str) -> &str { 
+    if let Some(scheme_end) = uri.find(':') { 
+        &uri[..scheme_end] 
+    } else { 
+        "unknown" 
+    } 
+}
+
+fn get_trace_id_from_metadata<T>(request: &Request<T>) -> String {
+    request
+        .metadata()
+        .get("x-trace-id")
+        .and_then(|value| value.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "trace-id-not-found".to_string())
+}
+
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
-    #[instrument(skip(self, _request), fields(call_id = %_request.get_ref().call_id))]
-    async fn allocate_port(&self, _request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
+    #[instrument(
+        skip(self, request),
+        fields(
+            service = "media-service",
+            call_id = %request.get_ref().call_id,
+            trace_id = %get_trace_id_from_metadata(&request)
+        )
+    )]
+    async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
+        let call_id = request.get_ref().call_id.clone();
+        info!(call_id = %call_id, "Port tahsis isteği alındı.");
         const MAX_RETRIES: u8 = 5;
         for i in 0..MAX_RETRIES {
-            // DEĞİŞİKLİK: self.app_state.port_manager üzerinden erişim
             let port_to_try = match self.app_state.port_manager.get_available_port().await {
                 Some(p) => p,
                 None => {
@@ -54,13 +80,11 @@ impl MediaService for MyMediaService {
                 Ok(socket) => {
                     info!(port = port_to_try, "Port başarıyla bağlandı ve oturum başlatılıyor.");
                     let (tx, rx) = mpsc::channel(10);
-                    // DEĞİŞİKLİK: self.app_state.port_manager üzerinden erişim
                     self.app_state.port_manager.add_session(port_to_try, tx).await;
                     tokio::spawn(rtp_session_handler(
                         Arc::new(socket), 
                         rx, 
                         self.app_state.port_manager.clone(), 
-                        // DEĞİŞİKLİK: app_state üzerinden audio_cache'e erişim
                         self.app_state.audio_cache.clone(), 
                         self.config.clone(), 
                         port_to_try,
@@ -69,7 +93,6 @@ impl MediaService for MyMediaService {
                 },
                 Err(e) => {
                     warn!(port = port_to_try, error = %e, "Porta bağlanılamadı, karantinaya alınıp başka port denenecek.");
-                    // DEĞİŞİKLİK: self.app_state.port_manager üzerinden erişim
                     self.app_state.port_manager.quarantine_port(port_to_try).await;
                     continue;
                 }
@@ -82,7 +105,6 @@ impl MediaService for MyMediaService {
     #[instrument(skip(self), fields(port = %request.get_ref().rtp_port))]
     async fn release_port(&self, request: Request<ReleasePortRequest>) -> Result<Response<ReleasePortResponse>, Status> {
         let port = request.into_inner().rtp_port as u16;
-        // DEĞİŞİKLİK: self.app_state.port_manager üzerinden erişim
         if let Some(tx) = self.app_state.port_manager.get_session_sender(port).await {
             info!(port, "Oturum sonlandırma sinyali gönderiliyor.");
             if tx.send(RtpCommand::Shutdown).await.is_err() { warn!(port, "Shutdown komutu gönderilemedi (kanal zaten kapalı olabilir)."); }
@@ -94,7 +116,6 @@ impl MediaService for MyMediaService {
     async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
-        // DEĞİŞİKLİK: self.app_state.port_manager üzerinden erişim
         let tx = self.app_state.port_manager.get_session_sender(rtp_port).await.ok_or_else(|| Status::not_found(format!("Belirtilen porta ({}) ait aktif oturum yok.", rtp_port)))?;
         let target_addr = req.rtp_target_addr.parse().map_err(|e| { error!(error = %e, addr = %req.rtp_target_addr, "Geçersiz hedef adres formatı."); Status::invalid_argument("Geçersiz hedef adres formatı") })?;
         if tx.send(RtpCommand::StopAudio).await.is_err() { error!(port = rtp_port, "StopAudio komutu gönderilemedi, kanal kapalı olabilir."); return Err(Status::internal("RTP oturum kanalı kapalı.")); }
@@ -112,7 +133,6 @@ impl MediaService for MyMediaService {
     async fn record_audio(&self, request: Request<RecordAudioRequest>) -> Result<Response<Self::RecordAudioStream>, Status> {
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
-        // DEĞİŞİKLİK: self.app_state.port_manager üzerinden erişim
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
         
