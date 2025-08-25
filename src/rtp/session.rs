@@ -1,6 +1,8 @@
 // File: sentiric-media-service/src/rtp/session.rs
 use std::net::SocketAddr;
 use std::sync::Arc;
+// YENİ: std::env'i import ediyoruz
+use std::env;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, Mutex};
 use tokio_util::sync::CancellationToken;
@@ -16,7 +18,6 @@ use crate::rtp::stream::send_announcement_from_uri;
 use crate::state::PortManager;
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
 
-// YENİ: ULAW_TO_PCM tablosunu yeni modülümüzden import ediyoruz.
 use crate::rtp::codecs::ULAW_TO_PCM;
 
 #[instrument(skip_all, fields(rtp_port = port))]
@@ -30,11 +31,19 @@ pub async fn rtp_session_handler(
 ) {
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
     
-    // WAV dosyasını oluştur
-    let wav_filename = format!("/tmp/call_dump_port_{}.wav", port);
+    // DEĞİŞİKLİK: Platforma özel geçici dosya dizinini kullanıyoruz.
+    // Windows'ta C:\Users\YourUser\AppData\Local\Temp gibi bir yer olacak.
+    // Linux'ta /tmp olacak.
+    let mut temp_path = env::temp_dir();
+    temp_path.push(format!("call_dump_port_{}.wav", port));
+    let wav_filename = temp_path.to_string_lossy().to_string();
+
     let spec = WavSpec {
         channels: 1,
-        sample_rate: 16000,
+        // ÖNEMLİ DÜZELTME: Debug WAV dosyasının örnekleme oranını,
+        // process_audio_chunk'in ürettiği orana göre ayarlamalıyız.
+        // Şimdilik 16000 varsayıyoruz, çünkü genellikle bu hedeflenir.
+        sample_rate: 16000, 
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
@@ -160,7 +169,6 @@ pub async fn rtp_session_handler(
         }
     }
     
-    // WAV dosyasını düzgünce kapat
     let mut writer_guard = wav_writer.lock().await;
     if let Some(writer) = writer_guard.take() {
         match writer.finalize() {
@@ -182,7 +190,7 @@ fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: Option<u32>) -> 
         .collect();
     
     let target_rate = target_sample_rate.unwrap_or(SOURCE_SAMPLE_RATE);
-    if target_rate == SOURCE_SAMPLE_RATE {
+    if target_rate == SOURCE_SAMPLE_rate {
         let mut bytes = Vec::with_capacity(pcm_samples_i16.len() * 2);
         for &sample in &pcm_samples_i16 {
             bytes.extend_from_slice(&sample.to_le_bytes());
