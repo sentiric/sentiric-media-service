@@ -24,7 +24,17 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
 
 ---
 
-### **Faz 1 & 1.5: Güvenli ve Gözlemlenebilir Omurga**
+### **FAZ 1: Uçtan Uca Akış Desteği**
+
+-   [ ] **Görev ID: AI-001 - Canlı Ses Akışını Çoğaltma (`RecordAudio`)**
+    -   **Açıklama:** Gelen RTP akışını anlık olarak bir gRPC stream'i olarak `agent-service`'e aktarmak. Bu, canlı STT entegrasyonu için **kritiktir**.
+    -   **Kabul Kriterleri:**
+        -   [ ] `RecordAudio` RPC'si, gelen ses paketlerini `AudioFrame` mesajları olarak gRPC stream'ine yazmalı.
+        -   [ ] `agent-service`, bu stream'i tüketerek anlık ses verisini alabildiğini kanıtlamalı.
+        -   [ ] Bu işlem sırasında, orijinal RTP akışının karşı tarafa iletiminde **kesinti olmadığı** doğrulanmalı.
+
+
+### **Faz 1.5: Güvenli ve Gözlemlenebilir Omurga**
 
 **Amaç:** Servisin, platformun temel güvenlik ve izlenebilirlik standartlarını karşılamasını sağlamak.
 
@@ -57,6 +67,13 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
 
 -   [x] ~~**Görev ID: MEDIA-000 - Temel Port ve Session Yönetimi**~~ (✅ Tamamlandı)
 -   [x] ~~**Görev ID: MEDIA-001A - Medya Oynatma (`PlayAudio`)**~~ (✅ Tamamlandı)
+
+-   [x] **Görev ID: MEDIA-001B - Kalıcı Çağrı Kaydı**
+    -   **Açıklama:** Çağrı sesini bir dosyaya kaydedip S3 gibi harici depolama sistemlerine yükleme özelliği.
+    -   **Kabul Kriterleri:**
+        -   [x] Yeni `StartRecording` ve `StopRecording` RPC'leri implemente edildi.
+        -   [x] Servis, gelen RTP akışını `wav` formatında bir dosyaya yazıyor.
+        -   [x] Kayıt, asenkron olarak ve ana medya döngüsünü bloke etmeden yapılıyor.
 
 -   [ ] **Görev ID: SEC-001 - Güvenli Medya Akışı (SRTP Desteği)**
     -   **Açıklama:** Medya akışını SRTP ile şifrelemek.
