@@ -18,7 +18,7 @@ services:
     networks: [sentiric-net]
     restart: always
     healthcheck:
-      test: ["CMD", "nc", -z, "localhost", "50052"]
+      test: ["CMD", "nc", "-z", "localhost", "50052"]
       interval: 10s
       timeout: 5s
       retries: 5
