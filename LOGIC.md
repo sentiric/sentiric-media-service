@@ -16,14 +16,19 @@ Bu servis, platformun dış dünya ile **sesli iletişim kurmasını** sağlayan
 
 ---
 
-## 2. Temel Çalışma Prensibi: Port Yönetimi ve RTP Oturumları
+## 2. Temel Çalışma Prensibi: Merkezi Durum ve Bağımsız Oturumlar
 
-Servis, her bir çağrı için bağımsız bir "RTP Oturumu" yönetir.
+Servis, `AppState` adında merkezi bir paylaşılan durum (`state`) ve her bir çağrı için bağımsız bir "RTP Oturumu" (`Tokio Task`) mantığıyla çalışır.
 
-*   **Port Tahsisi (`AllocatePort`):** `sip-signaling-service` bir çağrı başlattığında, bu servisten bir UDP portu talep eder. `media-service`, havuzundan uygun bir port bulur, bu portu dinleyecek bir `rtp_session_handler` (Tokio task) başlatır ve port numarasını geri döner.
-*   **Komut İşleme:** Başlatılan her `rtp_session_handler`, bir komut kanalı (mpsc channel) üzerinden komutları dinler. `agent-service`'ten gelen `PlayAudio` veya `RecordAudio` gibi komutlar bu kanala gönderilir.
-*   **Medya Akışı:** Oturum yöneticisi, aldığı komuta göre ya belirtilen ses dosyasını RTP paketlerine çevirip kullanıcıya gönderir ya da kullanıcıdan gelen RTP paketlerini alıp `agent-service`'e stream eder.
-*   **Port Serbest Bırakma (`ReleasePort`):** Çağrı bittiğinde, `sip-signaling-service` bu RPC'yi çağırır. İlgili oturum yöneticisine `Shutdown` komutu gönderilir, task sonlanır ve kullanılan port karantinaya alınır.
+*   **`AppState` (Merkezi Durum):** `PortManager` (kullanılabilir/karantinadaki portlar) ve `AudioCache` (hafızadaki ses dosyaları) gibi tüm servis genelindeki kaynakları tutan `Arc<Mutex<...>>` yapısıdır.
+*   **Port Tahsisi (`AllocatePort`):** `sip-signaling-service` bir çağrı başlattığında, bu servisten bir UDP portu talep eder. `media-service`, `AppState`'teki `PortManager`'dan uygun bir port bulur, bu portu dinleyecek bir `rtp_session_handler` (Tokio task) başlatır ve port numarasını geri döner.
+*   **Komut İşleme:** Başlatılan her `rtp_session_handler`, bir komut kanalı (mpsc channel) üzerinden komutları dinler. `agent-service`'ten gelen `PlayAudio`, `RecordAudio`, `StartRecording` gibi komutlar bu kanala gönderilir.
+*   **Medya Akışı ve İşleme:** Oturum yöneticisi, aldığı komuta göre:
+    *   `file://` URI'si için sesi önbellekten/disk'ten okur.
+    *   `data:` URI'si için sesi Base64'ten çözümler.
+    *   Bu sesi RTP paketlerine çevirip kullanıcıya gönderir (konuşma).
+    *   Kullanıcıdan gelen RTP paketlerini alıp PCM verisine çevirir ve `agent-service`'e stream eder (dinleme).
+*   **Port Serbest Bırakma (`ReleasePort`):** Çağrı bittiğinde, ilgili oturum yöneticisine `Shutdown` komutu gönderilir, task sonlanır ve port `AppState`'teki `PortManager` tarafından karantinaya alınır.
 
 ---
 
@@ -31,32 +36,26 @@ Servis, her bir çağrı için bağımsız bir "RTP Oturumu" yönetir.
 
 ### Senaryo 1: Anons Çalma (`PlayAudio`)
 
+Bu senaryo, hem diskteki bir dosyayı (`file://`) hem de TTS tarafından üretilen anlık sesi (`data:`) çalmayı kapsar.
+
 ```mermaid
 sequenceDiagram
-    participant AgentService as Agent Service
-    participant MediaService as Media Service (gRPC)
-    participant RtpSession as RTP Oturumu (Tokio Task)
-    participant User as Kullanıcı Telefonu
+    participant A as Agent Service
+    participant M as Media Service
+    participant R as RTP Oturumu
+    participant U as Kullanıcı
 
-    AgentService->>MediaService: PlayAudio(port=10100, audio_uri="file://...")
-    
-    Note right of MediaService: İsteği alır ve doğru <br> RTP Oturumunun komut <br> kanalını bulur.
-
-    MediaService->>RtpSession: RtpCommand::PlayAudioUri
-    
-    Note right of RtpSession: Ses dosyasını diskten/önbellekten okur, <br> RTP paketlerine çevirir.
-
-    RtpSession->>User: RTP Paketleri (UDP)
-    
-    Note left of User: Anonsu duyar.
-    
-    Note right of RtpSession: Anons bittiğinde veya <br> yeni komut geldiğinde <br> `cancellation_token` ile işlemi sonlandırır.
-    
-    RtpSession-->>MediaService: (token.cancelled() ile)
-    MediaService-->>AgentService: 200 OK (Akış tamamlandı)
+    A->>M: PlayAudio(port=10100, audio_uri)
+    M->>R: RtpCommand::PlayAudioUri
+    Note right of R: Base64 verisini işler<br>RTP paketlerine çevirir
+    R->>U: RTP Paketleri (UDP)
+    Note left of U: Anonsu duyar
+    R->>M: SessionComplete
+    M->>A: 200 OK
 ```
 
-### Senaryo 2: Canlı Ses Kaydı/Akışı (RecordAudio)
+### Senaryo 2: Canlı Ses Akışı (`RecordAudio`)
+
 ```mermaid
 sequenceDiagram
     participant AgentService as Agent Service
@@ -73,3 +72,35 @@ sequenceDiagram
     Note right of RtpSession: Gelen RTP paketlerini <br> PCM ses verisine çevirir.
     RtpSession->>AgentService: (gRPC Stream üzerinden) <br> Anlık Ses Verisi (AudioFrame)
 ```
+
+### Senaryo 3: Kalıcı Çağrı Kaydı (`StartRecording`/`StopRecording`)
+
+```mermaid
+sequenceDiagram
+    participant A as Agent Service
+    participant M as Media Service
+    participant R as RTP Oturumu
+    participant F as Dosya Sistemi
+
+    A->>M: StartRecording(port=10100, output_uri)
+    M->>R: RtpCommand::StartPermanentRecording
+    Note over R: RTP paketlerini bellekte<br>biriktirmeye başlar
+
+    A->>M: StopRecording(port=10100)
+    M->>R: RtpCommand::StopPermanentRecording
+    Note right of R: Kaydı sonlandırır ve<br>ses verisini kaydeder
+
+    R->>F: WAV dosyasını yazar
+```
+
+---
+
+## 4. Kritik Tasarım Kararları ve Faydaları
+
+*   **Tokio Task'ler ve Kanallar:** Her RTP oturumunun bağımsız bir Tokio Task olarak çalışması, bir çağrıdaki sorunun diğer çağrıları etkilememesini sağlar (hata izolasyonu). Kanallar, task'ler arasında güvenli ve verimli iletişim sağlar.
+*   **Port Karantinası:** Bir port serbest bırakıldığında hemen kullanıma açılmaz, belirli bir süre karantinada kalır. Bu, ağ üzerinde hala bu porta gönderilmekte olan "geç kalmış" paketlerin (late packets) yeni bir çağrıya karışmasını önler.
+*   **Ses Önbelleği (AudioCache):** Sık kullanılan ses dosyalarının RAM'de tutulması, her oynatma isteğinde diske erişim gereksinimini ortadan kaldırarak gecikmeyi (latency) büyük ölçüde azaltır ve IO yükünü hafifletir.
+*   **URI Esnekliği:** `file://` ve `data:` URI şemalarını desteklemek, servise hem önceden kaydedilmiş hem de dinamik olarak (TTS'ten) üretilmiş sesleri oynatma esnekliği kazandırır.
+*   **İptal Token'ları:** Uzun süren ses oynatma işlemleri, yeni bir komut geldiğinde (örneğin kullanıcı konuşmaya başladı) hemen iptal edilebilir. Bu, doğal ve kesintisiz bir konuşma akışı sağlamak için kritiktir.
+
+Bu mimari, yüksek eşzamanlı çağrı hacmini karşılamak için hafif, ölçeklenebilir ve hataya dayanıklı bir medya işleme katmanı sunar.
