@@ -26,6 +26,12 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
 
 ### **FAZ 1: Uçtan Uca Akış Desteği**
 
+-   [ ] **Görev ID: MEDIA-003 - Fazla Konuşkan Loglamayı Düzeltme (KRİTİK & ACİL)**
+    -   **Açıklama:** `src/lib.rs` dosyasındaki `tracing` yapılandırmasını, `OBSERVABILITY_STANDARD.md`'ye uygun hale getir.
+    -   **Kabul Kriterleri:**
+        -   [ ] `ENV=production` veya `free` modunda, `RUST_LOG=info` ayarıyla çalışırken, loglarda artık `enter`, `exit`, `new`, `close` gibi span olayları **görünmemelidir**.
+        -   [ ] `ENV=development` modunda, `RUST_LOG=debug` ayarıyla çalışırken, bu detaylı span olayları hata ayıklama için **görünür olmalıdır**.
+        
 -   [ ] **Görev ID: AI-001 - Canlı Ses Akışını Çoğaltma (`RecordAudio`)**
     -   **Açıklama:** Gelen RTP akışını anlık olarak bir gRPC stream'i olarak `agent-service`'e aktarmak. Bu, canlı STT entegrasyonu için **kritiktir**.
     -   **Kabul Kriterleri:**
