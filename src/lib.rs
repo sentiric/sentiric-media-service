@@ -42,11 +42,21 @@ pub async fn run() -> Result<()> {
         .or_else(|_| EnvFilter::try_new(&config.rust_log))?;
     let subscriber = Registry::default().with(env_filter);
 
+    // OLMASI GEREKEN DOĞRU KOD:
     if config.env == "development" {
-        let fmt_layer = fmt::layer().with_target(true).with_line_number(true).with_span_events(FmtSpan::FULL);
+        let fmt_layer = fmt::layer()
+            // .with_target(true)
+            // .with_line_number(true)
+            // DEBUG ve TRACE seviyelerinde detaylı span olaylarını göster
+            // .with_span_events(FmtSpan::FULL); 
+            .with_span_events(FmtSpan::NONE);
         subscriber.with(fmt_layer).init();
     } else {
-        let fmt_layer = fmt::layer().json().with_current_span(true).with_span_list(true);
+        let fmt_layer = fmt::layer()
+            .json()
+            .with_current_span(true)
+            // Production'da INFO seviyesinde span olaylarını GİZLE
+            .with_span_events(FmtSpan::NONE); 
         subscriber.with(fmt_layer).init();
     }
     
