@@ -1,20 +1,73 @@
 // examples/recording_client.rs
-
 use anyhow::Result;
 use std::env;
-use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+use std::net::UdpSocket;
+use std::time::Duration;
+use webrtc_util::marshal::Marshal;
+
 use sentiric_contracts::sentiric::media::v1::{
     media_service_client::MediaServiceClient,
     AllocatePortRequest, ReleasePortRequest, StartRecordingRequest, StopRecordingRequest
 };
-use tokio::time::{sleep, Duration};
+use tokio::time::sleep;
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
+use rtp::packet::Packet;
+use rand::Rng;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::from_filename("development.env").ok();
-    println!("--- Kalıcı Kayıt İstemci Simülasyonu Başlatılıyor ---");
+    println!("--- Gerçek Kayıt Simülasyonu (Programatik RTP Akışı ile) ---");
 
-    // --- TLS ve Kanal Kurulumu (agent_client ile aynı) ---
+    let mut client = connect_to_media_service().await?;
+
+    let allocate_res = client.allocate_port(AllocatePortRequest {
+        call_id: format!("real-rec-call-{}", rand::random::<u32>()),
+    }).await?;
+    let rtp_port = allocate_res.into_inner().rtp_port;
+
+    let output_path = format!("/sentiric-media-record/real_sound_on_port_{}.wav", rtp_port);
+    let output_uri = format!("file://{}", output_path);
+    
+    println!("\nAdım 1: Kayıt başlatılıyor. Hedef: {}", output_uri);
+    client.start_recording(StartRecordingRequest {
+        server_rtp_port: rtp_port,
+        output_uri,
+        sample_rate: Some(8000),
+        format: Some("wav".to_string()),
+    }).await?;
+    println!("✅ Kayıt başlatma komutu gönderildi.");
+
+    println!("\nAdım 2: Ayrı bir task üzerinden RTP ses akışı başlatılıyor...");
+
+    let rtp_target_ip = env::var("MEDIA_SERVICE_RTP_TARGET_IP")
+    .unwrap_or_else(|_| "127.0.0.1".to_string());
+
+    let rtp_stream_handle = tokio::spawn(async move {
+        send_test_rtp_stream(&rtp_target_ip, rtp_port as u16).await;
+    });
+    
+    println!("(Ana task, ses akışının tamamlanması için 5 saniye bekliyor...)");
+    sleep(Duration::from_secs(5)).await;
+
+    rtp_stream_handle.await?;
+
+    println!("\nAdım 3: Kayıt durduruluyor...");
+    client.stop_recording(StopRecordingRequest { server_rtp_port: rtp_port }).await?;
+    println!("✅ Kayıt durdurma komutu gönderildi.");
+
+    sleep(Duration::from_secs(1)).await;
+
+    println!("\nAdım 4: Port serbest bırakılıyor...");
+    client.release_port(ReleasePortRequest { rtp_port }).await?;
+    println!("✅ Port serbest bırakıldı.");
+    
+    println!("\n--- Simülasyon Tamamlandı ---");
+    println!("İçinde ses olması gereken kayıt dosyası ana makinedeki `./sentiric-media-record/` dizininde oluşturuldu.");
+    Ok(())
+}
+
+async fn connect_to_media_service() -> Result<MediaServiceClient<Channel>> {
     let client_cert_path = env::var("AGENT_SERVICE_CERT_PATH")?;
     let client_key_path = env::var("AGENT_SERVICE_KEY_PATH")?;
     let ca_path = env::var("GRPC_TLS_CA_PATH")?;
@@ -30,59 +83,60 @@ async fn main() -> Result<()> {
     
     println!("Media Service'e bağlanılıyor: {}", server_addr);
     let channel = Channel::from_shared(server_addr)?.tls_config(tls_config)?.connect().await?;
-    let mut client = MediaServiceClient::new(channel);
     println!("✅ Bağlantı başarılı!");
+    Ok(MediaServiceClient::new(channel))
+}
 
-    // --- SENARYO ---
+async fn send_test_rtp_stream(host: &str, port: u16) {
+    // Basit bir sinüs dalgası ses örneği (PCM mu-law formatında)
+    let test_audio_payload: [u8; 160] = [
+        0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d,
+        0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93,
+        0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec,
+        0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3,
+        0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82,
+        0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd,
+        0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd,
+        0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82,
+        0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3,
+        0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec
+    ];
 
-    // 1. Bir port al
-    println!("\nAdım 1: Port tahsis ediliyor...");
-    let allocate_res = client.allocate_port(AllocatePortRequest {
-        call_id: format!("rec-call-{}", rand::random::<u32>()),
-    }).await?;
-    let rtp_port = allocate_res.into_inner().rtp_port;
-    println!("✅ Port tahsis edildi: {}", rtp_port);
+    let target_addr = format!("{}:{}", host, port);
+    println!("[RTP Gönderici] Hedef: {}", target_addr);
+
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[RTP Gönderici] Soket oluşturulamadı: {}", e);
+            return;
+        }
+    };
     
-    // 2. Kaydı başlat
-    // Windows için: "C:/Users/YourUser/Desktop/test_kayit.wav" gibi bir yol kullanabilirsiniz.
-    // Dizinlerin var olduğundan emin olun veya kodu test edin. Şimdilik geçici dizini kullanalım.
-    let mut save_path = env::temp_dir();
-    save_path.push("sentiric_recordings");
-    save_path.push(format!("rec_port_{}.wav", rtp_port));
-    // Dosya URI şemasına çeviriyoruz
-    let output_uri = format!("file:///{}", save_path.to_string_lossy().replace('\\', "/"));
+    let mut packet = Packet {
+        header: rtp::header::Header {
+            version: 2,
+            payload_type: 0, // PCMU
+            sequence_number: rand::thread_rng().gen(),
+            timestamp: rand::thread_rng().gen(),
+            ssrc: rand::thread_rng().gen(),
+            ..Default::default()
+        },
+        payload: Vec::from(test_audio_payload).into(),
+    };
 
-    println!("\nAdım 2: Kayıt başlatılıyor. Hedef: {}", output_uri);
-    client.start_recording(StartRecordingRequest {
-        server_rtp_port: rtp_port,
-        output_uri: output_uri.clone(),
-        sample_rate: Some(16000),
-        format: Some("wav".to_string()),
-    }).await?;
-    println!("✅ Kayıt başlatma komutu gönderildi.");
-
-    // 3. Bir süre bekle (bu sırada softphone ile ses gönderebilirsiniz)
-    println!("\n(Kayıt için 5 saniye bekleniyor... Bu sırada localhost:{} adresine ses gönderebilirsiniz)", rtp_port);
-    sleep(Duration::from_secs(5)).await;
-
-    // 4. Kaydı durdur
-    println!("\nAdım 3: Kayıt durduruluyor...");
-    client.stop_recording(StopRecordingRequest {
-        server_rtp_port: rtp_port,
-    }).await?;
-    println!("✅ Kayıt durdurma komutu gönderildi.");
-
-    // Kaydın diske yazılması için kısa bir süre daha bekle
-    sleep(Duration::from_secs(1)).await;
-
-    // 5. Portu serbest bırak
-    println!("\nAdım 4: Port serbest bırakılıyor...");
-    client.release_port(ReleasePortRequest {
-        rtp_port,
-    }).await?;
-    println!("✅ Port serbest bırakıldı.");
-    
-    println!("\n--- Simülasyon Tamamlandı ---");
-    println!("Kayıt dosyası şu yolda olmalı: {}", save_path.display());
-    Ok(())
+    println!("[RTP Gönderici] 2 saniye boyunca ses gönderiliyor...");
+    for _ in 0..100 {
+        let packet_bytes = packet.marshal().unwrap();
+        if let Err(e) = socket.send_to(&packet_bytes, &target_addr) {
+            eprintln!("[RTP Gönderici] Paket gönderilemedi: {}", e);
+            break;
+        }
+        
+        packet.header.sequence_number = packet.header.sequence_number.wrapping_add(1);
+        packet.header.timestamp = packet.header.timestamp.wrapping_add(160);
+        
+        sleep(Duration::from_millis(20)).await;
+    }
+    println!("[RTP Gönderici] Ses gönderme tamamlandı.");
 }

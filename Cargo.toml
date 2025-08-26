@@ -1,40 +1,58 @@
+### File: sentiric-media-service/Cargo.toml (EN HAFİF SÜRÜM) ###
+
 [package]
 name = "sentiric-media-service"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Temel Asenkron ve gRPC
 tokio = { version = "1", features = ["full"] }
+tonic = { version = "0.11.0", features = ["tls"] }
 prost = "0.12.3"
+futures = "0.3.30"
+tokio-stream = { version = "0.1.15", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["full"] }
+
+# Loglama ve Gözlemlenebilirlik
 tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "registry"] }
-dotenvy = "0.15.7"
-rand = "0.8.5"
-hound = "3.5.1"
-bytes = "1.5.0"
-rtp = "0.6.8"
-backtrace = "0.3.72"
-futures = "0.3.30"
-anyhow = "1.0.81"
-rustls = "0.22.4"
-rustls-pemfile = "2.1.0"
-tokio-rustls = "0.25.0"
-tonic = { version = "0.11.0", features = ["tls"] }
-chrono = "0.4.31"
-base64 = "0.22.1"
-rubato = "0.14.1"
-lewton = "0.10.2"
-symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
-tokio-util = { version = "0.7", features = ["full"] }
-tokio-stream = { version = "0.1.15", features = ["sync"] }
 metrics = "0.22.0"
 metrics-exporter-prometheus = "0.13.1"
 hyper = { version = "0.14", features = ["full"] }
+
+# Konfigürasyon ve Hata Yönetimi
+dotenvy = "0.15.7"
+anyhow = "1.0.81"
+
+# Medya İşleme
+rtp = "0.6.8"
+hound = "3.5.1"
+bytes = "1.5.0"
+rubato = "0.14.1"
+symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
 webrtc-util = { version = "0.7.0", features = ["marshal"] }
+
+# TLS
+rustls = "0.22.4"
+rustls-pemfile = "2.1.0"
+tokio-rustls = "0.25.0"
+
+# Yardımcı Kütüphaneler
+rand = "0.8.5"
+chrono = "0.4.31"
+base64 = "0.22.1"
+backtrace = "0.3.72"
+
+# --- YENİ EKLENEN KAYIT BAĞIMLILIKLARI ---
+# async trait problemini çözmek için
+# async-trait kütüphanesini hala trait kullanacağımız için tutuyoruz.
+async-trait = "0.1.80"
+# url'yi de URI parse etmek için tutuyoruz, bu hafif bir kütüphane.
+url = "2.5.0" 
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-# KONTRAKTIN YENİ VERSİYONU
 tag = "v1.8.2" 
 package = "sentiric-contracts"
 

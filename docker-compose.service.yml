@@ -1,17 +1,14 @@
-# docker-compose.service.yml
-# Geliştirme ortamı
+### docker-compose.service.yml
 
 networks:
   sentiric-net: { name: "${NETWORK_NAME:-sentiric-net}", driver: bridge }
 
-
 services:
-  # --- TELEKOM & MEDYA KATMANI ---
   media-service:
     build: { context: ../sentiric-media-service }
     env_file: ["${ENV_FILE_PATH}"]
     volumes:
-      - ../sentiric-media-record:/sentiric-media-record:rw"
+      - ../sentiric-media-record:"${MEDIA_SERVICE_RECORD_BASE_PATH}":rw
       - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
     ports: 
       - "${MEDIA_SERVICE_PORT}:${MEDIA_SERVICE_PORT}"
@@ -21,7 +18,7 @@ services:
     networks: [sentiric-net]
     restart: always
     healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "50052"]
+      test: ["CMD", "nc", -z, "localhost", "50052"]
       interval: 10s
       timeout: 5s
       retries: 5

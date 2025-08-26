@@ -1,3 +1,4 @@
+// src/lib.rs
 pub mod config;
 pub mod state;
 pub mod grpc;

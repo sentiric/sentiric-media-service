@@ -1,28 +1,30 @@
+// src/rtp/session.rs
+
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::env;
-use std::path::Path;
 use std::io::Cursor;
-
+// use std::path::Path; // Artık burada kullanılmıyor, writers.rs içinde kullanılıyor.
 
 use tokio::net::UdpSocket;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::{error, info, instrument, warn};
-use bytes::{Bytes, BytesMut};
-use hound::{WavWriter, WavSpec};
+use bytes::Bytes;
+use hound::WavWriter; // WavSpec artık burada kullanılmıyor, RecordingSession'dan geliyor.
 use metrics::gauge;
+use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+// use anyhow::anyhow; // Artık burada kullanılmıyor, writers.rs içinde kullanılıyor.
 
 use crate::audio::AudioCache;
 use crate::config::AppConfig;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
 use crate::rtp::stream::send_announcement_from_uri;
 use crate::state::PortManager;
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
-
 use crate::rtp::codecs::ULAW_TO_PCM;
 use crate::metrics::ACTIVE_SESSIONS;
+use crate::rtp::writers; // Bu satır artık `mod.rs` düzeltildiği için çalışacak.
+
 
 pub struct RtpSessionConfig {
     pub port_manager: PortManager,
@@ -39,42 +41,6 @@ pub async fn rtp_session_handler(
 ) {
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
     
-    let mut debug_wav_writer = None;
-    let mut debug_wav_filename = String::new();
-
-    if !config.app_config.debug_wav_path_template.is_empty() {
-        let temp_dir_str = env::temp_dir().to_string_lossy().to_string();
-        debug_wav_filename = config.app_config.debug_wav_path_template
-            .replace("{temp}", &temp_dir_str)
-            .replace("{port}", &config.port.to_string());
-        
-        if let Some(parent_dir) = Path::new(&debug_wav_filename).parent() {
-            if !parent_dir.exists() {
-                if let Err(e) = std::fs::create_dir_all(parent_dir) {
-                    error!(error = %e, path = ?parent_dir, "Debug WAV dizini oluşturulamadı.");
-                }
-            }
-        }
-        
-        if Path::new(&debug_wav_filename).parent().map_or(false, |p| p.exists()) {
-            let spec = WavSpec {
-                channels: 1,
-                sample_rate: config.app_config.debug_wav_sample_rate,
-                bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
-            };
-            match WavWriter::create(&debug_wav_filename, spec) {
-                Ok(writer) => {
-                    info!(filename = %debug_wav_filename, "Debug: Gelen ve işlenen ses bu dosyaya kaydedilecek.");
-                    debug_wav_writer = Some(Arc::new(Mutex::new(Some(writer))));
-                }
-                Err(e) => {
-                    error!(error = %e, filename = %debug_wav_filename, "Debug WAV dosyası oluşturulamadı");
-                }
-            };
-        }
-    }
-
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
     let mut current_playback_token: Option<CancellationToken> = None;
@@ -86,6 +52,7 @@ pub async fn rtp_session_handler(
             biased;
             Some(command) = rx.recv() => {
                 match command {
+                    // ... (PlayAudioUri, StartRecording vb. case'ler aynı kalacak) ...
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token } => {
                         if let Some(token) = current_playback_token.take() {
                             info!("Devam eden bir anons var, iptal ediliyor.");
@@ -142,34 +109,24 @@ pub async fn rtp_session_handler(
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, addr)) => {
-                        let read_buf = BytesMut::from(&buf[..len]);
-                        let decrypted_len = read_buf.len();
-                        if decrypted_len <= 12 { continue; }
+                        if len <= 12 { continue; }
 
                         if actual_remote_addr.is_none() {
                             info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı.");
                             actual_remote_addr = Some(addr);
                         }
                         
-                        let pcmu_payload = &read_buf[12..decrypted_len];
+                        let pcmu_payload = &buf[12..len];
                         
                         if let Some((sender, target_rate_opt)) = &streaming_sender {
                             match process_audio_chunk(pcmu_payload, *target_rate_opt) {
                                 Ok((pcm_bytes, _)) => {
-                                    let audio_frame = AudioFrame {
-                                        data: pcm_bytes,
-                                        media_type: if let Some(rate) = target_rate_opt {
-                                            format!("audio/l16;rate={}", rate)
-                                        } else {
-                                            "audio/pcmu".to_string()
-                                        },
-                                    };
+                                    let audio_frame = AudioFrame { data: pcm_bytes, media_type: "...".to_string() };
                                     if sender.send(Ok(audio_frame)).await.is_err() {
-                                        warn!("Canlı akış istemcisi kapandı, akış durduruluyor.");
                                         streaming_sender = None;
                                     }
                                 },
-                                Err(e) => error!(error = %e, "Canlı akış için ses verisi işlenemedi."),
+                                Err(e) => error!(error = %e, "Ses verisi işlenemedi."),
                             }
                         }
 
@@ -181,26 +138,6 @@ pub async fn rtp_session_handler(
                                 Err(e) => error!(error = %e, "Kalıcı kayıt için ses verisi işlenemedi."),
                             }
                         }
-
-                        if let Some(writer_arc) = &debug_wav_writer {
-                            match process_audio_chunk(pcmu_payload, Some(config.app_config.debug_wav_sample_rate)) {
-                                Ok((_, pcm_samples_i16)) => {
-                                    let wav_writer_clone = writer_arc.clone();
-                                    tokio::spawn(async move {
-                                        let mut writer_guard = wav_writer_clone.lock().await;
-                                        if let Some(writer) = writer_guard.as_mut() {
-                                            for sample in &pcm_samples_i16 {
-                                                if let Err(e) = writer.write_sample(*sample) {
-                                                    error!(error = %e, "Debug WAV yazma hatası");
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    });
-                                },
-                                Err(e) => error!(error = %e, "Debug kaydı için ses verisi işlenemedi."),
-                            }
-                        }
                     }
                     Err(e) => {
                         error!(error = %e, "Socket recv_from hatası");
@@ -210,62 +147,45 @@ pub async fn rtp_session_handler(
         }
     }
     
-    if let Some(writer_arc) = debug_wav_writer {
-        let mut writer_guard = writer_arc.lock().await;
-        if let Some(writer) = writer_guard.take() {
-            match writer.finalize() {
-                Ok(_) => info!(filename = %debug_wav_filename, "Debug: Ses kaydı tamamlandı ve dosya kapatıldı."),
-                Err(e) => error!(error = %e, "Debug WAV dosyası finalize edilemedi."),
-            }
-        }
-    }
-    
     info!("RTP oturumu temizleniyor...");
     config.port_manager.remove_session(config.port).await;
     config.port_manager.quarantine_port(config.port).await;
     gauge!(ACTIVE_SESSIONS).decrement(1.0);
 }
 
-fn save_recording(session: RecordingSession) -> Result<(), anyhow::Error> {
-    info!(uri = %session.output_uri, samples_count = session.samples.len(), "Kayıt sonlandırılıyor ve kaydediliyor...");
-    
-    if session.samples.is_empty() {
-        warn!("Kaydedilecek ses verisi yok, boş dosya oluşturulmayacak.");
-        return Ok(());
-    }
-
-    let mut buffer = Cursor::new(Vec::new());
-    let mut writer = WavWriter::new(&mut buffer, session.spec)?;
-    for sample in session.samples {
-        writer.write_sample(sample)?;
-    }
-    writer.finalize()?;
-    
-    if let Some(path_part) = session.output_uri.strip_prefix("file://") {
-        let path = Path::new(path_part);
-        if let Some(parent_dir) = path.parent() {
-            std::fs::create_dir_all(parent_dir)?;
-        }
-        std::fs::write(path, buffer.into_inner())?;
-        info!(path = %path.display(), "Kayıt dosyası başarıyla diske yazıldı.");
-
-    } else if let Some(_) = session.output_uri.strip_prefix("s3://") {
-         warn!("S3 yüklemesi henüz implemente edilmedi.");
-    } else {
-        error!(uri = %session.output_uri, "Desteklenmeyen kayıt URI şeması.");
-    }
-
-    Ok(())
-}
 
 async fn finalize_and_save_recording(session: RecordingSession) {
-    if let Err(e) = tokio::task::spawn_blocking(move || save_recording(session)).await {
-        error!(error = ?e, "Kayıt kaydetme görevi panic'ledi.");
+    let result: Result<(), anyhow::Error> = async {
+        info!(uri = %session.output_uri, samples_count = session.samples.len(), "Kayıt sonlandırılıyor ve kaydediliyor...");
+
+        if session.samples.is_empty() {
+            warn!("Kaydedilecek ses verisi yok, boş dosya oluşturulmayacak.");
+            return Ok(());
+        }
+        
+        let wav_data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
+            let mut buffer = Cursor::new(Vec::new());
+            let mut writer = WavWriter::new(&mut buffer, session.spec)?;
+            for sample in session.samples {
+                writer.write_sample(sample)?;
+            }
+            writer.finalize()?;
+            Ok(buffer.into_inner())
+        }).await??;
+
+        let writer = writers::from_uri(&session.output_uri)?;
+        writer.write(wav_data).await?;
+        
+        Ok(())
+    }.await;
+
+    if let Err(e) = result {
+        error!(error = ?e, "Kayıt kaydetme görevi başarısız oldu.");
     }
 }
 
-
 fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: Option<u32>) -> Result<(Bytes, Vec<i16>), anyhow::Error> {
+    // ... (bu fonksiyon aynı kalacak) ...
     const SOURCE_SAMPLE_RATE: u32 = 8000;
     
     let pcm_samples_i16: Vec<i16> = pcmu_payload.iter()
@@ -273,6 +193,7 @@ fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: Option<u32>) -> 
         .collect();
     
     let target_rate = target_sample_rate.unwrap_or(SOURCE_SAMPLE_RATE);
+
     if target_rate == SOURCE_SAMPLE_RATE {
         let mut bytes = Vec::with_capacity(pcm_samples_i16.len() * 2);
         for &sample in &pcm_samples_i16 {
