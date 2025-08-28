@@ -1,3 +1,5 @@
+// File: src/grpc/service.rs (GÜNCELLENMİŞ)
+
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -125,30 +127,48 @@ impl MediaService for MyMediaService {
 
     type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
     #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
-    async fn record_audio(&self, request: Request<RecordAudioRequest>) -> Result<Response<Self::RecordAudioStream>, Status> {
+    async fn record_audio(
+        &self,
+        request: Request<RecordAudioRequest>,
+    ) -> Result<Response<Self::RecordAudioStream>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "record_audio").increment(1);
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
-        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
-            .ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
         
-        let (stream_tx, stream_rx) = mpsc::channel(32);
-        
-        let command = RtpCommand::StartRecording {
+        info!("Canlı ses kaydı stream isteği alındı.");
+
+        // İlgili RTP oturumunun komut kanalını bul.
+        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port)
+            .await
+            .ok_or_else(|| Status::not_found(format!("Belirtilen porta ({}) ait aktif oturum yok.", rtp_port)))?;
+
+        // 1. gRPC stream'i için yeni bir mpsc kanalı oluştur.
+        // Kanal boyutu (buffer), ağda anlık yığılmalar olursa ses verisinin kaybolmasını önler.
+        let (stream_tx, stream_rx) = mpsc::channel(64);
+
+        // 2. RTP oturumuna, ses verisini bu yeni kanala göndermesi için komut yolla.
+        let command = RtpCommand::StartLiveAudioStream {
             stream_sender: stream_tx,
             target_sample_rate: req.target_sample_rate,
         };
 
-        session_tx.send(command).await.map_err(|_| Status::internal("Kayıt başlatma komutu gönderilemedi."))?;
-        info!("Ses kaydı stream'i başlatıldı.");
-        
+        if session_tx.send(command).await.is_err() {
+            error!(port = rtp_port, "Canlı kayıt başlatma komutu RTP oturumuna gönderilemedi.");
+            return Err(Status::internal("RTP oturumuyla iletişim kurulamadı."));
+        }
+
+        info!("RTP oturumuna canlı ses akışını başlatma komutu gönderildi.");
+
+        // 3. Kanalın alıcı ucunu, istemciye döneceğimiz stream'e dönüştür.
         let output_stream = ReceiverStream::new(stream_rx).map(|res| {
+            // Kanalda gelen AudioFrame'i, gRPC'nin RecordAudioResponse'una çevir.
             res.map(|frame| RecordAudioResponse {
                 audio_data: frame.data.into(),
                 media_type: frame.media_type,
             })
         });
 
+        // 4. Stream'i response olarak dön.
         Ok(Response::new(Box::pin(output_stream)))
     }
 

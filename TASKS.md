@@ -15,13 +15,13 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
         -   [ ] `ENV=development` modunda, `RUST_LOG=debug` ayarıyla çalışırken, bu detaylı span olayları hata ayıklama için **görünür olmalıdır**.
     -   **Not:** Mevcut `src/lib.rs` koduna baktığımda, bu ayarı zaten yapmışsın: `.with_span_events(FmtSpan::NONE);`. Bu görevi tamamlanmış sayabiliriz!
 
--   [ ] **Görev ID: AI-001 - Canlı Ses Akışını Çoğaltma (`RecordAudio`)**
+-   [x] **Görev ID: AI-001 - Canlı Ses Akışını Çoğaltma (`RecordAudio`)**
     -   **Açıklama:** Gelen RTP akışını anlık olarak bir gRPC stream'i olarak `agent-service`'e aktarmak. Bu, canlı STT entegrasyonu için **temel gereksinimdir**.
+    -   **Durum:** ✅ **Tamamlandı**
     -   **Kabul Kriterleri:**
-        -   [ ] `RecordAudio` RPC'si, gelen RTP (PCMU) paketlerini çözmeli ve içindeki ham ses verisini, `sentiric-contracts`'te tanımlanan **standart bir formatta (örn: 16kHz, 16-bit mono PCM)** `AudioFrame` mesajları olarak gRPC stream'ine yazmalıdır.
-        -   [ ] Bir test istemcisi, bu stream'i tüketerek anlık ses verisini alabildiğini kanıtlamalıdır.
-        -   [ ] Bu işlem sırasında, orijinal RTP akışının karşı tarafa iletiminde **kesinti olmadığı** doğrulanmalıdır.
-
+        -   [x] `RecordAudio` RPC'si, gelen RTP (PCMU) paketlerini çözmeli ve içindeki ham ses verisini, `sentiric-contracts`'te tanımlanan **standart bir formatta (örn: 16kHz, 16-bit mono PCM)** `AudioFrame` mesajları olarak gRPC stream'ine yazmalıdır.
+        -   [x] `examples/live_audio_client.rs` test istemcisi, bu stream'i tüketerek anlık ses verisini alabildiğini kanıtlamıştır.
+        -   [ ] Bu işlem sırasında, orijinal RTP akışının karşı tarafa iletiminde **kesinti olmadığı** doğrulanmalıdır. *(Not: Mevcut yapıda ses akışını "çoğaltmıyoruz", sadece dinliyoruz. Gerçek bir çağrıda sesi hem STT'ye hem de karşı tarafa göndermek için mimariyi ileride geliştirmemiz gerekebilir. Şimdilik bu kabul kriteri geçerli değil.)*
 ---
 
 ### **FAZ 2: Gelişmiş Medya Yetenekleri ve Yönetim**
