@@ -1,9 +1,19 @@
-// src/config.rs (TEMİZLENMİŞ SÜRÜM) ###
+// File: src/config.rs (GÜNCELLENMİŞ)
 
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
 use anyhow::{Result, Context, bail};
+
+// S3Config'e bucket_name eklendi
+#[derive(Debug, Clone)]
+pub struct S3Config {
+    pub endpoint_url: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub bucket_name: String, // YENİ: Kayıtların yapılacağı bucket adı
+}
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -16,7 +26,7 @@ pub struct AppConfig {
     pub env: String,
     pub rust_log: String,
     pub metrics_port: u16,
-    // pub recording_base_path: String,
+    pub s3_config: Option<S3Config>,
 }
 
 impl AppConfig {
@@ -46,7 +56,19 @@ impl AppConfig {
             .unwrap_or_else(|_| "9091".to_string())
             .parse()
             .context("MEDIA_SERVICE_METRICS_PORT geçerli bir sayı olmalı")?;
-            
+        
+        let s3_config = if env::var("S3_ENDPOINT_URL").is_ok() {
+            Some(S3Config {
+                endpoint_url: env::var("S3_ENDPOINT_URL").context("S3_ENDPOINT_URL eksik")?,
+                region: env::var("S3_REGION").context("S3_REGION eksik")?,
+                access_key_id: env::var("S3_ACCESS_KEY_ID").context("S3_ACCESS_KEY_ID eksik")?,
+                secret_access_key: env::var("S3_SECRET_ACCESS_KEY").context("S3_SECRET_ACCESS_KEY eksik")?,
+                // YENİ: S3_BUCKET_NAME ortam değişkenini oku
+                bucket_name: env::var("S3_BUCKET_NAME").context("S3_BUCKET_NAME eksik")?,
+            })
+        } else {
+            None
+        };
 
         Ok(AppConfig {
             grpc_listen_addr: format!("[::]:{}", grpc_port).parse()?,
@@ -58,6 +80,7 @@ impl AppConfig {
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             metrics_port,
+            s3_config,
         })
     }
 }

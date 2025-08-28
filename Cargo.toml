@@ -1,4 +1,4 @@
-### File: sentiric-media-service/Cargo.toml (EN HAFİF SÜRÜM) ###
+### File: sentiric-media-service/Cargo.toml (SON VE DOĞRU SÜRÜM) ###
 
 [package]
 name = "sentiric-media-service"
@@ -45,11 +45,14 @@ base64 = "0.22.1"
 backtrace = "0.3.72"
 
 # --- YENİ EKLENEN KAYIT BAĞIMLILIKLARI ---
-# async trait problemini çözmek için
-# async-trait kütüphanesini hala trait kullanacağımız için tutuyoruz.
 async-trait = "0.1.80"
-# url'yi de URI parse etmek için tutuyoruz, bu hafif bir kütüphane.
 url = "2.5.0" 
+
+# --- S3/Cloudflare R2 BAĞIMLILIKLARI ---
+aws-config = "1.1.8"
+aws-sdk-s3 = "1.20.0"
+http-body = "0.4.5" # aws-sdk-s3'nin ByteStream'i için gerekli
+aws-credential-types = "1.1.8" # EKSİK OLAN VE ŞİMDİ EKLENEN BAĞIMLILIK
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"

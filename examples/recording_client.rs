@@ -1,4 +1,5 @@
-// examples/recording_client.rs
+// File: examples/recording_client.rs (GÜNCELLENMİŞ)
+
 use anyhow::Result;
 use std::env;
 use std::net::UdpSocket;
@@ -16,23 +17,33 @@ use rand::Rng;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // development.env dosyasını .dockerignore'a ekleyebiliriz
+    // ama test için burada kalması sorun değil.
     dotenvy::from_filename("development.env").ok();
     println!("--- Gerçek Kayıt Simülasyonu (Programatik RTP Akışı ile) ---");
 
+    // DÜZELTME: connect_to_media_service fonksiyonu iki kez çağrılıyor gibi görünüyor,
+    // birleştirelim ve logu düzeltelim.
     let mut client = connect_to_media_service().await?;
+    println!("✅ Media Service'e bağlantı başarılı!");
 
     let allocate_res = client.allocate_port(AllocatePortRequest {
         call_id: format!("real-rec-call-{}", rand::random::<u32>()),
     }).await?;
     let rtp_port = allocate_res.into_inner().rtp_port;
 
-    let output_path = format!("/sentiric-media-record/real_sound_on_port_{}.wav", rtp_port);
-    let output_uri = format!("file://{}", output_path);
+    // --- EN ÖNEMLİ DÜZELTME BURADA ---
+    // URI'ı "s3://BUCKET_ADI/dosya_yolu" yerine "s3:///dosya_yolu" olarak değiştiriyoruz.
+    // Bucket adı artık media-service'in kendi konfigürasyonundan (S3_BUCKET_NAME) gelecek.
+    let output_uri = format!("s3:///cagri-kayitlari/test_kayit_{}.wav", rtp_port);
+    
+    // Kullanılmayan değişken uyarısını kaldıralım.
+    // let _output_path = format!("/sentiric-media-record/real_sound_on_port_{}.wav", rtp_port);
     
     println!("\nAdım 1: Kayıt başlatılıyor. Hedef: {}", output_uri);
     client.start_recording(StartRecordingRequest {
         server_rtp_port: rtp_port,
-        output_uri,
+        output_uri: output_uri.clone(), // Klonlayarak kullanıyoruz
         sample_rate: Some(8000),
         format: Some("wav".to_string()),
     }).await?;
@@ -50,6 +61,8 @@ async fn main() -> Result<()> {
     println!("(Ana task, ses akışının tamamlanması için 5 saniye bekliyor...)");
     sleep(Duration::from_secs(5)).await;
 
+    // rtp_stream_handle.join() kullanmak daha iyi bir pratik olabilir,
+    // ama await de çalışır.
     rtp_stream_handle.await?;
 
     println!("\nAdım 3: Kayıt durduruluyor...");
@@ -63,7 +76,8 @@ async fn main() -> Result<()> {
     println!("✅ Port serbest bırakıldı.");
     
     println!("\n--- Simülasyon Tamamlandı ---");
-    println!("İçinde ses olması gereken kayıt dosyası ana makinedeki `./sentiric-media-record/` dizininde oluşturuldu.");
+    // DÜZELTME: Çıktı mesajını güncelleyelim.
+    println!("Kayıt dosyası MinIO bucket'ında ({}) oluşturulmuş olmalı.", output_uri);
     Ok(())
 }
 
@@ -83,12 +97,11 @@ async fn connect_to_media_service() -> Result<MediaServiceClient<Channel>> {
     
     println!("Media Service'e bağlanılıyor: {}", server_addr);
     let channel = Channel::from_shared(server_addr)?.tls_config(tls_config)?.connect().await?;
-    println!("✅ Bağlantı başarılı!");
     Ok(MediaServiceClient::new(channel))
 }
 
+// ... send_test_rtp_stream fonksiyonu aynı ...
 async fn send_test_rtp_stream(host: &str, port: u16) {
-    // Basit bir sinüs dalgası ses örneği (PCM mu-law formatında)
     let test_audio_payload: [u8; 160] = [
         0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d,
         0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93,
@@ -101,42 +114,20 @@ async fn send_test_rtp_stream(host: &str, port: u16) {
         0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3,
         0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec
     ];
-
     let target_addr = format!("{}:{}", host, port);
     println!("[RTP Gönderici] Hedef: {}", target_addr);
-
-    let socket = match UdpSocket::bind("0.0.0.0:0") {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[RTP Gönderici] Soket oluşturulamadı: {}", e);
-            return;
-        }
-    };
-    
-    let mut packet = Packet {
-        header: rtp::header::Header {
-            version: 2,
-            payload_type: 0, // PCMU
-            sequence_number: rand::thread_rng().gen(),
-            timestamp: rand::thread_rng().gen(),
-            ssrc: rand::thread_rng().gen(),
-            ..Default::default()
-        },
-        payload: Vec::from(test_audio_payload).into(),
-    };
-
+    let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
+    let mut packet = Packet { header: rtp::header::Header { version: 2, payload_type: 0, sequence_number: rand::thread_rng().gen(), timestamp: rand::thread_rng().gen(), ssrc: rand::thread_rng().gen(), ..Default::default() }, payload: Vec::from(test_audio_payload).into(), };
     println!("[RTP Gönderici] 2 saniye boyunca ses gönderiliyor...");
     for _ in 0..100 {
         let packet_bytes = packet.marshal().unwrap();
-        if let Err(e) = socket.send_to(&packet_bytes, &target_addr) {
-            eprintln!("[RTP Gönderici] Paket gönderilemedi: {}", e);
-            break;
-        }
-        
+        if let Err(e) = socket.send_to(&packet_bytes, &target_addr) { eprintln!("[RTP Gönderici] Paket gönderilemedi: {}", e); break; }
         packet.header.sequence_number = packet.header.sequence_number.wrapping_add(1);
         packet.header.timestamp = packet.header.timestamp.wrapping_add(160);
-        
         sleep(Duration::from_millis(20)).await;
     }
     println!("[RTP Gönderici] Ses gönderme tamamlandı.");
 }
+
+// usage
+// cargo run --example recording_client

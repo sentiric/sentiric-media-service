@@ -1,9 +1,8 @@
-// src/rtp/session.rs
+// File: src/rtp/session.rs (GÜNCELLENMİŞ)
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::io::Cursor;
-// use std::path::Path; // Artık burada kullanılmıyor, writers.rs içinde kullanılıyor.
 
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -11,10 +10,9 @@ use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::{error, info, instrument, warn};
 use bytes::Bytes;
-use hound::WavWriter; // WavSpec artık burada kullanılmıyor, RecordingSession'dan geliyor.
+use hound::WavWriter;
 use metrics::gauge;
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
-// use anyhow::anyhow; // Artık burada kullanılmıyor, writers.rs içinde kullanılıyor.
 
 use crate::audio::AudioCache;
 use crate::config::AppConfig;
@@ -23,8 +21,7 @@ use crate::rtp::stream::send_announcement_from_uri;
 use crate::state::PortManager;
 use crate::rtp::codecs::ULAW_TO_PCM;
 use crate::metrics::ACTIVE_SESSIONS;
-use crate::rtp::writers; // Bu satır artık `mod.rs` düzeltildiği için çalışacak.
-
+use crate::rtp::writers;
 
 pub struct RtpSessionConfig {
     pub port_manager: PortManager,
@@ -52,7 +49,6 @@ pub async fn rtp_session_handler(
             biased;
             Some(command) = rx.recv() => {
                 match command {
-                    // ... (PlayAudioUri, StartRecording vb. case'ler aynı kalacak) ...
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token } => {
                         if let Some(token) = current_playback_token.take() {
                             info!("Devam eden bir anons var, iptal ediliyor.");
@@ -80,7 +76,7 @@ pub async fn rtp_session_handler(
                     RtpCommand::StopPermanentRecording => {
                         info!("Kalıcı kayıt durduruluyor...");
                         if let Some(session) = permanent_recording_session.take() {
-                            tokio::spawn(finalize_and_save_recording(session));
+                            tokio::spawn(finalize_and_save_recording(session, config.app_config.clone()));
                         } else {
                             warn!("Durdurulacak aktif bir kalıcı kayıt bulunamadı.");
                         }
@@ -97,7 +93,7 @@ pub async fn rtp_session_handler(
                             token.cancel();
                         }
                         if let Some(session) = permanent_recording_session.take() {
-                            tokio::spawn(finalize_and_save_recording(session));
+                            tokio::spawn(finalize_and_save_recording(session, config.app_config.clone()));
                         }
                         if let Some((sender, _)) = streaming_sender.take() {
                             drop(sender);
@@ -121,8 +117,9 @@ pub async fn rtp_session_handler(
                         if let Some((sender, target_rate_opt)) = &streaming_sender {
                             match process_audio_chunk(pcmu_payload, *target_rate_opt) {
                                 Ok((pcm_bytes, _)) => {
-                                    let audio_frame = AudioFrame { data: pcm_bytes, media_type: "...".to_string() };
+                                    let audio_frame = AudioFrame { data: pcm_bytes, media_type: "audio/L16;rate=16000".to_string() };
                                     if sender.send(Ok(audio_frame)).await.is_err() {
+                                        info!("gRPC stream alıcısı kapandı, kayıt durduruluyor.");
                                         streaming_sender = None;
                                     }
                                 },
@@ -153,8 +150,7 @@ pub async fn rtp_session_handler(
     gauge!(ACTIVE_SESSIONS).decrement(1.0);
 }
 
-
-async fn finalize_and_save_recording(session: RecordingSession) {
+async fn finalize_and_save_recording(session: RecordingSession, config: Arc<AppConfig>) {
     let result: Result<(), anyhow::Error> = async {
         info!(uri = %session.output_uri, samples_count = session.samples.len(), "Kayıt sonlandırılıyor ve kaydediliyor...");
 
@@ -164,6 +160,7 @@ async fn finalize_and_save_recording(session: RecordingSession) {
         }
         
         let wav_data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
+            // DÜZELTME: Vec<new>() -> Vec::new()
             let mut buffer = Cursor::new(Vec::new());
             let mut writer = WavWriter::new(&mut buffer, session.spec)?;
             for sample in session.samples {
@@ -173,7 +170,7 @@ async fn finalize_and_save_recording(session: RecordingSession) {
             Ok(buffer.into_inner())
         }).await??;
 
-        let writer = writers::from_uri(&session.output_uri)?;
+        let writer = writers::from_uri(&session.output_uri, &config).await?;
         writer.write(wav_data).await?;
         
         Ok(())
@@ -185,7 +182,6 @@ async fn finalize_and_save_recording(session: RecordingSession) {
 }
 
 fn process_audio_chunk(pcmu_payload: &[u8], target_sample_rate: Option<u32>) -> Result<(Bytes, Vec<i16>), anyhow::Error> {
-    // ... (bu fonksiyon aynı kalacak) ...
     const SOURCE_SAMPLE_RATE: u32 = 8000;
     
     let pcm_samples_i16: Vec<i16> = pcmu_payload.iter()

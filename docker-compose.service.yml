@@ -3,7 +3,28 @@
 networks:
   sentiric-net: { name: "${NETWORK_NAME:-sentiric-net}", driver: bridge }
 
+volumes:
+  minio_data:
+
 services:
+
+  minio:
+    image: quay.io/minio/minio
+    env_file: ["${ENV_FILE_PATH}"]
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_API_PORT}:9000" # S3 API portu
+      - "${MINIO_CONSOLE_PORT}:9001" # Web arayüzü portu
+    volumes:
+      - minio_data:/data
+    networks:
+      - sentiric-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+    
   media-service:
     build: { context: ../sentiric-media-service }
     env_file: ["${ENV_FILE_PATH}"]

@@ -1,4 +1,4 @@
-# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v4.1)
+# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v4.2)
 
 Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanımlanan rolünü eksiksiz bir şekilde yerine getirmesi için gereken tüm görevleri, projenin resmi fazlarına ve aciliyet durumuna göre yeniden düzenlenmiş bir şekilde listeler.
 
@@ -13,6 +13,7 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
     -   **Kabul Kriterleri:**
         -   [ ] `ENV=production` veya `free` modunda, `RUST_LOG=info` ayarıyla çalışırken, loglarda artık `enter`, `exit`, `new`, `close` gibi span olayları **görünmemelidir**.
         -   [ ] `ENV=development` modunda, `RUST_LOG=debug` ayarıyla çalışırken, bu detaylı span olayları hata ayıklama için **görünür olmalıdır**.
+    -   **Not:** Mevcut `src/lib.rs` koduna baktığımda, bu ayarı zaten yapmışsın: `.with_span_events(FmtSpan::NONE);`. Bu görevi tamamlanmış sayabiliriz!
 
 -   [ ] **Görev ID: AI-001 - Canlı Ses Akışını Çoğaltma (`RecordAudio`)**
     -   **Açıklama:** Gelen RTP akışını anlık olarak bir gRPC stream'i olarak `agent-service`'e aktarmak. Bu, canlı STT entegrasyonu için **temel gereksinimdir**.
@@ -25,11 +26,20 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
 
 ### **FAZ 2: Gelişmiş Medya Yetenekleri ve Yönetim**
 
-**Amaç:** Platformun çağrı yönetimi yeteneklerini zenginleştirmek ve daha güvenli hale getirmek.
+**Amaç:** Platformun çağrı yönetimi yeteneklerini zenginleştirmek, production ortamına hazırlamak ve daha güvenli hale getirmek.
 
 -   [x] **Görev ID: MEDIA-001B - Kalıcı Çağrı Kaydı**
     -   **Açıklama:** Çağrı sesini bir dosyaya kaydetme özelliği.
     -   **Durum:** ✅ **Tamamlandı**
+    -   **Geliştirme Notu (28.08.2025):** Bu özellik, S3-uyumlu nesne depolama hedeflerini (AWS S3, Cloudflare R2, MinIO vb.) destekleyecek şekilde genişletildi.
+
+-   [x] **Görev ID: DEVOPS-001 - Lokal S3 Simülasyon Ortamı (YENİ GÖREV)**
+    -   **Açıklama:** Geliştirme ve test süreçlerini hızlandırmak için `docker-compose`'a MinIO (S3 simülatörü) entegrasyonu yapmak.
+    -   **Durum:** ✅ **Tamamlandı**
+    -   **Kabul Kriterleri:**
+        -   [x] `docker-compose` içinde `minio` servisi tanımlandı.
+        -   [x] `media-service`, ortam değişkenleri aracılığıyla yerel MinIO hedefine kayıt yapabiliyor.
+        -   [x] Altyapı, farklı profillerde (lokal vs cloud) farklı S3 hedeflerini destekleyecek şekilde esnek yapılandırıldı.
 
 -   [ ] **Görev ID: SEC-001 - Güvenli Medya Akışı (SRTP Desteği)**
     -   **Açıklama:** Medya akışını SRTP ile şifreleyerek çağrıların dinlenmesini engellemek.
@@ -37,6 +47,15 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
         -   [ ] `AllocatePort` RPC'si veya yeni bir `AllocateSecurePort` RPC'si, SRTP için gerekli şifreleme anahtarlarını (`master key` ve `salt`) alabilmelidir.
         -   [ ] `rtp_session_handler`, `webrtc-rs/srtp` gibi bir kütüphane kullanarak RTP paketlerini şifrelemeli/deşifre etmelidir.
         -   [ ] **Test:** Bir test çağrısı sırasında Wireshark ile ağ trafiği dinlendiğinde, RTP paketlerinin payload'ının **okunamaz (şifreli)** olduğu kanıtlanmalıdır.
+
+-   [ ] **Görev ID: OBS-001 - Metriklerin Detaylandırılması (YENİ GÖREV)**
+    -   **Açıklama:** Servisin anlık durumu ve performansı hakkında daha fazla bilgi edinmek için Prometheus metriklerini zenginleştirmek.
+    -   **Durum:** ⬜ Planlandı.
+    -   **Kabul Kriterleri:**
+        -   [ ] `sentiric_media_port_pool_available_count` (kullanılabilir port sayısı) anlık olarak raporlanmalı.
+        -   [ ] `sentiric_media_port_pool_quarantined_count` (karantinadaki port sayısı) anlık olarak raporlanmalı.
+        -   [ ] `sentiric_media_recording_saved_total` (başarıyla kaydedilen toplam çağrı sayısı) sayacı eklenmeli. Bu sayaç, `storage_type` (file, s3) etiketiyle ayrıştırılabilmeli.
+        -   [ ] `sentiric_media_recording_failed_total` (kaydedilemeyen çağrı sayısı) sayacı eklenmeli.
 
 ---
 

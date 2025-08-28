@@ -1,22 +1,28 @@
-// src/rtp/writers.rs (EN HAFİF SÜRÜM) ###
+// File: src/rtp/writers.rs (NİHAİ DÜZELTME)
 
-use anyhow::{anyhow, Result};
-use std::path::Path;
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use tracing::{info, instrument, warn};
+use aws_config::meta::region::RegionProviderChain;
+use aws_config::{BehaviorVersion, Region};
+use aws_credential_types::Credentials;
+use aws_sdk_s3::config::Builder as S3ConfigBuilder; // YENİ İMPORT
+use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client as S3Client;
+use std::path::Path;
+use tracing::info;
+use url::Url;
+
+use crate::config::AppConfig;
 
 #[async_trait]
 pub trait AsyncRecordingWriter: Send + Sync {
     async fn write(&self, data: Vec<u8>) -> Result<()>;
 }
 
-struct FileWriter {
-    path: String,
-}
-
+// ... FileWriter aynı ...
+struct FileWriter { path: String }
 #[async_trait]
 impl AsyncRecordingWriter for FileWriter {
-    #[instrument(skip(self, data), fields(path = %self.path))]
     async fn write(&self, data: Vec<u8>) -> Result<()> {
         let path = Path::new(&self.path);
         if let Some(parent_dir) = path.parent() {
@@ -28,13 +34,79 @@ impl AsyncRecordingWriter for FileWriter {
     }
 }
 
-// from_uri fonksiyonu artık sadece file:// şemasını tanır.
-pub fn from_uri(uri_str: &str) -> Result<Box<dyn AsyncRecordingWriter>> {
-    if let Some(path_part) = uri_str.strip_prefix("file://") {
-        Ok(Box::new(FileWriter { path: path_part.to_string() }))
-    } else {
-        // s3:// gibi bilinmeyen bir şema gelirse, bunu loglayıp hata dönelim.
-        warn!("Desteklenmeyen kayıt URI şeması alındı: {}", uri_str);
-        Err(anyhow!("Desteklenmeyen kayıt URI şeması: {}. Şimdilik sadece 'file://' desteklenmektedir.", uri_str))
+
+struct S3Writer {
+    client: S3Client,
+    bucket: String,
+    key: String,
+}
+
+#[async_trait]
+impl AsyncRecordingWriter for S3Writer {
+    // ... write fonksiyonu aynı ...
+    async fn write(&self, data: Vec<u8>) -> Result<()> {
+        let body = ByteStream::from(data);
+        self.client.put_object().bucket(&self.bucket).key(&self.key).body(body).send().await.context("S3'ye obje yüklenemedi")?;
+        info!("Kayıt dosyası başarıyla S3 bucket'ına yazıldı.");
+        Ok(())
+    }
+}
+
+pub async fn from_uri(
+    uri_str: &str,
+    config: &AppConfig,
+) -> Result<Box<dyn AsyncRecordingWriter>> {
+    let uri = Url::parse(uri_str).context("Geçersiz kayıt URI formatı")?;
+
+    match uri.scheme() {
+        "file" => {
+            // ... file kısmı aynı ...
+            let path = uri.to_file_path().map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
+            Ok(Box::new(FileWriter {
+                path: path.to_string_lossy().to_string(),
+            }))
+        }
+        "s3" => {
+            let s3_config = config.s3_config.as_ref().ok_or_else(|| {
+                anyhow!("S3 URI'si belirtildi ancak S3 konfigürasyonu ortamda bulunamadı.")
+            })?;
+
+            let bucket = s3_config.bucket_name.clone();
+            let key = uri.path().trim_start_matches('/').to_string();
+
+            if key.is_empty() {
+                return Err(anyhow!("S3 URI'sinde dosya yolu (key) belirtilmelidir."));
+            }
+            
+            let region_provider = RegionProviderChain::first_try(Region::new(s3_config.region.clone()));
+            
+            let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+                .region(region_provider)
+                .endpoint_url(&s3_config.endpoint_url)
+                .credentials_provider(Credentials::new(
+                    &s3_config.access_key_id,
+                    &s3_config.secret_access_key,
+                    None,
+                    None,
+                    "Static",
+                ))
+                .load()
+                .await;
+
+            // --- EN ÖNEMLİ DEĞİŞİKLİK BURADA ---
+            // S3 client'ının path-style adreslemeyi kullanmasını zorunlu kılıyoruz.
+            let s3_client_config = S3ConfigBuilder::from(&sdk_config)
+                .force_path_style(true)
+                .build();
+            let client = S3Client::from_conf(s3_client_config);
+            // --- DEĞİŞİKLİK SONU ---
+
+            Ok(Box::new(S3Writer {
+                client,
+                bucket,
+                key,
+            }))
+        }
+        scheme => Err(anyhow!("Desteklenmeyen kayıt URI şeması: {}", scheme)),
     }
 }
