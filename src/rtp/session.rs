@@ -1,6 +1,5 @@
-// File: src/rtp/session.rs (GÜNCELLENMİŞ)
+// File: src/rtp/session.rs
 
-// ... (use ifadeleri ve diğer struct'lar aynı kalacak) ...
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::io::Cursor;
@@ -21,6 +20,7 @@ use crate::state::PortManager;
 use crate::rtp::codecs::ULAW_TO_PCM;
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::writers;
+use anyhow::Context; // <<< DÜZELTME BURADA: Gerekli trait'i scope'a dahil ediyoruz.
 
 pub struct RtpSessionConfig {
     pub port_manager: PortManager,
@@ -40,10 +40,7 @@ pub async fn rtp_session_handler(
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
     let mut current_playback_token: Option<CancellationToken> = None;
-    
-    // YENİ: Canlı ses akışının gönderileceği kanalı ve ayarları tutacak değişken.
     let mut live_stream_sender: Option<(mpsc::Sender<Result<AudioFrame, Status>>, Option<u32>)> = None;
-    
     let mut permanent_recording_session: Option<RecordingSession> = None;
 
     loop {
@@ -67,22 +64,16 @@ pub async fn rtp_session_handler(
                             cancellation_token,
                         ));
                     },
-
-                    // YENİ: Canlı akış başlatma komutunu işle.
                     RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate } => {
                         info!(target_rate = ?target_sample_rate, "Gerçek zamanlı ses akışı komutu alındı.");
-                        // Varsa eski stream'i durdurup yenisiyle değiştiriyoruz.
                         live_stream_sender = Some((stream_sender, target_sample_rate));
                     },
-
-                    // YENİ: Canlı akış durdurma komutunu işle.
                     RtpCommand::StopLiveAudioStream => {
                         if live_stream_sender.is_some() {
                             info!("Gerçek zamanlı ses akışı komutla durduruldu.");
                             live_stream_sender = None;
                         }
                     },
-
                     RtpCommand::StartPermanentRecording(session) => {
                         info!(uri = %session.output_uri, "Kalıcı kayıt başlatılıyor...");
                         permanent_recording_session = Some(session);
@@ -107,8 +98,6 @@ pub async fn rtp_session_handler(
                         if let Some(session) = permanent_recording_session.take() {
                             tokio::spawn(finalize_and_save_recording(session, config.app_config.clone()));
                         }
-                        // ÖNEMLİ: Kapatma sinyali geldiğinde stream sender'ı düşürerek
-                        // gRPC stream'inin de sonlanmasını sağlıyoruz.
                         if let Some((sender, _)) = live_stream_sender.take() { drop(sender); }
                         break;
                     }
@@ -117,7 +106,6 @@ pub async fn rtp_session_handler(
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, addr)) => {
-                        // RTP başlığı 12 byte, payload ondan sonra başlar.
                         if len <= 12 { continue; }
 
                         if actual_remote_addr.is_none() {
@@ -127,17 +115,12 @@ pub async fn rtp_session_handler(
                         
                         let pcmu_payload = &buf[12..len];
                         
-                        // YENİ: Eğer bir canlı stream dinleyicisi varsa, veriyi işle ve gönder.
                         if let Some((sender, target_rate_opt)) = &live_stream_sender {
                             match process_audio_chunk(pcmu_payload, *target_rate_opt) {
                                 Ok((pcm_bytes, _)) => {
-                                    // Örnek bir media_type, target_rate'e göre dinamik olabilir.
                                     let media_type = format!("audio/L16;rate={}", target_rate_opt.unwrap_or(8000));
                                     let audio_frame = AudioFrame { data: pcm_bytes, media_type };
                                     
-                                    // Kanal üzerinden gRPC stream'ine gönder.
-                                    // Eğer gönderim başarısız olursa (istemci bağlantıyı kapattıysa),
-                                    // artık göndermeye çalışmamak için sender'ı None yap.
                                     if sender.send(Ok(audio_frame)).await.is_err() {
                                         info!("gRPC stream alıcısı kapandı, canlı ses akışı durduruldu.");
                                         live_stream_sender = None;
@@ -147,7 +130,6 @@ pub async fn rtp_session_handler(
                             }
                         }
 
-                        // Kalıcı kayıt mantığı aynı kalıyor, etkilenmiyor.
                         if let Some(session) = &mut permanent_recording_session {
                              match process_audio_chunk(pcmu_payload, Some(session.spec.sample_rate)) {
                                 Ok((_, pcm_samples_i16)) => {
@@ -171,17 +153,17 @@ pub async fn rtp_session_handler(
     gauge!(ACTIVE_SESSIONS).decrement(1.0);
 }
 
+#[instrument(skip_all, fields(uri = %session.output_uri, samples = session.samples.len()))]
 async fn finalize_and_save_recording(session: RecordingSession, config: Arc<AppConfig>) {
-    let result: Result<(), anyhow::Error> = async {
-        info!(uri = %session.output_uri, samples_count = session.samples.len(), "Kayıt sonlandırılıyor ve kaydediliyor...");
+    info!("Kayıt sonlandırma ve kaydetme süreci başlatıldı.");
 
-        if session.samples.is_empty() {
-            warn!("Kaydedilecek ses verisi yok, boş dosya oluşturulmayacak.");
-            return Ok(());
-        }
-        
+    if session.samples.is_empty() {
+        warn!("Kaydedilecek ses verisi yok, boş dosya oluşturulmayacak.");
+        return;
+    }
+
+    let result: Result<(), anyhow::Error> = async {
         let wav_data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
-            // DÜZELTME: Vec<new>() -> Vec::new()
             let mut buffer = Cursor::new(Vec::new());
             let mut writer = WavWriter::new(&mut buffer, session.spec)?;
             for sample in session.samples {
@@ -189,16 +171,32 @@ async fn finalize_and_save_recording(session: RecordingSession, config: Arc<AppC
             }
             writer.finalize()?;
             Ok(buffer.into_inner())
-        }).await??;
+        }).await.context("WAV dosyası oluşturma task'i başarısız oldu")??;
 
-        let writer = writers::from_uri(&session.output_uri, &config).await?;
-        writer.write(wav_data).await?;
+        info!(wav_size_bytes = wav_data.len(), "WAV verisi başarıyla oluşturuldu.");
+
+        let writer = writers::from_uri(&session.output_uri, &config)
+            .await
+            .context("Kayıt yazıcısı (writer) oluşturulamadı")?;
+        
+        info!("Kayıt yazıcısı oluşturuldu, veriler yazılıyor...");
+
+        writer.write(wav_data)
+            .await
+            .context("Veri S3'e veya dosyaya yazılamadı")?;
         
         Ok(())
     }.await;
 
-    if let Err(e) = result {
-        error!(error = ?e, "Kayıt kaydetme görevi başarısız oldu.");
+    match result {
+        Ok(_) => {
+            info!("Çağrı kaydı başarıyla tamamlandı ve kaydedildi.");
+            metrics::counter!("sentiric_media_recording_saved_total", "storage_type" => "s3").increment(1);
+        }
+        Err(e) => {
+            error!(error = ?e, "Kayıt kaydetme görevi başarısız oldu.");
+            metrics::counter!("sentiric_media_recording_failed_total", "storage_type" => "s3").increment(1);
+        }
     }
 }
 
