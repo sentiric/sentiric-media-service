@@ -1,11 +1,11 @@
-// File: src/rtp/writers.rs (NİHAİ DÜZELTME)
+// File: src/rtp/writers.rs
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
-use aws_sdk_s3::config::Builder as S3ConfigBuilder; // YENİ İMPORT
+use aws_sdk_s3::config::Builder as S3ConfigBuilder;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use std::path::Path;
@@ -19,8 +19,10 @@ pub trait AsyncRecordingWriter: Send + Sync {
     async fn write(&self, data: Vec<u8>) -> Result<()>;
 }
 
-// ... FileWriter aynı ...
-struct FileWriter { path: String }
+struct FileWriter {
+    path: String,
+}
+
 #[async_trait]
 impl AsyncRecordingWriter for FileWriter {
     async fn write(&self, data: Vec<u8>) -> Result<()> {
@@ -34,7 +36,6 @@ impl AsyncRecordingWriter for FileWriter {
     }
 }
 
-
 struct S3Writer {
     client: S3Client,
     bucket: String,
@@ -43,10 +44,16 @@ struct S3Writer {
 
 #[async_trait]
 impl AsyncRecordingWriter for S3Writer {
-    // ... write fonksiyonu aynı ...
     async fn write(&self, data: Vec<u8>) -> Result<()> {
         let body = ByteStream::from(data);
-        self.client.put_object().bucket(&self.bucket).key(&self.key).body(body).send().await.context("S3'ye obje yüklenemedi")?;
+        self.client
+            .put_object()
+            .bucket(&self.bucket)
+            .key(&self.key)
+            .body(body)
+            .send()
+            .await
+            .context("S3'ye obje yüklenemedi")?;
         info!("Kayıt dosyası başarıyla S3 bucket'ına yazıldı.");
         Ok(())
     }
@@ -60,8 +67,9 @@ pub async fn from_uri(
 
     match uri.scheme() {
         "file" => {
-            // ... file kısmı aynı ...
-            let path = uri.to_file_path().map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
+            let path = uri
+                .to_file_path()
+                .map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
             Ok(Box::new(FileWriter {
                 path: path.to_string_lossy().to_string(),
             }))
@@ -77,9 +85,9 @@ pub async fn from_uri(
             if key.is_empty() {
                 return Err(anyhow!("S3 URI'sinde dosya yolu (key) belirtilmelidir."));
             }
-            
+
             let region_provider = RegionProviderChain::first_try(Region::new(s3_config.region.clone()));
-            
+
             let sdk_config = aws_config::defaults(BehaviorVersion::latest())
                 .region(region_provider)
                 .endpoint_url(&s3_config.endpoint_url)
@@ -92,14 +100,12 @@ pub async fn from_uri(
                 ))
                 .load()
                 .await;
-
-            // --- EN ÖNEMLİ DEĞİŞİKLİK BURADA ---
-            // S3 client'ının path-style adreslemeyi kullanmasını zorunlu kılıyoruz.
+            
+            // MinIO ve R2 gibi S3 uyumlu sistemler için yol tabanlı adreslemeyi zorunlu kıl
             let s3_client_config = S3ConfigBuilder::from(&sdk_config)
                 .force_path_style(true)
                 .build();
             let client = S3Client::from_conf(s3_client_config);
-            // --- DEĞİŞİKLİK SONU ---
 
             Ok(Box::new(S3Writer {
                 client,

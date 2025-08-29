@@ -1,6 +1,6 @@
 # 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v4.2)
 
-Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanımlanan rolünü eksiksiz bir şekilde yerine getirmesi için gereken tüm görevleri, projenin resmi fazlarına ve aciliyet durumuna göre yeniden düzenlenmiş bir şekilde listeler.
+Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan rolünü eksiksiz bir şekilde yerine getirmesi için gereken tüm görevleri, projenin resmi fazlarına ve aciliyet durumuna göre yeniden düzenlenmiş bir şekilde listeler.
 
 ---
 
@@ -8,12 +8,9 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
 
 **Amaç:** Canlı çağrı akışının çalışmasını engelleyen veya zorlaştıran temel sorunları gidermek ve `agent-service`'in tam diyalog döngüsünü tamamlaması için gereken kritik yetenekleri sağlamak.
 
--   [ ] **Görev ID: MEDIA-003 - Fazla Konuşkan Loglamayı Düzeltme (KRİTİK & ACİL)**
+-   [x] **Görev ID: MEDIA-003 - Fazla Konuşkan Loglamayı Düzeltme (KRİTİK & ACİL)**
     -   **Açıklama:** `src/lib.rs` dosyasındaki `tracing` yapılandırmasını, `OBSERVABILITY_STANDARD.md`'ye uygun hale getirerek `INFO` seviyesindeki gereksiz `enter/exit` loglarını kaldır.
-    -   **Kabul Kriterleri:**
-        -   [ ] `ENV=production` veya `free` modunda, `RUST_LOG=info` ayarıyla çalışırken, loglarda artık `enter`, `exit`, `new`, `close` gibi span olayları **görünmemelidir**.
-        -   [ ] `ENV=development` modunda, `RUST_LOG=debug` ayarıyla çalışırken, bu detaylı span olayları hata ayıklama için **görünür olmalıdır**.
-    -   **Not:** Mevcut `src/lib.rs` koduna baktığımda, bu ayarı zaten yapmışsın: `.with_span_events(FmtSpan::NONE);`. Bu görevi tamamlanmış sayabiliriz!
+    -   **Durum:** ✅ **Tamamlandı** (Mevcut kodda doğrulandı).
 
 -   [x] **Görev ID: AI-001 - Canlı Ses Akışını Çoğaltma (`RecordAudio`)**
     -   **Açıklama:** Gelen RTP akışını anlık olarak bir gRPC stream'i olarak `agent-service`'e aktarmak. Bu, canlı STT entegrasyonu için **temel gereksinimdir**.
@@ -31,7 +28,7 @@ Bu belge, `sentiric-media-service`'in, `sentiric-governance` anayasasında tanı
 -   [x] **Görev ID: MEDIA-001B - Kalıcı Çağrı Kaydı**
     -   **Açıklama:** Çağrı sesini bir dosyaya kaydetme özelliği.
     -   **Durum:** ✅ **Tamamlandı**
-    -   **Geliştirme Notu (28.08.2025):** Bu özellik, S3-uyumlu nesne depolama hedeflerini (AWS S3, Cloudflare R2, MinIO vb.) destekleyecek şekilde genişletildi.
+    -   **Güncelleme Notu (29.08.2025):** Bu özellik, S3-uyumlu nesne depolama hedeflerini (AWS S3, Cloudflare R2, MinIO vb.) destekleyecek şekilde `force_path_style` düzeltmesi ile tam fonksiyonel hale getirildi.
 
 -   [x] **Görev ID: DEVOPS-001 - Lokal S3 Simülasyon Ortamı (YENİ GÖREV)**
     -   **Açıklama:** Geliştirme ve test süreçlerini hızlandırmak için `docker-compose`'a MinIO (S3 simülatörü) entegrasyonu yapmak.
