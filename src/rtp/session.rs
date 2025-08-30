@@ -1,26 +1,28 @@
-// File: src/rtp/session.rs
-
+// --- File: sentiric-media-service/src/rtp/session.rs ---
+use crate::audio::AudioCache;
+use crate::config::AppConfig;
+use crate::metrics::ACTIVE_SESSIONS;
+use crate::rtp::codecs::ULAW_TO_PCM;
+use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
+use crate::rtp::stream::{decode_audio_with_symphonia, send_announcement_from_uri};
+use crate::rtp::writers;
+use crate::state::PortManager;
+use anyhow::{anyhow, Context, Result}; // anyhow::Context trait'ini doğru şekilde import ediyoruz
+use base64::{engine::general_purpose, Engine}; // Sadece Engine trait'ini import ediyoruz
+use bytes::Bytes;
+use hound::WavWriter;
+use metrics::gauge;
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
+use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::io::Cursor;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::{error, info, instrument, warn};
-use bytes::Bytes;
-use hound::WavWriter;
-use metrics::gauge;
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
-use crate::audio::AudioCache;
-use crate::config::AppConfig;
-use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
-use crate::rtp::stream::send_announcement_from_uri;
-use crate::state::PortManager;
-use crate::rtp::codecs::ULAW_TO_PCM;
-use crate::metrics::ACTIVE_SESSIONS;
-use crate::rtp::writers;
-use anyhow::Context; // <<< DÜZELTME BURADA: Gerekli trait'i scope'a dahil ediyoruz.
 
 pub struct RtpSessionConfig {
     pub port_manager: PortManager,
@@ -29,15 +31,12 @@ pub struct RtpSessionConfig {
     pub port: u16,
 }
 
-// YENİ HELPER FONKSİYON: Bir URI'dan ses örneklerini yükler
-use crate::rtp::stream::decode_audio_with_symphonia;
-use anyhow::anyhow;
-
+// DÖNÜŞ TİPİ DEĞİŞTİ: Arc<Vec<i16>>
 async fn load_samples_from_uri(
     uri: &str,
     cache: &AudioCache,
     config: &Arc<AppConfig>,
-) -> Result<Arc<Vec<i16>>, anyhow::Error> {
+) -> Result<Arc<Vec<i16>>> {
     if let Some(path_part) = uri.strip_prefix("file://") {
         let mut final_path = std::path::PathBuf::from(&config.assets_base_path);
         final_path.push(path_part.trim_start_matches('/'));
@@ -47,14 +46,16 @@ async fn load_samples_from_uri(
             .strip_prefix("data:")
             .and_then(|s| s.split_once(";base64,"))
             .context("Geçersiz data URI formatı")?;
-        let audio_bytes = base64::engine::general_purpose::STANDARD
+        let audio_bytes = general_purpose::STANDARD
             .decode(base64_data)
             .context("Base64 verisi çözümlenemedi")?;
+        // DÖNÜŞ TİPİ DEĞİŞTİ: Arc::new() ile sarmalıyoruz
         Ok(Arc::new(decode_audio_with_symphonia(audio_bytes)?))
     } else {
         Err(anyhow!("Desteklenmeyen URI şeması: {}", uri))
     }
 }
+
 
 #[instrument(skip_all, fields(rtp_port = config.port))]
 pub async fn rtp_session_handler(
@@ -83,7 +84,6 @@ pub async fn rtp_session_handler(
                         current_playback_token = Some(cancellation_token.clone());
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
 
-                        // --- YENİ KAYIT MANTIĞI BAŞLANGICI ---
                         if let Some(rec_session) = &mut permanent_recording_session {
                             info!("Giden ses (outbound audio) kalıcı kayda ekleniyor.");
                             match load_samples_from_uri(&audio_uri, &config.audio_cache, &config.app_config).await {
@@ -96,8 +96,7 @@ pub async fn rtp_session_handler(
                                 }
                             }
                         }
-                        // --- YENİ KAYIT MANTIĞI SONU ---
-
+                        
                         tokio::spawn(send_announcement_from_uri(
                             socket.clone(),
                             target,
@@ -107,7 +106,6 @@ pub async fn rtp_session_handler(
                             cancellation_token,
                         ));
                     },
-                    // ... (Diğer komutlar aynı kalacak) ...
                     RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate } => {
                         info!(target_rate = ?target_sample_rate, "Gerçek zamanlı ses akışı komutu alındı.");
                         live_stream_sender = Some((stream_sender, target_sample_rate));

@@ -1,10 +1,10 @@
-// src/rtp/stream.rs
+// --- File: sentiric-media-service/src/rtp/stream.rs ---
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Context, Result}; // anyhow'u doğru şekilde import ediyoruz.
 use base64::{engine::general_purpose, Engine as _};
 use rand::Rng;
 use rtp::header::Header;
@@ -59,12 +59,14 @@ pub async fn send_announcement_from_uri(
         }
     }
 }
-async fn load_from_file_and_send(sock: &Arc<UdpSocket>, target_addr: SocketAddr, relative_path: &str, cache: &AudioCache, config: &AppConfig, token: CancellationToken) -> Result<()> {
+
+async fn load_from_file_and_send(sock: &Arc<UdpSocket>, target_addr: SocketAddr, relative_path: &str, cache: &AudioCache, config: &Arc<AppConfig>, token: CancellationToken) -> Result<()> {
     let mut final_path = PathBuf::from(&config.assets_base_path);
     final_path.push(relative_path);
     let samples = audio::load_or_get_from_cache(cache, &final_path).await?;
     send_rtp_stream(sock, target_addr, &samples, token).await
 }
+
 async fn load_from_data_uri_and_send(sock: &Arc<UdpSocket>, target_addr: SocketAddr, data_uri: &str, token: CancellationToken) -> Result<()> {
     info!("Data URI'sinden ses yükleniyor...");
     let (_media_type, base64_data) = data_uri.strip_prefix("data:").and_then(|s| s.split_once(";base64,")).context("Geçersiz data URI formatı")?;
@@ -72,6 +74,7 @@ async fn load_from_data_uri_and_send(sock: &Arc<UdpSocket>, target_addr: SocketA
     let samples = decode_audio_with_symphonia(audio_bytes)?;
     send_rtp_stream(sock, target_addr, &samples, token).await
 }
+
 async fn send_rtp_stream(sock: &Arc<UdpSocket>, target_addr: SocketAddr, samples: &[i16], token: CancellationToken) -> Result<()> {
     let ssrc: u32 = rand::thread_rng().gen();
     let mut sequence_number: u16 = rand::thread_rng().gen();
@@ -93,7 +96,9 @@ async fn send_rtp_stream(sock: &Arc<UdpSocket>, target_addr: SocketAddr, samples
     token.cancel();
     Ok(())
 }
-fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
+
+// DEĞİŞİKLİK: Bu fonksiyonu public (pub) yapıyoruz
+pub fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
     let mss = MediaSourceStream::new(Box::new(Cursor::new(audio_bytes)), Default::default());
     let hint = Hint::new();
     let meta_opts: MetadataOptions = Default::default();
