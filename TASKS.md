@@ -19,6 +19,13 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
         -   [x] `RecordAudio` RPC'si, gelen RTP (PCMU) paketlerini çözmeli ve içindeki ham ses verisini, `sentiric-contracts`'te tanımlanan **standart bir formatta (örn: 16kHz, 16-bit mono PCM)** `AudioFrame` mesajları olarak gRPC stream'ine yazmalıdır.
         -   [x] `examples/live_audio_client.rs` test istemcisi, bu stream'i tüketerek anlık ses verisini alabildiğini kanıtlamıştır.
         -   [ ] Bu işlem sırasında, orijinal RTP akışının karşı tarafa iletiminde **kesinti olmadığı** doğrulanmalıdır. *(Not: Mevcut yapıda ses akışını "çoğaltmıyoruz", sadece dinliyoruz. Gerçek bir çağrıda sesi hem STT'ye hem de karşı tarafa göndermek için mimariyi ileride geliştirmemiz gerekebilir. Şimdilik bu kabul kriteri geçerli değil.)*
+
+-   [ ] **Görev ID:** `MEDIA-BUG-02`
+    -   **Açıklama:** `rtp_session_handler` içindeki kayıt mantığını, hem gelen (inbound) hem de giden (outbound) RTP paketlerinden çözülen PCM ses verisini aynı kayıt havuzunda birleştirecek şekilde yeniden yapılandır.
+    -   **Kabul Kriterleri:**
+    -   [ ] Bir test çağrısı sonunda MinIO'ya kaydedilen `.wav` dosyası indirildiğinde, içinde **hem sistem anonslarının/TTS seslerinin hem de kullanıcının konuşmasının** olduğu duyulmalıdır.
+
+
 ---
 
 ### **FAZ 2: Gelişmiş Medya Yetenekleri ve Yönetim**
