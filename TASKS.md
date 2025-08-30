@@ -1,4 +1,4 @@
-# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v4.2)
+# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v4.3 - Kayıt Doğrulama)
 
 Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan rolünü eksiksiz bir şekilde yerine getirmesi için gereken tüm görevleri, projenin resmi fazlarına ve aciliyet durumuna göre yeniden düzenlenmiş bir şekilde listeler.
 
@@ -37,6 +37,25 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
         -   [x] `docker-compose` içinde `minio` servisi tanımlandı.
         -   [x] `media-service`, ortam değişkenleri aracılığıyla yerel MinIO hedefine kayıt yapabiliyor.
         -   [x] Altyapı, farklı profillerde (lokal vs cloud) farklı S3 hedeflerini destekleyecek şekilde esnek yapılandırıldı.
+
+
+-   [ ] **Görev ID: MEDIA-004 - Kayıt Tamamlandığında Olay Yayınlama (YÜKSEK ÖNCELİK)**
+    -   **Durum:** ⬜ Planlandı
+    -   **Bağımlılık:** `AGENT-DIAG-01`'in tamamlanmasına bağlı.
+    -   **Tahmini Süre:** ~2-3 saat
+    -   **Açıklama:** Bir çağrı kaydı başarıyla S3/MinIO'ya yazıldıktan sonra, bu kaydın URL'ini içeren bir `call.recording.available` olayını RabbitMQ'ya yayınlamak. Bu, `cdr-service`'in kaydı ilgili çağrıyla ilişkilendirmesi için kritiktir.
+    -   **Kabul Kriterleri:**
+        -   [ ] `src/rtp/session.rs` içindeki `finalize_and_save_recording` fonksiyonu, S3'e yazma işlemi başarılı olduğunda `RabbitMQ`'ya `sentiric-contracts`'te tanımlı `CallRecordingAvailableEvent` formatında bir olay yayınlamalıdır.
+        -   [ ] Olayın `recording_uri` alanı, MinIO'daki dosyanın tam S3 URI'sini içermelidir.
+        -   [ ] RabbitMQ yönetim arayüzünden bu olayın doğru bir şekilde yayınlandığı gözlemlenmelidir.
+
+-   [ ] **Görev ID: MEDIA-BUG-01 - Boş Ses Kaydı Kök Neden Analizi (DOĞRULAMA GÖREVİ)**
+    -   **Durum:** ⬜ Planlandı
+    -   **Bağımlılık:** `AGENT-BUG-02`'nin çözülmesine bağlı.
+    -   **Açıklama:** `agent-service`'teki hata düzeltildikten sonra, çağrı kaydının artık boş olmadığını, gerçek ses verisi içerdiğini doğrulamak. Eğer sorun devam ederse, `rtp_session_handler` içindeki kayıt mantığını derinlemesine incelemek.
+    -   **Kabul Kriterleri:**
+        -   [ ] Başarılı bir test çağrısından sonra MinIO'dan indirilen `.wav` dosyası, ses içermelidir.
+        -   [ ] Eğer hala boşsa, `rtp_session_handler`'ın RTP paketlerini doğru bir şekilde `permanent_recording_session.samples` vektörüne ekleyip eklemediği loglarla ve debug ile kontrol edilmelidir.
 
 -   [ ] **Görev ID: SEC-001 - Güvenli Medya Akışı (SRTP Desteği)**
     -   **Açıklama:** Medya akışını SRTP ile şifreleyerek çağrıların dinlenmesini engellemek.
