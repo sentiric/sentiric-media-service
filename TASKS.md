@@ -8,6 +8,19 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
 
 **Amaç:** Canlı çağrı akışının çalışmasını engelleyen veya zorlaştıran temel sorunları gidermek ve `agent-service`'in tam diyalog döngüsünü tamamlaması için gereken kritik yetenekleri sağlamak.
 
+-   [ ] **Görev ID: MEDIA-REFACTOR-01 - Merkezi Ses İşleme ve Standardizasyon (KRİTİK & ACİL)**
+    -   **Durum:** ⬜ **Yapılacak (İLK GÖREV)**
+    -   **Engelleyici Mi?:** **EVET. TAM DİYALOG AKIŞINI VE ÇAĞRI KAYDINI BLOKE EDİYOR.**
+    -   **Tahmini Süre:** ~1-2 gün
+    -   **Açıklama:** Platformdaki ses kalitesi sorunlarının (cızırtı, bozulma) ve sessiz kayıtların kök nedeni, farklı servislerdeki tutarsız ses formatı yönetimidir. Bu görev, `media-service`'i sesin **tek doğruluk kaynağı (Single Source of Truth)** haline getirecektir. Servis, gelen ve giden tüm ses akışlarını standart bir iç formata (16kHz, 16-bit, mono PCM) dönüştürmekten sorumlu olacaktır.
+    -   **Kabul Kriterleri:**
+        -   [ ] `rtp_session_handler`, gelen 8kHz G.711 RTP paketlerini **kayda eklemeden veya `RecordAudio` ile stream etmeden önce** standart 16kHz PCM formatına dönüştürmelidir.
+        -   [ ] `rtp_session_handler`, `PlayAudioUri` komutunu aldığında, TTS'ten gelen 24kHz gibi farklı formatlardaki sesleri, **kayda eklemeden ve kullanıcıya göndermeden önce** standart 16kHz PCM formatına dönüştürmelidir.
+        -   [ ] `StartPermanentRecording` komutu, artık dinamik bir `WavSpec` kullanmamalıdır. Kayıtlar her zaman sabit olarak **16kHz, 16-bit, mono** formatında oluşturulmalıdır.
+        -   [ ] **Doğrulama:** Uçtan uca bir test çağrısı sonunda, MinIO'ya kaydedilen `.wav` dosyası indirildiğinde, içinde **hem sistemin hem de kullanıcının seslerinin temiz, cızırtısız ve doğru hızda** olduğu duyulmalıdır.
+
+**Amaç:** Canlı çağrı akışının çalışmasını engelleyen veya zorlaştıran temel sorunları gidermek ve `agent-service`'in tam diyalog döngüsünü tamamlaması için gereken kritik yetenekleri sağlamak.
+
 -   [x] **Görev ID: MEDIA-003 - Fazla Konuşkan Loglamayı Düzeltme (KRİTİK & ACİL)**
     -   **Açıklama:** `src/lib.rs` dosyasındaki `tracing` yapılandırmasını, `OBSERVABILITY_STANDARD.md`'ye uygun hale getirerek `INFO` seviyesindeki gereksiz `enter/exit` loglarını kaldır.
     -   **Durum:** ✅ **Tamamlandı** (Mevcut kodda doğrulandı).
