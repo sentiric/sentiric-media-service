@@ -56,7 +56,7 @@ aws-credential-types = "1.1.8" # EKSİK OLAN VE ŞİMDİ EKLENEN BAĞIMLILIK
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.8.2" 
+tag = "v1.8.7" 
 package = "sentiric-contracts"
 
 [dev-dependencies]
