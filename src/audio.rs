@@ -1,6 +1,6 @@
-// ========== FILE: sentiric-media-service/src/audio.rs (Nihai Akıllı Sürüm) ==========
+// File: sentiric-media-service/src/audio.rs (GÜNCELLENDİ)
 use std::collections::HashMap;
-use std::path::PathBuf; // PathBuf'ı import et
+use std::path::PathBuf;
 use std::sync::Arc;
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
@@ -8,7 +8,6 @@ use tracing::{debug, info};
 
 pub type AudioCache = Arc<Mutex<HashMap<String, Arc<Vec<i16>>>>>;
 
-// DİKKAT: Fonksiyon imzası artık PathBuf alıyor
 pub async fn load_or_get_from_cache(
     cache: &AudioCache, 
     audio_path: &PathBuf,
@@ -25,8 +24,7 @@ pub async fn load_or_get_from_cache(
     let path_str = audio_path.to_str().context("Geçersiz dosya yolu karakterleri")?;
     debug!(path = path_str, "Oluşturulan dosya yolu.");
 
-    // hound kütüphanesi senkron olduğu için, IO yoğun işlemi blocking task'e taşıyalım.
-    let path_owned = audio_path.clone(); // Klonla çünkü closure'a taşıyacağız
+    let path_owned = audio_path.clone();
     let new_samples = tokio::task::spawn_blocking(move || {
         hound::WavReader::open(path_owned)?.samples::<i16>().collect::<Result<Vec<_>, _>>()
     }).await??;
@@ -37,24 +35,5 @@ pub async fn load_or_get_from_cache(
     Ok(new_samples_arc)
 }
 
-// ... (linear_to_ulaw fonksiyonu ve ULAW_TABLE aynı kalacak)
-const BIAS: i16 = 0x84;
-static ULAW_TABLE: [u8; 256] = [
-    0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
-    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-];
-pub fn linear_to_ulaw(mut pcm_val: i16) -> u8 {
-    let sign = if pcm_val < 0 { 0x80 } else { 0 };
-    if sign != 0 { pcm_val = -pcm_val; }
-    pcm_val = pcm_val.min(32635);
-    pcm_val += BIAS;
-    let exponent = ULAW_TABLE[((pcm_val >> 7) & 0xFF) as usize];
-    let mantissa = (pcm_val >> (exponent as i16 + 3)) & 0xF;
-    !(sign as u8 | (exponent << 4) | mantissa as u8)
-}
+// NOT: G.711 dönüşüm fonksiyonları ve tabloları buradan kaldırılmıştır.
+// Bu mantık artık merkezileştirilmiş olan `src/rtp/codecs.rs` dosyasında yer almaktadır.

@@ -1,4 +1,4 @@
-// File: src/rtp/session.rs (ADRESLEME SORUNU ÇÖZÜLMÜŞ NİHAİ SÜRÜM)
+// File: src/rtp/session.rs (GÜNCELLENDİ)
 
 use crate::audio::AudioCache;
 use crate::config::AppConfig;
@@ -81,15 +81,11 @@ pub async fn rtp_session_handler(
                         }
                         current_playback_token = Some(cancellation_token.clone());
                         
-                        // YENİ VE KRİTİK MANTIK:
-                        // Eğer remote adres henüz bilinmiyorsa (ilk paket gelmediyse),
-                        // PlayAudio isteğindeki adresi güvenilir kabul et.
                         if actual_remote_addr.is_none() {
                             info!(remote = %candidate_target_addr, "İlk paket gelmeden PlayAudio komutu alındı. Hedef adres isteğe göre ayarlandı.");
                             actual_remote_addr = Some(candidate_target_addr);
                         }
                         
-                        // Gönderim için her zaman en güncel adresi kullan.
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
                         if let Some(rec_session) = &mut permanent_recording_session {
                             info!("Giden ses (outbound) kalıcı kayda ekleniyor.");
@@ -124,8 +120,6 @@ pub async fn rtp_session_handler(
                     },
                     RtpCommand::StartPermanentRecording(session) => {
                         info!(uri = %session.output_uri, "Kalıcı kayıt başlatılıyor...");
-                        // Test için PCMA kodeğini varsayılan yapalım.
-                        // Gelecekte bu gRPC isteğiyle dinamik olarak ayarlanmalı.
                         outbound_codec = AudioCodec::Pcma;
                         permanent_recording_session = Some(session);
                     },
@@ -157,7 +151,6 @@ pub async fn rtp_session_handler(
             result = socket.recv_from(&mut buf) => {
                 match result {
                     Ok((len, addr)) => {
-                        // Gelen her pakette remote adresi güncellemek daha sağlam olabilir.
                         if actual_remote_addr.is_none() {
                             info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı.");
                         }
@@ -172,7 +165,6 @@ pub async fn rtp_session_handler(
                             }
                         };
 
-                        // 2. Payload type'dan codec'i belirle
                         let incoming_codec = match AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                             Ok(c) => c,
                             Err(e) => {
@@ -181,10 +173,8 @@ pub async fn rtp_session_handler(
                             }
                         };
 
-                        // 3. Gelen sesi kanuni 16kHz LPCM formatına çevir
                         match codecs::decode_g711_to_lpcm16(&packet.payload, incoming_codec) {
                             Ok(standardized_samples_16khz) => {
-                                // 4. Standartlaşmış sesi ilgili yerlere dağıt
                                 if let Some((sender, _)) = &live_stream_sender {
                                     let media_type = "audio/L16;rate=16000".to_string();
                                     let mut bytes = Vec::with_capacity(standardized_samples_16khz.len() * 2);
@@ -202,7 +192,7 @@ pub async fn rtp_session_handler(
                                 }
                             },
                             Err(e) => {
-                                error!(error = %e, "Ses verisi kanuni formata dönüştürülemedi.");
+                                error!(error = %e, "Ses verisi standart formata dönüştürülemedi.");
                             }
                         }
                     }
@@ -232,7 +222,14 @@ async fn finalize_and_save_recording(session: RecordingSession, config: Arc<AppC
     let result: Result<(), anyhow::Error> = async {
         let wav_data = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
             let mut buffer = Cursor::new(Vec::new());
-            let mut writer = WavWriter::new(&mut buffer, session.spec)?;
+            // ÖNEMLİ: WavSpec her zaman 16kHz olmalı, çünkü tüm sesler o formata çevriliyor.
+            let spec_16khz = hound::WavSpec {
+                channels: 1,
+                sample_rate: 16000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = WavWriter::new(&mut buffer, spec_16khz)?;
             for sample in session.samples {
                 writer.write_sample(sample)?;
             }

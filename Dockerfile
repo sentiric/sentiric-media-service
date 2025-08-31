@@ -21,9 +21,6 @@ COPY . .
 
 RUN cargo build --release
 
-# ARTIK GEREKLİ DEĞİL: Bu adımı tamamen kaldırıyoruz.
-# RUN git clone --depth 1 https://github.com/sentiric/sentiric-assets.git assets
-
 # --- STAGE 2: Final (Minimal) Image ---
 FROM debian:bookworm-slim
 
@@ -31,9 +28,6 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y netcat-openbsd ca-certificates && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# ARTIK GEREKLİ DEĞİL: Bu adımı da kaldırıyoruz.
-# COPY --from=builder /app/assets/audio ./assets/audio
 
 COPY --from=builder /app/target/release/sentiric-media-service .
 

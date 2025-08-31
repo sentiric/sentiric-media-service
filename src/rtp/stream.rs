@@ -1,4 +1,4 @@
-// File: src/rtp/stream.rs (TÜM HATALARI DÜZELTİLMİŞ NİHAİ SÜRÜM)
+// File: src/rtp/stream.rs (GÜNCELLENDİ)
 use crate::audio::{self, AudioCache};
 use crate::config::AppConfig;
 use crate::rtp::codecs::{self, AudioCodec};
@@ -7,7 +7,7 @@ use base64::{engine::general_purpose, Engine as _};
 use rand::Rng;
 use rtp::header::Header;
 use rtp::packet::Packet;
-use rubato::Resampler; // HATA 3 DÜZELTMESİ: Gerekli trait'i import et
+use rubato::Resampler;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -49,7 +49,6 @@ pub async fn send_announcement_from_uri(
             audio::load_or_get_from_cache(&cache, &final_path).await?
         } else if audio_uri.starts_with("data:") {
             info!("Data URI'sinden ses yükleniyor...");
-            // HATA 1 DÜZELTMESİ: `data_uri` yerine `audio_uri` kullan
             let (_media_type, base64_data) = audio_uri
                 .strip_prefix("data:")
                 .and_then(|s| s.split_once(";base64,"))
@@ -62,7 +61,6 @@ pub async fn send_announcement_from_uri(
             return Err(anyhow!("Desteklenmeyen URI şeması: {}", uri_preview));
         };
 
-        // HATA 2 DÜZELTMESİ: `sock`'ı referans olarak (&) geçir
         send_rtp_stream(&sock, target_addr, &samples_16khz, token, target_codec).await
     }
     .await;
@@ -79,7 +77,7 @@ pub async fn send_announcement_from_uri(
 }
 
 async fn send_rtp_stream(
-    sock: &Arc<UdpSocket>, // HATA 2 DÜZELTMESİ: Fonksiyon imzası doğru, çağrıyı düzelttik
+    sock: &Arc<UdpSocket>,
     target_addr: SocketAddr,
     samples_16khz: &[i16],
     token: CancellationToken,
@@ -97,15 +95,16 @@ async fn send_rtp_stream(
     let mut timestamp: u32 = rand::thread_rng().gen();
     const SAMPLES_PER_PACKET: usize = 160;
 
+    let rtp_payload_type = match target_codec {
+        AudioCodec::Pcmu => 0,
+        AudioCodec::Pcma => 8,
+    };
+
     for chunk in g711_payload.chunks(SAMPLES_PER_PACKET) {
         tokio::select! {
             biased;
             _ = token.cancelled() => { info!("RTP akışı dışarıdan iptal edildi."); return Ok(()); }
             _ = sleep(Duration::from_millis(20)) => {
-                let rtp_payload_type = match target_codec {
-                    AudioCodec::Pcmu => 0,
-                    AudioCodec::Pcma => 8,
-                };
                 let packet = Packet {
                     header: Header {
                         version: 2, payload_type: rtp_payload_type, sequence_number,
