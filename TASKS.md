@@ -1,43 +1,50 @@
-# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v4.3 - Kayıt Doğrulama)
+# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v5.0 - Merkezi Ses Motoru)
 
 Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan rolünü eksiksiz bir şekilde yerine getirmesi için gereken tüm görevleri, projenin resmi fazlarına ve aciliyet durumuna göre yeniden düzenlenmiş bir şekilde listeler.
 
 ---
 
-### **FAZ 1: Stabilizasyon ve Uçtan Uca Akış Desteği (ACİL ÖNCELİK)**
+### **FAZ 1: Stabilizasyon ve Uçtan Uca Akış Garantisi (KRİTİK GÖREV)**
 
-**Amaç:** Canlı çağrı akışının çalışmasını engelleyen veya zorlaştıran temel sorunları gidermek ve `agent-service`'in tam diyalog döngüsünü tamamlaması için gereken kritik yetenekleri sağlamak.
+**Amaç:** Platformdaki tüm ses kalitesi sorunlarını (cızırtı, bozulma, sessiz/yanlış formatta kayıt) kökten çözmek ve `media-service`'i, gelen ve giden tüm ses akışlarının kalitesinden ve formatından sorumlu **tek merkez (Single Source of Truth)** haline getirmek. Bu görev, `agent-service`'in tam diyalog döngüsünü, güvenilir çağrı kaydını ve gelecekteki medya yeteneklerini mümkün kılan temel taştır.
 
--   [ ] **Görev ID: MEDIA-REFACTOR-01 - Merkezi Ses İşleme ve Standardizasyon (KRİTİK & ACİL)**
-    -   **Durum:** ⬜ **Yapılacak (İLK GÖREV)**
-    -   **Engelleyici Mi?:** **EVET. TAM DİYALOG AKIŞINI VE ÇAĞRI KAYDINI BLOKE EDİYOR.**
-    -   **Tahmini Süre:** ~1-2 gün
-    -   **Açıklama:** Platformdaki ses kalitesi sorunlarının (cızırtı, bozulma) ve sessiz kayıtların kök nedeni, farklı servislerdeki tutarsız ses formatı yönetimidir. Bu görev, `media-service`'i sesin **tek doğruluk kaynağı (Single Source of Truth)** haline getirecektir. Servis, gelen ve giden tüm ses akışlarını standart bir iç formata (16kHz, 16-bit, mono PCM) dönüştürmekten sorumlu olacaktır.
-    -   **Kabul Kriterleri:**
-        -   [ ] `rtp_session_handler`, gelen 8kHz G.711 RTP paketlerini **kayda eklemeden veya `RecordAudio` ile stream etmeden önce** standart 16kHz PCM formatına dönüştürmelidir.
-        -   [ ] `rtp_session_handler`, `PlayAudioUri` komutunu aldığında, TTS'ten gelen 24kHz gibi farklı formatlardaki sesleri, **kayda eklemeden ve kullanıcıya göndermeden önce** standart 16kHz PCM formatına dönüştürmelidir.
-        -   [ ] `StartPermanentRecording` komutu, artık dinamik bir `WavSpec` kullanmamalıdır. Kayıtlar her zaman sabit olarak **16kHz, 16-bit, mono** formatında oluşturulmalıdır.
-        -   [ ] **Doğrulama:** Uçtan uca bir test çağrısı sonunda, MinIO'ya kaydedilen `.wav` dosyası indirildiğinde, içinde **hem sistemin hem de kullanıcının seslerinin temiz, cızırtısız ve doğru hızda** olduğu duyulmalıdır.
+-   [ ] **Görev ID: MEDIA-REFACTOR-01 - Merkezi Ses İşleme ve Transcoding Motoru (KRİTİK & ACİL)**
+    -   **Durum:** ⬜ **Yapılacak (TÜM PROJENİN ÖNCELİĞİ)**
+    -   **Engelleyici Mi?:** **EVET. TAM DİYALOG AKIŞINI, GÜVENİLİR ÇAĞRI KAYDINI VE ÇOKLU KODEK DESTEĞİNİ TAMAMEN BLOKE EDİYOR.**
+    -   **Tahmini Süre:** ~2-3 gün
+    -   **Problem Tanımı:** Mevcut durumda, farklı kaynaklardan (PSTN, TTS) gelen sesler, farklı formatlarda (8kHz PCMA/PCMU, 24kHz LPCM) sisteme girmekte ve bu format tutarsızlığı; cızırtılı canlı dinlemeye (STT), bozuk veya tek taraflı çağrı kayıtlarına ve kodek uyumsuzluklarına yol açmaktadır. `media-service`, bu karmaşıklığı yönetmek yerine, bu sorunu diğer servislere yaymaktadır.
 
-**Amaç:** Canlı çağrı akışının çalışmasını engelleyen veya zorlaştıran temel sorunları gidermek ve `agent-service`'in tam diyalog döngüsünü tamamlaması için gereken kritik yetenekleri sağlamak.
+    -   **Çözüm Mimarisi: "Ara Format" (Pivot Format) Yaklaşımı**
+        `media-service`, bir "ses adaptörü" gibi davranacaktır. Tüm ses işlemleri, yüksek kaliteli bir dahili ara format olan **16kHz, 16-bit, mono LPCM** üzerinden yapılacaktır.
+        1.  **Giriş (Decode & Resample):** Gelen tüm ses akışları (örn: 8kHz PCMU), alındığı anda bu 16kHz'lik ara formata dönüştürülecektir.
+        2.  **İşleme (İç Akış):** Tüm iç işlemler (canlı akışı STT'ye gönderme, kalıcı kayda ekleme) bu standart ve temiz 16kHz format üzerinden gerçekleştirilecektir.
+        3.  **Çıkış (Resample & Encode):** Standart formattaki ses (örn: TTS'ten gelen veya kaydedilmiş anons), hedef sisteme gönderilmeden hemen önce hedefin beklediği formata (örn: telefon için 8kHz PCMA) dönüştürülecektir.
 
--   [x] **Görev ID: MEDIA-003 - Fazla Konuşkan Loglamayı Düzeltme (KRİTİK & ACİL)**
-    -   **Açıklama:** `src/lib.rs` dosyasındaki `tracing` yapılandırmasını, `OBSERVABILITY_STANDARD.md`'ye uygun hale getirerek `INFO` seviyesindeki gereksiz `enter/exit` loglarını kaldır.
-    -   **Durum:** ✅ **Tamamlandı** (Mevcut kodda doğrulandı).
+    -   **Uygulama Adımları:**
+        -   [ ] **1. `rtp/codecs.rs` Modülü Oluşturma:**
+            -   [ ] Tüm G.711 (PCMA/PCMU) ve LPCM dönüşüm mantığı bu merkezi modüle taşınmalıdır.
+            -   [ ] `decode_g711_to_lpcm16(payload, codec)`: Gelen 8kHz G.711 verisini 16kHz LPCM'e çeviren bir fonksiyon oluşturulmalıdır.
+            -   [ ] `encode_lpcm16_to_g711(samples, codec)`: 16kHz LPCM verisini giden 8kHz G.711'e çeviren bir fonksiyon oluşturulmalıdır.
+        -   [ ] **2. `rtp_session_handler`'ı Yeniden Yapılandırma:**
+            -   [ ] **Gelen RTP Paketleri:** `socket.recv_from` ile alınan her paket, anında `codecs::decode_g711_to_lpcm16` kullanılarak standart 16kHz LPCM'e dönüştürülmelidir.
+            -   [ ] **Canlı Akış (`RecordAudio`):** STT'ye gönderilecek gRPC stream'ine, sadece bu standartlaştırılmış 16kHz LPCM verisi yazılmalıdır.
+            -   [ ] **Kalıcı Kayıt (`StartRecording`):** Kayıt havuzuna (`permanent_recording_session.samples`) sadece standart 16kHz LPCM verisi (hem gelen hem giden) eklenmelidir. `WavSpec` her zaman `16000` Hz olarak sabitlenmelidir.
+            -   [ ] **Giden RTP Paketleri (`PlayAudio`):**
+                -   `send_announcement_from_uri` fonksiyonu, çalınacak sesi (ister WAV, ister Base64) önce standart 16kHz LPCM formatına getirmelidir.
+                -   Ardından bu standart veriyi, `codecs::encode_lpcm16_to_g711` kullanarak hedefin beklediği kodeğe çevirip göndermelidir.
+                -   **Performans Notu:** `PlayAudio`'nun tetiklediği yoğun RTP gönderme işlemi, ana `tokio` görevlerini bloke etmemelidir. Bu işlem, `tokio::task::spawn_blocking` kullanılarak ayrı bir thread'e taşınmalıdır. Bu, aynı anda gelen RTP paketlerini dinleme ve gRPC stream'ine veri yazma gibi görevlerin kesintiye uğramamasını garanti eder.
 
--   [x] **Görev ID: AI-001 - Canlı Ses Akışını Çoğaltma (`RecordAudio`)**
-    -   **Açıklama:** Gelen RTP akışını anlık olarak bir gRPC stream'i olarak `agent-service`'e aktarmak. Bu, canlı STT entegrasyonu için **temel gereksinimdir**.
-    -   **Durum:** ✅ **Tamamlandı**
-    -   **Kabul Kriterleri:**
-        -   [x] `RecordAudio` RPC'si, gelen RTP (PCMU) paketlerini çözmeli ve içindeki ham ses verisini, `sentiric-contracts`'te tanımlanan **standart bir formatta (örn: 16kHz, 16-bit mono PCM)** `AudioFrame` mesajları olarak gRPC stream'ine yazmalıdır.
-        -   [x] `examples/live_audio_client.rs` test istemcisi, bu stream'i tüketerek anlık ses verisini alabildiğini kanıtlamıştır.
-        -   [ ] Bu işlem sırasında, orijinal RTP akışının karşı tarafa iletiminde **kesinti olmadığı** doğrulanmalıdır. *(Not: Mevcut yapıda ses akışını "çoğaltmıyoruz", sadece dinliyoruz. Gerçek bir çağrıda sesi hem STT'ye hem de karşı tarafa göndermek için mimariyi ileride geliştirmemiz gerekebilir. Şimdilik bu kabul kriteri geçerli değil.)*
-
--   [ ] **Görev ID:** `MEDIA-BUG-02`
-    -   **Açıklama:** `rtp_session_handler` içindeki kayıt mantığını, hem gelen (inbound) hem de giden (outbound) RTP paketlerinden çözülen PCM ses verisini aynı kayıt havuzunda birleştirecek şekilde yeniden yapılandır.
-    -   **Kabul Kriterleri:**
-    -   [ ] Bir test çağrısı sonunda MinIO'ya kaydedilen `.wav` dosyası indirildiğinde, içinde **hem sistem anonslarının/TTS seslerinin hem de kullanıcının konuşmasının** olduğu duyulmalıdır.
-
+    -   **Kabul ve Doğrulama Kriterleri:**
+        -   [ ] **Uçtan Uca Test (`end_to_end_call_validator.rs`):** Aşağıdaki senaryoyu eksiksiz ve otomatik olarak doğrulayan bir entegrasyon testi oluşturulmalıdır:
+            -   [ ] Test, `PCMA` kodeği ile bir çağrı başlatır ve **16kHz WAV** formatında kalıcı kayıt (`StartRecording`) açar.
+            -   [ ] Test, **eş zamanlı olarak** şunları yapar:
+                1.  3 saniye boyunca sunucuya **8kHz PCMA** formatında RTP paketleri gönderir (kullanıcıyı simüle eder).
+                2.  `RecordAudio` gRPC stream'ini dinler ve gelen ses verisinin **temiz, 16kHz LPCM** formatında olduğunu doğrular.
+                3.  Sunucuya, bir anonsu (`welcome.wav`) çalması için `PlayAudio` komutu gönderir.
+            -   [ ] Test tamamlandığında, MinIO'dan indirilen kayıt dosyası (`.wav`) programatik olarak analiz edilmeli ve aşağıdaki koşulları sağlamalıdır:
+                -   **Format Doğruluğu:** WAV başlığı `16000 Hz`, `16-bit`, `mono` olmalıdır.
+                -   **İçerik Bütünlüğü:** Kaydın içinde, hem testin gönderdiği kullanıcı sesinin (PCMA->16k LPCM) hem de sunucunun çaldığı bot anonsunun (WAV->16k LPCM) birleştirilmiş ve temiz bir şekilde bulunduğu kanıtlanmalıdır.
+        -   [ ] **Ortam Bağımsızlığı:** Bu testin başarılı olması için gereken tüm ortam yapılandırmaları (örn: `development.env`'deki IP adresleri, Windows Güvenlik Duvarı kuralları) dokümante edilmeli ve testin kendisi bu yapılandırmalara uygun şekilde çalışmalıdır. Test, artık `0 byte` veri almamalı, beklenen miktarda ses verisini başarıyla işlemelidir.
 
 ---
 
