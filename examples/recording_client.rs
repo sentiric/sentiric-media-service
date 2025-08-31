@@ -35,7 +35,7 @@ async fn main() -> Result<()> {
     // --- EN ÖNEMLİ DÜZELTME BURADA ---
     // URI'ı "s3://BUCKET_ADI/dosya_yolu" yerine "s3:///dosya_yolu" olarak değiştiriyoruz.
     // Bucket adı artık media-service'in kendi konfigürasyonundan (S3_BUCKET_NAME) gelecek.
-    let output_uri = format!("s3:///cagri-kayitlari/test_kayit_{}.wav", rtp_port);
+    let output_uri = format!("s3:///test/test_recording_client_{}.wav", rtp_port);
     
     // Kullanılmayan değişken uyarısını kaldıralım.
     // let _output_path = format!("/sentiric-media-record/real_sound_on_port_{}.wav", rtp_port);

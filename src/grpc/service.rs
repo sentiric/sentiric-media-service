@@ -113,16 +113,41 @@ impl MediaService for MyMediaService {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "play_audio").increment(1);
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
-        let tx = self.app_state.port_manager.get_session_sender(rtp_port).await.ok_or_else(|| Status::not_found(format!("Belirtilen porta ({}) ait aktif oturum yok.", rtp_port)))?;
-        let target_addr = req.rtp_target_addr.parse().map_err(|e| { error!(error = %e, addr = %req.rtp_target_addr, "Geçersiz hedef adres formatı."); Status::invalid_argument("Geçersiz hedef adres formatı") })?;
-        if tx.send(RtpCommand::StopAudio).await.is_err() { error!(port = rtp_port, "StopAudio komutu gönderilemedi, kanal kapalı olabilir."); return Err(Status::internal("RTP oturum kanalı kapalı.")); }
+
+        let tx = self.app_state.port_manager.get_session_sender(rtp_port).await
+            .ok_or_else(|| Status::not_found(format!("Belirtilen porta ({}) ait aktif oturum yok.", rtp_port)))?;
+
+        let target_addr = req.rtp_target_addr.parse().map_err(|e| {
+            error!(error = %e, addr = %req.rtp_target_addr, "Geçersiz hedef adres formatı.");
+            Status::invalid_argument("Geçersiz hedef adres formatı")
+        })?;
+
+        // Önce devam eden bir oynatma varsa durdurma komutu gönder
+        if tx.send(RtpCommand::StopAudio).await.is_err() {
+            error!(port = rtp_port, "StopAudio komutu gönderilemedi, kanal kapalı olabilir.");
+            return Err(Status::internal("RTP oturum kanalı kapalı."));
+        }
+
+        // Yeni oynatma için komut gönder
         let cancellation_token = CancellationToken::new();
-        let command = RtpCommand::PlayAudioUri { audio_uri: req.audio_uri, candidate_target_addr: target_addr, cancellation_token: cancellation_token.clone() };
-        if tx.send(command).await.is_err() { error!(port = rtp_port, "PlayAudioUri komutu gönderilemedi, kanal kapalı."); return Err(Status::internal("RTP oturum kanalı kapalı.")); }
-        info!(port = rtp_port, "PlayAudio komutu sıraya alındı.");
-        cancellation_token.cancelled().await;
-        info!(port = rtp_port, "Anons çalma işlemi tamamlandı veya yeni bir komutla iptal edildi.");
-        Ok(Response::new(PlayAudioResponse { success: true, message: "Playback completed or was interrupted.".to_string() }))
+        let command = RtpCommand::PlayAudioUri {
+            audio_uri: req.audio_uri,
+            candidate_target_addr: target_addr,
+            cancellation_token, // Token hala session'a gönderiliyor
+        };
+
+        if tx.send(command).await.is_err() {
+            error!(port = rtp_port, "PlayAudioUri komutu gönderilemedi, kanal kapalı.");
+            return Err(Status::internal("RTP oturum kanalı kapalı."));
+        }
+
+        info!(port = rtp_port, "PlayAudio komutu başarıyla sıraya alındı.");
+
+        // DÜZELTME: Artık burada BEKLEMİYORUZ. Hemen yanıt dönüyoruz.
+        Ok(Response::new(PlayAudioResponse {
+            success: true,
+            message: "Playback command successfully queued.".to_string(),
+        }))
     }
 
     type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;

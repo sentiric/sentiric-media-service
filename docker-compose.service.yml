@@ -1,4 +1,4 @@
-### docker-compose.service.yml
+### docker-compose.service.yml (GÜNCELLENMİŞ)
 
 networks:
   sentiric-net: { name: "${NETWORK_NAME:-sentiric-net}", driver: bridge }
@@ -26,10 +26,11 @@ services:
       retries: 3
     
   media-service:
-    build: { context: ../sentiric-media-service }
+    build: { context: ../sentiric-media-service } # Build context'i doğru
     env_file: ["${ENV_FILE_PATH}"]
     volumes:
-      - ../sentiric-media-record:${MEDIA_SERVICE_RECORD_BASE_PATH}:rw
+      - "../sentiric-media-record:${MEDIA_SERVICE_RECORD_BASE_PATH}:rw"
+      - "../sentiric-assets:/app/assets:ro"       
       - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
     ports: 
       - "${MEDIA_SERVICE_PORT}:${MEDIA_SERVICE_PORT}"

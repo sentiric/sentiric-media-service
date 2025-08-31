@@ -1,13 +1,13 @@
 # --- STAGE 1: Builder ---
 FROM rust:1.88-slim-bookworm AS builder
 
-# Gerekli derleme araçlarını, buf CLI'ı ve YENİ olarak OpenSSL geliştirme dosyalarını kuruyoruz.
+# Gerekli derleme araçlarını ve buf CLI'ı kuruyoruz.
+# libssl-dev, openssl-sys crate'i için gereklidir.
 RUN apt-get update && \
     apt-get install -y \
     protobuf-compiler \
     git \
     curl \
-    # openssl-sys crate'inin derlenmesi için gerekli
     libssl-dev \
     pkg-config \
     && \
@@ -21,18 +21,19 @@ COPY . .
 
 RUN cargo build --release
 
-# Asset'leri klonla
-RUN git clone --depth 1 https://github.com/sentiric/sentiric-assets.git assets
+# ARTIK GEREKLİ DEĞİL: Bu adımı tamamen kaldırıyoruz.
+# RUN git clone --depth 1 https://github.com/sentiric/sentiric-assets.git assets
 
 # --- STAGE 2: Final (Minimal) Image ---
 FROM debian:bookworm-slim
 
+# Sadece healthcheck için netcat ve SSL için ca-certificates gerekli.
 RUN apt-get update && apt-get install -y netcat-openbsd ca-certificates && rm -rf /var/lib/apt/lists/*
-
 
 WORKDIR /app
 
-COPY --from=builder /app/assets/audio ./assets/audio
+# ARTIK GEREKLİ DEĞİL: Bu adımı da kaldırıyoruz.
+# COPY --from=builder /app/assets/audio ./assets/audio
 
 COPY --from=builder /app/target/release/sentiric-media-service .
 
