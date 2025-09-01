@@ -90,7 +90,8 @@ pub async fn run() -> Result<()> {
         let fmt_layer = fmt::layer()
             .with_target(true)
             .with_line_number(true)
-            .with_span_events(FmtSpan::FULL);
+            // .with_span_events(FmtSpan::FULL); // BU SATIRI YORUMA ALIN
+            .with_span_events(FmtSpan::NONE); // VEYA BUNU EKLEYİN
         subscriber.with(fmt_layer).init();
     } else {
         let fmt_layer = fmt::layer()

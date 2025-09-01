@@ -262,13 +262,33 @@ async fn connect_to_media_service() -> Result<MediaServiceClient<Channel>> {
 }
 
 async fn connect_to_s3() -> Result<S3Client> {
-    env::var("S3_ACCESS_KEY_ID").context("S3_ACCESS_KEY_ID .env dosyasında eksik")?;
-    env::var("S3_SECRET_ACCESS_KEY").context("S3_SECRET_ACCESS_KEY .env dosyasında eksik")?;
-    let config = aws_config::load_defaults(BehaviorVersion::latest()).await;
+    // Ortam değişkenlerini oku
+    let access_key_id = env::var("S3_ACCESS_KEY_ID").context("S3_ACCESS_KEY_ID .env dosyasında eksik")?;
+    let secret_access_key = env::var("S3_SECRET_ACCESS_KEY").context("S3_SECRET_ACCESS_KEY .env dosyasında eksik")?;
+    let endpoint_url = env::var("S3_ENDPOINT_URL").context("S3_ENDPOINT_URL eksik")?;
+    let region = env::var("S3_REGION").context("S3_REGION eksik")?;
+
+    // Kimlik bilgilerini açıkça oluştur
+    let credentials_provider = aws_credential_types::Credentials::new(
+        access_key_id,
+        secret_access_key,
+        None,
+        None,
+        "Static",
+    );
+
+    // SdkConfig'i manuel olarak oluştur
+    let config = aws_config::defaults(BehaviorVersion::latest())
+        .endpoint_url(endpoint_url)
+        .region(aws_config::Region::new(region))
+        .credentials_provider(credentials_provider)
+        .load()
+        .await;
+
+    // S3'e özel yapılandırmayı oluştur (force_path_style MinIO için önemlidir)
     let s3_config = aws_sdk_s3::config::Builder::from(&config)
-        .endpoint_url(env::var("S3_ENDPOINT_URL").context("S3_ENDPOINT_URL eksik")?)
         .force_path_style(true)
-        .region(aws_sdk_s3::config::Region::new(env::var("S3_REGION").context("S3_REGION eksik")?))
         .build();
+
     Ok(S3Client::from_conf(s3_config))
 }
