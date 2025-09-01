@@ -1,8 +1,12 @@
+// File: src/state.rs (GÜNCELLENDİ)
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info};
+
+// YENİ: S3 istemcisini AppState'e eklemek için import.
+use aws_sdk_s3::Client as S3Client;
 
 use crate::audio::AudioCache;
 use crate::rtp::command::RtpCommand;
@@ -12,21 +16,25 @@ type PortsPool = Arc<Mutex<Vec<u16>>>;
 type QuarantinedPorts = Arc<Mutex<Vec<(u16, Instant)>>>;
 
 //=================================================
-// YENİ: MERKEZİ UYGULAMA DURUMU (APPSTATE)
+// MERKEZİ UYGULAMA DURUMU (APPSTATE)
 //=================================================
 #[derive(Clone)]
 pub struct AppState {
     pub port_manager: PortManager,
     pub audio_cache: AudioCache,
+    // YENİ: Paylaşılan S3 istemcisi. Option<> çünkü S3 konfigürasyonu olmayabilir.
+    pub s3_client: Option<Arc<S3Client>>,
     // Gelecekte eklenecekler:
     // pub conference_manager: ConferenceManager,
 }
 
 impl AppState {
-    pub fn new(port_manager: PortManager) -> Self {
+    // DEĞİŞİKLİK: new fonksiyonu artık S3 istemcisini de alıyor.
+    pub fn new(port_manager: PortManager, s3_client: Option<Arc<S3Client>>) -> Self {
         Self {
             port_manager,
             audio_cache: Arc::new(Mutex::new(HashMap::new())),
+            s3_client,
         }
     }
 }

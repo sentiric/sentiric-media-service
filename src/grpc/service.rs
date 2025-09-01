@@ -1,5 +1,4 @@
-// File: src/grpc/service.rs
-
+// File: src/grpc/service.rs (GÜNCELLENDİ)
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -70,9 +69,9 @@ impl MediaService for MyMediaService {
                     let (tx, rx) = mpsc::channel(10);
                     self.app_state.port_manager.add_session(port_to_try, tx).await;
                     
+                    // DEĞİŞİKLİK: RtpSessionConfig artık tüm AppState'i alıyor.
                     let session_config = RtpSessionConfig {
-                        port_manager: self.app_state.port_manager.clone(),
-                        audio_cache: self.app_state.audio_cache.clone(),
+                        app_state: self.app_state.clone(),
                         app_config: self.config.clone(),
                         port: port_to_try,
                     };
@@ -91,7 +90,7 @@ impl MediaService for MyMediaService {
         Err(Status::resource_exhausted("Tüm denemelere rağmen uygun port bulunamadı"))
     }
     
-    #[instrument(skip(self), fields(port = %request.get_ref().rtp_port))]
+    #[instrument(skip(self, request), fields(port = %request.get_ref().rtp_port))]
     async fn release_port(&self, request: Request<ReleasePortRequest>) -> Result<Response<ReleasePortResponse>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "release_port").increment(1);
         
@@ -219,16 +218,13 @@ impl MediaService for MyMediaService {
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
 
-        // 1. Sonucu almak için bir oneshot kanalı oluştur.
         let (tx, rx) = oneshot::channel();
 
-        // 2. Komutu, cevap kanalıyla birlikte gönder.
         let command = RtpCommand::StopPermanentRecording { responder: tx };
         if session_tx.send(command).await.is_err() {
             return Err(Status::internal("Kalıcı kayıt durdurma komutu gönderilemedi."));
         }
 
-        // 3. Arka plan görevinin tamamlanmasını ve sonucu göndermesini bekle.
         match rx.await {
             Ok(Ok(final_uri)) => {
                 info!(uri = %final_uri, "Kayıt başarıyla tamamlandı ve kaydedildi.");

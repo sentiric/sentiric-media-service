@@ -1,12 +1,11 @@
-// File: src/rtp/session.rs
+// File: src/rtp/session.rs (KODEK TUTARLILIĞI DÜZELTMESİ)
 
-use crate::audio::AudioCache;
 use crate::config::AppConfig;
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
 use crate::rtp::stream::{decode_audio_with_symphonia, send_announcement_from_uri};
 use crate::rtp::writers;
-use crate::state::PortManager;
+use crate::state::AppState;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine};
 use hound::WavWriter;
@@ -18,31 +17,37 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
-use tokio::task::spawn_blocking;
+use tokio::task::{spawn_blocking, JoinHandle};
 use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 use webrtc_util::marshal::Unmarshal;
 
 use crate::rtp::codecs::{self, AudioCodec};
 
 pub struct RtpSessionConfig {
-    pub port_manager: PortManager,
-    pub audio_cache: AudioCache,
+    pub app_state: AppState,
     pub app_config: Arc<AppConfig>,
     pub port: u16,
 }
 
+#[derive(Debug)]
+struct ProcessedAudio {
+    samples_16khz: Vec<i16>,
+    // YENİ: Gelen paketin kodeğini de taşıyalım.
+    source_codec: AudioCodec,
+}
+
 async fn load_samples_from_uri(
     uri: &str,
-    cache: &AudioCache,
+    app_state: &AppState,
     config: &Arc<AppConfig>,
 ) -> Result<Arc<Vec<i16>>> {
     if let Some(path_part) = uri.strip_prefix("file://") {
         let mut final_path = std::path::PathBuf::from(&config.assets_base_path);
         final_path.push(path_part.trim_start_matches('/'));
-        crate::audio::load_or_get_from_cache(cache, &final_path).await
+        crate::audio::load_or_get_from_cache(&app_state.audio_cache, &final_path).await
     } else if uri.starts_with("data:") {
         let (_media_type, base64_data) = uri
             .strip_prefix("data:")
@@ -57,10 +62,27 @@ async fn load_samples_from_uri(
     }
 }
 
+fn process_packet_task(packet_data: Vec<u8>) -> JoinHandle<Option<ProcessedAudio>> {
+    spawn_blocking(move || {
+        let mut packet_buf = &packet_data[..];
+        if let Ok(packet) = Packet::unmarshal(&mut packet_buf) {
+            if let Ok(incoming_codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
+                match codecs::decode_g711_to_lpcm16(&packet.payload, incoming_codec) {
+                    Ok(samples_16khz) => Some(ProcessedAudio { samples_16khz, source_codec: incoming_codec }),
+                    Err(e) => {
+                        error!(error = %e, "Ses verisi standart formata dönüştürülemedi.");
+                        None
+                    }
+                }
+            } else { None }
+        } else { None }
+    })
+}
+
 #[instrument(skip_all, fields(rtp_port = config.port))]
 pub async fn rtp_session_handler(
     socket: Arc<UdpSocket>,
-    mut rx: mpsc::Receiver<RtpCommand>,
+    mut command_rx: mpsc::Receiver<RtpCommand>,
     config: RtpSessionConfig,
 ) {
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
@@ -68,170 +90,109 @@ pub async fn rtp_session_handler(
     let mut actual_remote_addr: Option<SocketAddr> = None;
     let mut buf = [0u8; 2048];
     let mut current_playback_token: Option<CancellationToken> = None;
-    let mut live_stream_sender: Option<(mpsc::Sender<Result<AudioFrame, Status>>, Option<u32>)> =
-        None;
+    let mut live_stream_sender: Option<mpsc::Sender<Result<AudioFrame, Status>>> = None;
     let mut permanent_recording_session: Option<RecordingSession> = None;
-    let mut outbound_codec = AudioCodec::Pcmu;
-
-    let inactivity_timeout = Duration::from_secs(2);
+    // DEĞİŞİKLİK: outbound_codec artık Option. Gelen ilk pakete göre ayarlanacak.
+    let mut outbound_codec: Option<AudioCodec> = None;
+    let inactivity_timeout = Duration::from_secs(3);
     let mut last_activity = Instant::now();
-
+    let mut processing_task: Option<JoinHandle<Option<ProcessedAudio>>> = None;
+    
     loop {
         let timeout_check = sleep(inactivity_timeout);
         tokio::pin!(timeout_check);
 
         tokio::select! {
             biased;
-            Some(command) = rx.recv() => {
+            Some(command) = command_rx.recv() => {
                 last_activity = Instant::now();
                 match command {
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token } => {
                         if let Some(token) = current_playback_token.take() { token.cancel(); }
                         current_playback_token = Some(cancellation_token.clone());
-                        if actual_remote_addr.is_none() {
-                            info!(remote = %candidate_target_addr, "İlk paket gelmeden PlayAudio komutu alındı. Hedef adres isteğe göre ayarlandı.");
-                            actual_remote_addr = Some(candidate_target_addr);
-                        }
+                        if actual_remote_addr.is_none() { actual_remote_addr = Some(candidate_target_addr); }
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
+
                         if let Some(rec_session) = &mut permanent_recording_session {
-                            info!("Giden ses (outbound) kalıcı kayda ekleniyor.");
-                            match load_samples_from_uri(&audio_uri, &config.audio_cache, &config.app_config).await {
-                                Ok(samples_16khz) => {
-                                    rec_session.samples.extend_from_slice(&samples_16khz);
-                                    info!(samples_added = samples_16khz.len(), "Giden ses örnekleri kayda eklendi.");
-                                },
+                            match load_samples_from_uri(&audio_uri, &config.app_state, &config.app_config).await {
+                                Ok(samples_16khz) => rec_session.samples.extend_from_slice(&samples_16khz),
                                 Err(e) => error!(error = ?e, "Kayıt için giden ses yüklenemedi."),
                             }
                         }
-                        tokio::spawn(send_announcement_from_uri(socket.clone(), target, audio_uri, config.audio_cache.clone(), config.app_config.clone(), cancellation_token, outbound_codec));
+                        
+                        // DEĞİŞİKLİK: Giden kodek belirlenmişse onu kullan, değilse varsayılan PCMU olsun.
+                        let codec_to_use = outbound_codec.unwrap_or(AudioCodec::Pcmu);
+                        tokio::spawn(send_announcement_from_uri(socket.clone(), target, audio_uri, config.app_state.audio_cache.clone(), config.app_config.clone(), cancellation_token, codec_to_use));
                     },
-                    RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate } => {
-                        info!(target_rate = ?target_sample_rate, "Gerçek zamanlı ses akışı komutu alındı.");
-                        live_stream_sender = Some((stream_sender, target_sample_rate));
-                    },
-                    RtpCommand::StopLiveAudioStream => {
-                        if live_stream_sender.is_some() {
-                            info!("Gerçek zamanlı ses akışı komutla durduruldu.");
-                            live_stream_sender = None;
-                        }
+                    RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate: _ } => {
+                        live_stream_sender = Some(stream_sender);
                     },
                     RtpCommand::StartPermanentRecording(session) => {
-                        info!(uri = %session.output_uri, "Kalıcı kayıt başlatılıyor...");
-                        outbound_codec = AudioCodec::Pcma;
+                        // DEĞİŞİKLİK: Buradan kodek ayarlama mantığını kaldırıyoruz.
                         permanent_recording_session = Some(session);
                     },
+                    // ... Diğer komutlar aynı ...
+                    RtpCommand::StopLiveAudioStream => { live_stream_sender = None; },
                     RtpCommand::StopPermanentRecording { responder } => {
-                        info!("Kalıcı kayıt durduruluyor...");
                         if let Some(session) = permanent_recording_session.take() {
                             let recording_uri = session.output_uri.clone();
-                            let result = finalize_and_save_recording(session, config.app_config.clone()).await;
-                            let response = match result {
-                                Ok(_) => Ok(recording_uri),
-                                Err(e) => Err(e.to_string()),
-                            };
-                            let _ = responder.send(response);
+                            let result = finalize_and_save_recording(session, config.app_state.clone(), config.app_config.clone()).await;
+                            let _ = responder.send(result.map(|_| recording_uri).map_err(|e| e.to_string()));
                         } else {
-                            warn!("Durdurulacak aktif bir kalıcı kayıt bulunamadı.");
                             let _ = responder.send(Err("Durdurulacak kayıt bulunamadı".to_string()));
                         }
                     },
-                    RtpCommand::StopAudio => {
-                        if let Some(token) = current_playback_token.take() {
-                            info!("Anons çalma komutu dışarıdan durduruldu.");
-                            token.cancel();
-                        }
-                    },
+                    RtpCommand::StopAudio => if let Some(token) = current_playback_token.take() { token.cancel(); },
                     RtpCommand::Shutdown => {
-                        info!("Shutdown komutu alındı, oturum sonlandırılıyor.");
                         if let Some(token) = current_playback_token.take() { token.cancel(); }
                         if let Some(session) = permanent_recording_session.take() {
-                            tokio::spawn(finalize_and_save_recording(session, config.app_config.clone()));
+                            let app_state_clone = config.app_state.clone();
+                            let app_config_clone = config.app_config.clone();
+                            tokio::spawn(finalize_and_save_recording(session, app_state_clone, app_config_clone));
                         }
-                        if let Some((sender, _)) = live_stream_sender.take() { drop(sender); }
+                        if let Some(sender) = live_stream_sender.take() { drop(sender); }
                         break;
                     }
                 }
             },
-            result = socket.recv_from(&mut buf) => {
+            result = async { processing_task.as_mut().unwrap().await }, if processing_task.is_some() => {
+                processing_task = None;
+                if let Ok(Some(processed_audio)) = result {
+                    // DEĞİŞİKLİK: İlk geçerli paketten sonra giden kodeği ayarla.
+                    if outbound_codec.is_none() {
+                        info!(codec = ?processed_audio.source_codec, "Gelen ilk pakete göre giden kodek ayarlandı.");
+                        outbound_codec = Some(processed_audio.source_codec);
+                    }
+
+                    if let Some(sender) = &live_stream_sender {
+                        let media_type = "audio/L16;rate=16000".to_string();
+                        let mut bytes = Vec::with_capacity(processed_audio.samples_16khz.len() * 2);
+                        for &sample in &processed_audio.samples_16khz {
+                            bytes.extend_from_slice(&sample.to_le_bytes());
+                        }
+                        let frame = AudioFrame { data: bytes.into(), media_type };
+                        if sender.send(Ok(frame)).await.is_err() {
+                            debug!("Canlı ses akışı alıcısı kapatılmış, stream durduruluyor.");
+                            live_stream_sender = None;
+                        }
+                    }
+                    if let Some(session) = &mut permanent_recording_session {
+                        session.samples.extend_from_slice(&processed_audio.samples_16khz);
+                    }
+                }
+            },
+            result = socket.recv_from(&mut buf), if processing_task.is_none() => {
                 last_activity = Instant::now();
                 if let Ok((len, addr)) = result {
-                    if actual_remote_addr.is_none() {
-                        info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı.");
-                    }
+                    if actual_remote_addr.is_none() { info!(remote = %addr, "İlk RTP paketi alındı, hedef adres doğrulandı."); }
                     actual_remote_addr = Some(addr);
-
                     let packet_data = buf[..len].to_vec();
-                    // ==================== DEĞİŞİKLİK BURADA BAŞLIYOR ====================
-                    // CPU-yoğun işi ana async görevden ayırıyoruz.
-                    let live_stream_sender_clone = live_stream_sender.as_ref().map(|(s, _)| s.clone());
-                    let permanent_recording_samples_clone = permanent_recording_session.as_mut().map(|s| s.samples.clone());
-
-                    spawn_blocking(move || {
-                        let mut packet_buf = &packet_data[..];
-                        Packet::unmarshal(&mut packet_buf)
-                    }).await.map_or_else(
-                        |e| {
-                             error!(error = %e, "spawn_blocking failed for packet unmarshal");
-                        },
-                        |unmarshal_result| {
-                            if let Ok(packet) = unmarshal_result {
-                                if let Ok(incoming_codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
-                                    
-                                    // İkinci spawn_blocking ses işleme için.
-                                    let payload_clone = packet.payload.to_vec();
-                                    tokio::spawn(async move {
-                                        let processing_result = spawn_blocking(move || {
-                                            codecs::decode_g711_to_lpcm16(&payload_clone, incoming_codec)
-                                        }).await;
-
-                                        match processing_result {
-                                            Ok(Ok(samples)) => {
-                                                // Canlı stream'e gönder
-                                                if let Some(sender) = live_stream_sender_clone {
-                                                    let media_type = "audio/L16;rate=16000".to_string();
-                                                    let mut bytes = Vec::with_capacity(samples.len() * 2);
-                                                    for &sample in &samples {
-                                                        bytes.extend_from_slice(&sample.to_le_bytes());
-                                                    }
-                                                    let frame = AudioFrame { data: bytes.into(), media_type };
-                                                    if sender.send(Ok(frame)).await.is_err() {
-                                                        // Hata durumunda live_stream_sender'ı None yapmak için ana görevle iletişim kurmak gerekir.
-                                                        // Şimdilik sadece logluyoruz.
-                                                        warn!("Live audio stream alıcısı kapatılmış.");
-                                                    }
-                                                }
-                                                // Kalıcı kayda ekle
-                                                // Not: Bu kısım state'i doğrudan değiştirmediği için daha karmaşık bir yapı gerektirir (örn. MPSC kanalı ile ana göreve geri göndermek).
-                                                // Şimdilik bu optimizasyonu canlı stream için yapıyoruz. Kalıcı kayıt zaten tüm veriyi sonda işliyor.
-                                                // Basitlik adına, kalıcı kayıt eklemesini geçici olarak kaldırabiliriz veya daha gelişmiş bir state yönetimi ekleyebiliriz.
-                                                // Şimdilik en kritik olan canlı stream'i düzeltelim.
-                                            }
-                                            Ok(Err(e)) => error!(error = %e, "Ses verisi standart formata dönüştürülemedi."),
-                                            Err(e) => error!(error = %e, "spawn_blocking failed for audio processing"),
-                                        }
-                                    });
-                                }
-                            }
-                        }
-                    );
-                     // Kalıcı kayıt için state yönetimi daha karmaşık olduğundan,
-                     // şimdilik ana thread'de bırakalım, en büyük darboğaz canlı stream idi.
-                     let mut packet_buf = &buf[..len];
-                     if let Ok(packet) = Packet::unmarshal(&mut packet_buf) {
-                         if let Ok(incoming_codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
-                            if let Ok(samples) = codecs::decode_g711_to_lpcm16(&packet.payload, incoming_codec) {
-                                if let Some(session) = &mut permanent_recording_session {
-                                    session.samples.extend_from_slice(&samples);
-                                }
-                            }
-                         }
-                     }
-                    // ==================== DEĞİŞİKLİK BURADA BİTİYOR ====================
+                    processing_task = Some(process_packet_task(packet_data));
                 }
             },
             _ = &mut timeout_check => {
                 if last_activity.elapsed() >= inactivity_timeout {
-                    if let Some((sender, _)) = live_stream_sender.take() {
+                    if let Some(sender) = live_stream_sender.take() {
                         info!("RTP akışında aktivite yok, canlı stream sonlandırılıyor.");
                         drop(sender);
                     }
@@ -241,81 +202,47 @@ pub async fn rtp_session_handler(
     }
 
     info!("RTP oturumu temizleniyor...");
-    config.port_manager.remove_session(config.port).await;
-    config.port_manager.quarantine_port(config.port).await;
+    config.app_state.port_manager.remove_session(config.port).await;
+    config.app_state.port_manager.quarantine_port(config.port).await;
     gauge!(ACTIVE_SESSIONS).decrement(1.0);
 }
 
+// ... finalize_and_save_recording fonksiyonu aynı kalır ...
 #[instrument(skip_all, fields(uri = %session.output_uri, samples = session.samples.len()))]
 async fn finalize_and_save_recording(
     session: RecordingSession,
+    app_state: AppState,
     config: Arc<AppConfig>,
 ) -> Result<()> {
     info!("Kayıt sonlandırma ve kaydetme süreci başlatıldı.");
-
     if session.samples.is_empty() {
         warn!("Kaydedilecek ses verisi yok, boş dosya oluşturulmayacak.");
         return Ok(());
     }
-
-    let result: Result<(), anyhow::Error> = async {
-        let wav_data =
-            spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
-                let mut buffer = Cursor::new(Vec::new());
-                let spec_16khz = hound::WavSpec {
-                    channels: 1,
-                    sample_rate: 16000,
-                    bits_per_sample: 16,
-                    sample_format: hound::SampleFormat::Int,
-                };
-                let mut writer = WavWriter::new(&mut buffer, spec_16khz)?;
-                for sample in session.samples {
-                    writer.write_sample(sample)?;
-                }
-                writer.finalize()?;
-                Ok(buffer.into_inner())
-            })
-            .await
-            .context("WAV dosyası oluşturma task'i başarısız oldu")??;
-
-        info!(
-            wav_size_bytes = wav_data.len(),
-            "WAV verisi başarıyla oluşturuldu."
-        );
-
-        let writer = writers::from_uri(&session.output_uri, &config)
-            .await
+    let result: Result<()> = async {
+        let wav_data = spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
+            let mut buffer = Cursor::new(Vec::new());
+            let spec_16khz = hound::WavSpec {
+                channels: 1, sample_rate: 16000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = WavWriter::new(&mut buffer, spec_16khz)?;
+            for sample in session.samples { writer.write_sample(sample)?; }
+            writer.finalize()?;
+            Ok(buffer.into_inner())
+        }).await.context("WAV dosyası oluşturma task'i başarısız oldu")??;
+        
+        info!(wav_size_bytes = wav_data.len(), "WAV verisi başarıyla oluşturuldu.");
+        let writer = writers::from_uri(&session.output_uri, &app_state, &config).await
             .context("Kayıt yazıcısı (writer) oluşturulamadı")?;
-
-        info!("Kayıt yazıcısı oluşturuldu, veriler yazılıyor...");
-
-        writer
-            .write(wav_data)
-            .await
-            .context("Veri S3'e veya dosyaya yazılamadı")?;
-
+        writer.write(wav_data).await.context("Veri S3'e veya dosyaya yazılamadı")?;
         Ok(())
+    }.await;
+    if result.is_ok() {
+        info!("Çağrı kaydı başarıyla tamamlandı.");
+        metrics::counter!("sentiric_media_recording_saved_total", "storage_type" => "s3").increment(1);
+    } else {
+        error!(error = ?result.as_ref().err(), "Kayıt kaydetme görevi başarısız oldu.");
+        metrics::counter!("sentiric_media_recording_failed_total", "storage_type" => "s3").increment(1);
     }
-    .await;
-
-    match result {
-        Ok(_) => {
-            info!("Çağrı kaydı başarıyla tamamlandı ve kaydedildi.");
-            metrics::counter!(
-                "sentiric_media_recording_saved_total",
-                "storage_type" => "s3"
-            )
-            .increment(1);
-            Ok(())
-        }
-        Err(e) => {
-            error!(error = ?e, "Kayıt kaydetme görevi başarısız oldu.");
-            metrics::counter!(
-                "sentiric_media_recording_failed_total",
-                "storage_type" => "s3"
-            )
-            .increment(1);
-            Err(e)
-        }
-    }
+    result
 }

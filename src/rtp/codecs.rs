@@ -1,4 +1,4 @@
-// File: src/rtp/codecs.rs (YENİ DOSYA)
+// File: src/rtp/codecs.rs (BİRİM TESTLERİ EKLENDİ)
 // Açıklama: Bu modül, media-service'in ses işleme beynidir.
 // Gelen çeşitli ses formatlarını (PCMU, PCMA) standart bir ara formata (16kHz LPCM) çevirir
 // ve bu standart formattaki sesi, hedefin beklediği formata (tekrar PCMU/PCMA) dönüştürür.
@@ -174,3 +174,80 @@ pub const ULAW_TO_PCM: [i16; 256] = [
     260, 244, 228, 212, 196, 180, 164, 148, 132, 120, 112, 104, 96, 88, 80, 72, 64,
     56, 48, 40, 32, 24, 16, 8, 0,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Bilinen bir 8kHz PCMU (u-law) byte dizisi (basit bir sinüs dalgası veya ton)
+    const TEST_PCMU_PAYLOAD: [u8; 160] = [
+        0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d,
+        0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93,
+        0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec,
+        0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3,
+        0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82,
+        0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd,
+        0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd,
+        0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82,
+        0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec, 0xff, 0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3,
+        0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec
+    ];
+
+    #[test]
+    fn test_pcmu_to_lpcm16_conversion() {
+        let result = decode_g711_to_lpcm16(&TEST_PCMU_PAYLOAD, AudioCodec::Pcmu);
+        assert!(result.is_ok(), "Dönüşüm başarısız olmamalıydı.");
+        
+        let samples_16khz = result.unwrap();
+        
+        // 8kHz'den 16kHz'e yeniden örnekleme yapıldığı için, örnek sayısı yaklaşık iki katına çıkmalı.
+        // Resampler'ın çalışma şekline bağlı olarak tam olarak 2 katı olmayabilir.
+        let expected_min_len = (TEST_PCMU_PAYLOAD.len() * 2) - 10; // Küçük bir tolerans
+        let expected_max_len = (TEST_PCMU_PAYLOAD.len() * 2) + 10;
+        
+        assert!(
+            samples_16khz.len() >= expected_min_len && samples_16khz.len() <= expected_max_len,
+            "Çıktı örnek sayısı beklenenden farklı. Beklenen aralık: {}-{}, Gelen: {}",
+            expected_min_len, expected_max_len, samples_16khz.len()
+        );
+
+        // Değerlerin i16 aralığında olduğundan emin olalım.
+        assert!(samples_16khz.iter().all(|&s| s as i32 >= i16::MIN as i32 && s as i32 <= i16::MAX as i32));
+    }
+
+    #[test]
+    fn test_lpcm16_to_g711_roundtrip() {
+        // 1. Adım: Başlangıç 16kHz LPCM verisi oluşturalım.
+        let original_lpcm16: Vec<i16> = (0..320).map(|i| ((i as f32 * 0.1).sin() * 10000.0) as i16).collect();
+        
+        // 2. Adım: Bunu 8kHz PCMA'ya encode edelim.
+        let pcma_result = encode_lpcm16_to_g711(&original_lpcm16, AudioCodec::Pcma);
+        assert!(pcma_result.is_ok());
+        let pcma_payload = pcma_result.unwrap();
+
+        // Çıktı boyutu yaklaşık yarısı olmalı.
+        assert!(pcma_payload.len() > 150 && pcma_payload.len() < 170);
+
+        // 3. Adım: Oluşturulan PCMA'yı tekrar 16kHz LPCM'e decode edelim.
+        let roundtrip_lpcm16_result = decode_g711_to_lpcm16(&pcma_payload, AudioCodec::Pcma);
+        assert!(roundtrip_lpcm16_result.is_ok());
+        let roundtrip_lpcm16 = roundtrip_lpcm16_result.unwrap();
+
+        // 4. Adım: Sonuçları karşılaştıralım.
+        // G.711 kayıplı bir sıkıştırma olduğu için birebir aynı olmayacaklar.
+        // Ancak boyutları çok yakın olmalı.
+        assert!((original_lpcm16.len() as i32 - roundtrip_lpcm16.len() as i32).abs() < 10);
+        
+        // Örneklerin ortalama farkının küçük olduğunu doğrulayalım.
+        let min_len = original_lpcm16.len().min(roundtrip_lpcm16.len());
+        let total_diff: i64 = original_lpcm16.iter().zip(roundtrip_lpcm16.iter())
+            .take(min_len)
+            .map(|(&a, &b)| (a as i64 - b as i64).abs())
+            .sum();
+        
+        let avg_diff = total_diff / min_len as i64;
+
+        // Ortalama farkın makul bir değerden (örn: 500) küçük olduğunu varsayalım.
+        assert!(avg_diff < 500, "Roundtrip sonrası ortalama fark çok yüksek: {}", avg_diff);
+    }
+}

@@ -1,18 +1,15 @@
-// File: src/rtp/writers.rs
-
+// File: src/rtp/writers.rs (GÜNCELLENDİ)
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use aws_config::meta::region::RegionProviderChain;
-use aws_config::{BehaviorVersion, Region};
-use aws_credential_types::Credentials;
-use aws_sdk_s3::config::Builder as S3ConfigBuilder;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::Client as S3Client;
+use aws_sdk_s3::Client as S3Client; // DEĞİŞİKLİK: Client'ı Arc içinde tutacağız
 use std::path::Path;
+use std::sync::Arc; // DEĞİŞİKLİK
 use tracing::info;
 use url::Url;
 
 use crate::config::AppConfig;
+use crate::state::AppState; // YENİ
 
 #[async_trait]
 pub trait AsyncRecordingWriter: Send + Sync {
@@ -37,7 +34,8 @@ impl AsyncRecordingWriter for FileWriter {
 }
 
 struct S3Writer {
-    client: S3Client,
+    // DEĞİŞİKLİK: Artık S3 client'ını Arc ile paylaşıyoruz.
+    client: Arc<S3Client>,
     bucket: String,
     key: String,
 }
@@ -59,24 +57,27 @@ impl AsyncRecordingWriter for S3Writer {
     }
 }
 
+// DEĞİŞİKLİK: Fonksiyon artık AppConfig yerine AppState alıyor.
 pub async fn from_uri(
     uri_str: &str,
+    app_state: &AppState,
     config: &AppConfig,
 ) -> Result<Box<dyn AsyncRecordingWriter>> {
     let uri = Url::parse(uri_str).context("Geçersiz kayıt URI formatı")?;
 
     match uri.scheme() {
         "file" => {
-            let path = uri
-                .to_file_path()
-                .map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
-            Ok(Box::new(FileWriter {
-                path: path.to_string_lossy().to_string(),
-            }))
+            let path = uri.to_file_path().map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
+            Ok(Box::new(FileWriter { path: path.to_string_lossy().to_string() }))
         }
         "s3" => {
             let s3_config = config.s3_config.as_ref().ok_or_else(|| {
                 anyhow!("S3 URI'si belirtildi ancak S3 konfigürasyonu ortamda bulunamadı.")
+            })?;
+            
+            // YENİ: S3 istemcisini oluşturmak yerine AppState'ten alıyoruz.
+            let client = app_state.s3_client.clone().ok_or_else(|| {
+                anyhow!("S3 URI'si kullanıldı ancak paylaşılan S3 istemcisi başlatılamamış.")
             })?;
 
             let bucket = s3_config.bucket_name.clone();
@@ -86,32 +87,7 @@ pub async fn from_uri(
                 return Err(anyhow!("S3 URI'sinde dosya yolu (key) belirtilmelidir."));
             }
 
-            let region_provider = RegionProviderChain::first_try(Region::new(s3_config.region.clone()));
-
-            let sdk_config = aws_config::defaults(BehaviorVersion::latest())
-                .region(region_provider)
-                .endpoint_url(&s3_config.endpoint_url)
-                .credentials_provider(Credentials::new(
-                    &s3_config.access_key_id,
-                    &s3_config.secret_access_key,
-                    None,
-                    None,
-                    "Static",
-                ))
-                .load()
-                .await;
-            
-            // MinIO ve R2 gibi S3 uyumlu sistemler için yol tabanlı adreslemeyi zorunlu kıl
-            let s3_client_config = S3ConfigBuilder::from(&sdk_config)
-                .force_path_style(true)
-                .build();
-            let client = S3Client::from_conf(s3_client_config);
-
-            Ok(Box::new(S3Writer {
-                client,
-                bucket,
-                key,
-            }))
+            Ok(Box::new(S3Writer { client, bucket, key }))
         }
         scheme => Err(anyhow!("Desteklenmeyen kayıt URI şeması: {}", scheme)),
     }

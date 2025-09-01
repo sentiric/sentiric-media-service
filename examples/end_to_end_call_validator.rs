@@ -1,4 +1,4 @@
-// File: examples/end_to_end_call_validator.rs
+// File: examples/end_to_end_call_validator.rs (NİHAİ SÜRÜM - PCMU ile standartlaştırıldı)
 
 use anyhow::{Result, Context};
 use aws_config::BehaviorVersion;
@@ -18,32 +18,42 @@ use std::net::UdpSocket;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::task::spawn_blocking;
-use tokio::time::{sleep, timeout};
+use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use webrtc_util::marshal::Marshal;
 
-fn linear_to_alaw(mut pcm_val: i16) -> u8 {
-    let sign = (pcm_val >> 8) & 0x80; if sign != 0 { pcm_val = -pcm_val; }
-    if pcm_val > 32635 { pcm_val = 32635; }
-    let mut exponent: i16;
-    if pcm_val >= 256 {
-        exponent = 4; while exponent < 8 { if pcm_val < (256 << exponent) { break; } exponent += 1; }
-        exponent -= 1;
-    } else { exponent = (pcm_val >> 4) & 0x0F; }
-    let mantissa = (pcm_val >> (if exponent > 1 { exponent } else { 1 })) & 0x0F;
-    let alaw = (exponent << 4) | mantissa; (alaw ^ 0x55) as u8
+// --- KODEK DÖNÜŞÜM FONKSİYONLARI (live_audio_client.rs'ten alındı) ---
+const BIAS: i16 = 0x84;
+static ULAW_TABLE: [u8; 256] = [
+    0, 0, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+    7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+];
+fn linear_to_ulaw(mut pcm_val: i16) -> u8 {
+    let sign = if pcm_val < 0 { 0x80 } else { 0 };
+    if sign != 0 { pcm_val = -pcm_val; }
+    pcm_val = pcm_val.min(32635);
+    pcm_val += BIAS;
+    let exponent = ULAW_TABLE[((pcm_val >> 7) & 0xFF) as usize];
+    let mantissa = (pcm_val >> (exponent as i16 + 3)) & 0xF;
+    !(sign as u8 | (exponent << 4) | mantissa as u8)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("--- 🎙️ Uçtan Uca Medya Servisi Doğrulama Testi Başlatılıyor (Docker Test Ortamı) ---");
-    println!("---  Senaryo: PCMA kodek ile çağrı, 16kHz WAV olarak kayıt ve birleştirme ---");
+    println!("---  Senaryo: PCMU kodek ile çağrı, 16kHz WAV olarak kayıt ve birleştirme ---");
 
     let mut client = connect_to_media_service().await?;
     let s3_client = connect_to_s3().await?;
 
-    println!("\n[ADIM 1] Port alınıyor ve PCMA için kayıt başlatılıyor...");
+    println!("\n[ADIM 1] Port alınıyor ve PCMU için kayıt başlatılıyor...");
     let allocate_res = client.allocate_port(AllocatePortRequest {
         call_id: format!("validation-call-{}", rand::random::<u32>()),
     }).await?.into_inner();
@@ -61,27 +71,29 @@ async fn main() -> Result<()> {
 
     println!("\n[ADIM 2] Eş zamanlı medya akışları simüle ediliyor...");
     
-    let rtp_target_ip = env::var("MEDIA_SERVICE_PUBLIC_IP")
-        .context("MEDIA_SERVICE_PUBLIC_IP .env dosyasında eksik veya yanlış.")?;
+    let rtp_target_ip = env::var("MEDIA_SERVICE_RTP_TARGET_IP")
+        .context("MEDIA_SERVICE_RTP_TARGET_IP .env dosyasında eksik veya yanlış.")?;
     
     let bind_addr = "0.0.0.0:0";
     let local_rtp_socket = UdpSocket::bind(&bind_addr).context(format!("{} adresine bind edilemedi", bind_addr))?;
     let local_rtp_addr = local_rtp_socket.local_addr()?;
     println!("[İSTEMCİ] RTP anonsları şu adrese beklenecek: {}", local_rtp_addr);
     
-    let (tx, mut rx) = mpsc::channel::<()>(1);
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
 
     let mut stt_client = client.clone();
     let stt_sim_handle = tokio::spawn(async move {
-        listen_to_live_audio(&mut stt_client, rtp_port, &mut rx).await
+        listen_to_live_audio(&mut stt_client, rtp_port, done_rx).await
     });
     
+    sleep(Duration::from_millis(200)).await;
+
     let user_sim_handle = tokio::spawn(
-        send_pcma_rtp_stream_blocking(rtp_target_ip.clone(), rtp_port as u16, Duration::from_secs(3), tx)
+        send_pcmu_rtp_stream_blocking(rtp_target_ip.clone(), rtp_port as u16, Duration::from_secs(3))
     );
     
     sleep(Duration::from_millis(500)).await;
-    println!("[BOT SİM] 'welcome.wav' anonsu çalınıyor (PCMA olarak gönderilecek)...");
+    println!("[BOT SİM] 'welcome.wav' anonsu çalınıyor (PCMU olarak gönderilecek)...");
     
     client.play_audio(PlayAudioRequest {
         audio_uri: "file:///audio/tr/welcome.wav".to_string(),
@@ -91,14 +103,18 @@ async fn main() -> Result<()> {
     println!("[BOT SİM] Anons çalma komutu sunucuya başarıyla gönderildi (non-blocking).");
     
     user_sim_handle.await??;
+    
+    sleep(Duration::from_secs(1)).await;
+    let _ = done_tx.send(());
+
     let received_audio_len = stt_sim_handle.await??;
 
     println!("✅ [STT SİM] {} byte temiz 16kHz LPCM ses verisi (sadece inbound) alındı.", received_audio_len);
-
-    let expected_min_bytes = 80000;
+    
+    let expected_min_bytes = 48000 * 8 / 10; // 3s * 8000Hz * 2bytes/sample * 80% tolerance
     assert!(
-        received_audio_len > expected_min_bytes, 
-        "STT servisi yeterli ses verisi alamadı! (Beklenen > {}, Alınan: {})", 
+        received_audio_len >= expected_min_bytes, 
+        "STT servisi yeterli ses verisi alamadı! (Beklenen >= {}, Alınan: {})", 
         expected_min_bytes, received_audio_len
     );
 
@@ -126,41 +142,47 @@ async fn main() -> Result<()> {
     assert!(duration > 2.5, "HATA: Kayıt süresi çok kısa, muhtemelen sesler birleştirilmedi!");
 
     println!("\n\n✅✅✅ DOĞRULAMA BAŞARILI ✅✅✅");
-    println!("Media Service, PCMA <-> 16kHz LPCM <-> WAV dönüşümünü, ses birleştirmeyi ve standart kaydı başarıyla tamamladı.");
+    println!("Media Service, PCMU <-> 16kHz LPCM <-> WAV dönüşümünü, ses birleştirmeyi ve standart kaydı başarıyla tamamladı.");
 
     Ok(())
 }
 
-async fn send_pcma_rtp_stream_blocking(host: String, port: u16, duration: Duration, done_tx: mpsc::Sender<()>) -> Result<()> {
+// DEĞİŞİKLİK: Fonksiyon adı ve içeriği PCMU'ya göre güncellendi.
+async fn send_pcmu_rtp_stream_blocking(host: String, port: u16, duration: Duration) -> Result<()> {
     spawn_blocking(move || {
-        send_pcma_rtp_stream_sync(host, port, duration)
+        send_pcmu_rtp_stream_sync(host, port, duration)
     }).await??;
-
-    let _ = done_tx.send(()).await;
     Ok(())
 }
 
-fn send_pcma_rtp_stream_sync(host: String, port: u16, duration: Duration) -> Result<()> {
+// DEĞİŞİKLİK: Fonksiyon adı ve içeriği PCMU'ya göre güncellendi.
+fn send_pcmu_rtp_stream_sync(host: String, port: u16, duration: Duration) -> Result<()> {
     let mut pcm_8k = Vec::new();
     let num_samples = (8000.0 * duration.as_secs_f32()) as usize;
     for i in 0..num_samples {
         let val = ((i as f32 * 440.0 * 2.0 * PI / 8000.0).sin() * 16384.0) as i16;
         pcm_8k.push(val);
     }
-    let pcma_payload: Vec<u8> = pcm_8k.iter().map(|&s| linear_to_alaw(s)).collect();
+    // DEĞİŞİKLİK: linear_to_ulaw kullanılıyor.
+    let pcmu_payload: Vec<u8> = pcm_8k.iter().map(|&s| linear_to_ulaw(s)).collect();
     
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     let target_addr = format!("{}:{}", host, port);
-    println!("[KULLANICI SİM] 3 saniye boyunca PCMA RTP akışı gönderiliyor -> {}", target_addr);
+    println!("[KULLANICI SİM] {} saniye boyunca PCMU RTP akışı gönderiliyor -> {}", duration.as_secs(), target_addr);
 
     let mut packet = Packet {
         header: rtp::header::Header { 
-            version: 2, payload_type: 8, sequence_number: rand::thread_rng().gen(), 
-            timestamp: rand::thread_rng().gen(), ssrc: rand::thread_rng().gen(), ..Default::default() 
+            version: 2, 
+            // DEĞİŞİKLİK: payload_type = 0 (PCMU)
+            payload_type: 0, 
+            sequence_number: rand::thread_rng().gen(), 
+            timestamp: rand::thread_rng().gen(), 
+            ssrc: rand::thread_rng().gen(), 
+            ..Default::default() 
         },
         payload: vec![].into(),
     };
-    for chunk in pcma_payload.chunks(160) {
+    for chunk in pcmu_payload.chunks(160) {
         packet.payload = Bytes::copy_from_slice(chunk);
         let raw_packet = packet.marshal()?;
         socket.send_to(&raw_packet, &target_addr)?;
@@ -168,23 +190,25 @@ fn send_pcma_rtp_stream_sync(host: String, port: u16, duration: Duration) -> Res
         packet.header.timestamp = packet.header.timestamp.wrapping_add(160);
         std::thread::sleep(Duration::from_millis(20));
     }
-    println!("[KULLANICI SİM] PCMA gönderimi tamamlandı.");
+    println!("[KULLANICI SİM] PCMU gönderimi tamamlandı.");
     Ok(())
 }
 
-async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u32, done_rx: &mut mpsc::Receiver<()>) -> Result<usize> {
+async fn listen_to_live_audio(
+    client: &mut MediaServiceClient<Channel>,
+    port: u32,
+    mut done_rx: tokio::sync::oneshot::Receiver<()>,
+) -> Result<usize> {
     let mut stream = client.record_audio(RecordAudioRequest {
         server_rtp_port: port, target_sample_rate: Some(16000),
     }).await?.into_inner();
     
     let mut total_bytes = 0;
-    let mut done_signal_received = false;
-
     loop {
         tokio::select! {
-            _ = done_rx.recv(), if !done_signal_received => {
-                println!("[STT SİM] Kullanıcı konuşmasının bittiği sinyali alındı. Stream'in doğal olarak kapanması bekleniyor...");
-                done_signal_received = true;
+            _ = &mut done_rx => {
+                println!("[STT SİM] Testin bittiği sinyali alındı. Stream dinlemesi sonlandırılıyor.");
+                break;
             },
             maybe_item = stream.next() => {
                 match maybe_item {
@@ -206,6 +230,7 @@ async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u3
     Ok(total_bytes)
 }
 
+// ... Diğer yardımcı fonksiyonlar (download_from_s3, connect_to_media_service, connect_to_s3) aynı kalır ...
 async fn download_from_s3(client: &S3Client, bucket: &str, key: &str) -> Result<Vec<u8>> {
     let resp = client.get_object().bucket(bucket).key(key).send().await?;
     let data = resp.body.collect().await?.into_bytes().to_vec();

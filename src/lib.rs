@@ -1,4 +1,4 @@
-// src/lib.rs
+// src/lib.rs (GÜNCELLENDİ)
 pub mod config;
 pub mod state;
 pub mod grpc;
@@ -31,6 +31,44 @@ use tracing_subscriber::{
 
 use state::{AppState, PortManager};
 
+// YENİ: S3 istemcisi oluşturmak için gerekli importlar.
+use aws_config::meta::region::RegionProviderChain;
+use aws_config::{BehaviorVersion, Region};
+use aws_credential_types::Credentials;
+use aws_sdk_s3::config::Builder as S3ConfigBuilder;
+use aws_sdk_s3::Client as S3Client;
+
+// YENİ: S3 istemcisini oluşturan yardımcı fonksiyon.
+async fn create_s3_client(config: &AppConfig) -> Result<Option<Arc<S3Client>>> {
+    if let Some(s3_config) = &config.s3_config {
+        info!("S3 konfigürasyonu bulundu, S3 istemcisi oluşturuluyor...");
+        let region_provider = RegionProviderChain::first_try(Region::new(s3_config.region.clone()));
+        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+            .region(region_provider)
+            .endpoint_url(&s3_config.endpoint_url)
+            .credentials_provider(Credentials::new(
+                &s3_config.access_key_id,
+                &s3_config.secret_access_key,
+                None,
+                None,
+                "Static",
+            ))
+            .load()
+            .await;
+        
+        let s3_client_config = S3ConfigBuilder::from(&sdk_config)
+            .force_path_style(true)
+            .build();
+        let client = S3Client::from_conf(s3_client_config);
+        
+        info!("S3 istemcisi başarıyla oluşturuldu.");
+        return Ok(Some(Arc::new(client)));
+    }
+    warn!("S3 konfigürasyonu bulunamadı, S3 kayıt özelliği devre dışı.");
+    Ok(None)
+}
+
+
 pub async fn run() -> Result<()> {
     let _ = dotenvy::from_filename("development.env");
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
@@ -42,20 +80,19 @@ pub async fn run() -> Result<()> {
         .or_else(|_| EnvFilter::try_new(&config.rust_log))?;
     let subscriber = Registry::default().with(env_filter);
 
-    // OLMASI GEREKEN DOĞRU KOD:
+    // DEĞİŞİKLİK: Development ortamında daha detaylı loglama.
     if config.env == "development" {
         let fmt_layer = fmt::layer()
-            // .with_target(true)
-            // .with_line_number(true)
+            .with_target(true)
+            .with_line_number(true)
             // DEBUG ve TRACE seviyelerinde detaylı span olaylarını göster
-            // .with_span_events(FmtSpan::FULL); 
-            .with_span_events(FmtSpan::NONE);
+            .with_span_events(FmtSpan::FULL);
         subscriber.with(fmt_layer).init();
     } else {
         let fmt_layer = fmt::layer()
             .json()
             .with_current_span(true)
-            // Production'da INFO seviyesinde span olaylarını GİZLE
+            // Production'da span olaylarını GİZLE
             .with_span_events(FmtSpan::NONE); 
         subscriber.with(fmt_layer).init();
     }
@@ -65,7 +102,10 @@ pub async fn run() -> Result<()> {
 
     let tls_config = tls::load_server_tls_config().await.context("TLS konfigürasyonu yüklenemedi")?;
     let port_manager = PortManager::new(config.rtp_port_min, config.rtp_port_max);
-    let app_state = AppState::new(port_manager.clone());
+    
+    // YENİ: S3 istemcisini oluştur ve AppState'e ekle.
+    let s3_client = create_s3_client(&config).await?;
+    let app_state = AppState::new(port_manager.clone(), s3_client);
 
     let reclamation_manager = app_state.port_manager.clone();
     let quarantine_duration = config.rtp_port_quarantine_duration;
@@ -109,11 +149,11 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // DÜZELTME: MediaServiceClient'i doğru yerden import ediyoruz
     use sentiric_contracts::sentiric::media::v1::media_service_client::MediaServiceClient;
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
+    #[ignore] // Bu test tam bir servis başlatır, CI'da koşmak yerine manuel çalıştırılmalı.
     async fn test_start_recording_rpc_exists() {
         let _ = dotenvy::from_filename("development.env");
 
@@ -149,7 +189,6 @@ mod tests {
             .await
             .expect("İstemci bağlanamadı");
 
-        // DÜZELTME: Artık doğru yoldan çağırıyoruz.
         let mut client = MediaServiceClient::new(channel);
 
         let allocate_res = client.allocate_port(AllocatePortRequest {

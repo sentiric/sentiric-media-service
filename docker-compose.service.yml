@@ -26,7 +26,9 @@ services:
       retries: 3
     
   media-service:
-    build: { context: ../sentiric-media-service } # Build context'i doğru
+    # DEĞİŞİKLİK: build context'i standart hale getirildi. 
+    # Bu komut artık sentiric-media-service dizini içinden çalıştırılmalıdır.
+    build: { context: . } 
     env_file: ["${ENV_FILE_PATH}"]
     volumes:
       - "../sentiric-media-record:${MEDIA_SERVICE_RECORD_BASE_PATH}:rw"
