@@ -1,7 +1,7 @@
 // examples/agent_client.rs
 
 use anyhow::Result;
-use std::env;
+use std::env; // EKLE
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 
 // Artık doğrudan `sentiric_contracts`'e erişiyoruz.
@@ -13,12 +13,12 @@ use sentiric_contracts::sentiric::media::v1::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // DEĞİŞİKLİK: .ok() yerine, sonucu kontrol edip hata varsa panic'e zorluyoruz.
-    match dotenvy::from_filename("development.env") {
-        Ok(_) => println!("'development.env' dosyası istemci için başarıyla yüklendi."),
+    // --- DEĞİŞİKLİK: ESNEK .ENV YÜKLEME ---
+    let env_file = env::var("ENV_FILE").unwrap_or_else(|_| "development.env".to_string());
+    match dotenvy::from_filename(&env_file) {
+        Ok(_) => println!("'{}' dosyası istemci için başarıyla yüklendi.", env_file),
         Err(e) => {
-            // Test istemcisi için panic! daha uygundur, çünkü loglama altyapısı kurulmamış olabilir.
-            panic!("'development.env' dosyası yüklenemedi: {}", e);
+            panic!("'{}' dosyası yüklenemedi: {}", env_file, e);
         }
     };
 

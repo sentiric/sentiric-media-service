@@ -1,5 +1,4 @@
-// File: src/rtp/session.rs (KODEK TUTARLILIĞI DÜZELTMESİ)
-
+// File: src/rtp/session.rs (TAM VE DOĞRU SÜRÜM)
 use crate::config::AppConfig;
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
@@ -14,7 +13,7 @@ use rtp::packet::Packet;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+// use std::time::Duration; // BU SATIRI SİLİN VEYA YORUMA ALIN
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::{spawn_blocking, JoinHandle};
@@ -35,7 +34,6 @@ pub struct RtpSessionConfig {
 #[derive(Debug)]
 struct ProcessedAudio {
     samples_16khz: Vec<i16>,
-    // YENİ: Gelen paketin kodeğini de taşıyalım.
     source_codec: AudioCodec,
 }
 
@@ -92,9 +90,8 @@ pub async fn rtp_session_handler(
     let mut current_playback_token: Option<CancellationToken> = None;
     let mut live_stream_sender: Option<mpsc::Sender<Result<AudioFrame, Status>>> = None;
     let mut permanent_recording_session: Option<RecordingSession> = None;
-    // DEĞİŞİKLİK: outbound_codec artık Option. Gelen ilk pakete göre ayarlanacak.
     let mut outbound_codec: Option<AudioCodec> = None;
-    let inactivity_timeout = Duration::from_secs(3);
+    let inactivity_timeout = config.app_config.rtp_session_inactivity_timeout;
     let mut last_activity = Instant::now();
     let mut processing_task: Option<JoinHandle<Option<ProcessedAudio>>> = None;
     
@@ -120,7 +117,6 @@ pub async fn rtp_session_handler(
                             }
                         }
                         
-                        // DEĞİŞİKLİK: Giden kodek belirlenmişse onu kullan, değilse varsayılan PCMU olsun.
                         let codec_to_use = outbound_codec.unwrap_or(AudioCodec::Pcmu);
                         tokio::spawn(send_announcement_from_uri(socket.clone(), target, audio_uri, config.app_state.audio_cache.clone(), config.app_config.clone(), cancellation_token, codec_to_use));
                     },
@@ -128,10 +124,8 @@ pub async fn rtp_session_handler(
                         live_stream_sender = Some(stream_sender);
                     },
                     RtpCommand::StartPermanentRecording(session) => {
-                        // DEĞİŞİKLİK: Buradan kodek ayarlama mantığını kaldırıyoruz.
                         permanent_recording_session = Some(session);
                     },
-                    // ... Diğer komutlar aynı ...
                     RtpCommand::StopLiveAudioStream => { live_stream_sender = None; },
                     RtpCommand::StopPermanentRecording { responder } => {
                         if let Some(session) = permanent_recording_session.take() {
@@ -158,7 +152,6 @@ pub async fn rtp_session_handler(
             result = async { processing_task.as_mut().unwrap().await }, if processing_task.is_some() => {
                 processing_task = None;
                 if let Ok(Some(processed_audio)) = result {
-                    // DEĞİŞİKLİK: İlk geçerli paketten sonra giden kodeği ayarla.
                     if outbound_codec.is_none() {
                         info!(codec = ?processed_audio.source_codec, "Gelen ilk pakete göre giden kodek ayarlandı.");
                         outbound_codec = Some(processed_audio.source_codec);
@@ -207,7 +200,6 @@ pub async fn rtp_session_handler(
     gauge!(ACTIVE_SESSIONS).decrement(1.0);
 }
 
-// ... finalize_and_save_recording fonksiyonu aynı kalır ...
 #[instrument(skip_all, fields(uri = %session.output_uri, samples = session.samples.len()))]
 async fn finalize_and_save_recording(
     session: RecordingSession,

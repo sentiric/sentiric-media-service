@@ -1,4 +1,4 @@
-// src/lib.rs (GÜNCELLENDİ)
+// File: src/lib.rs (TAM VE DOĞRU SÜRÜM - v3)
 pub mod config;
 pub mod state;
 pub mod grpc;
@@ -31,14 +31,13 @@ use tracing_subscriber::{
 
 use state::{AppState, PortManager};
 
-// YENİ: S3 istemcisi oluşturmak için gerekli importlar.
+use std::env;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::{BehaviorVersion, Region};
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::Builder as S3ConfigBuilder;
 use aws_sdk_s3::Client as S3Client;
 
-// YENİ: S3 istemcisini oluşturan yardımcı fonksiyon.
 async fn create_s3_client(config: &AppConfig) -> Result<Option<Arc<S3Client>>> {
     if let Some(s3_config) = &config.s3_config {
         info!("S3 konfigürasyonu bulundu, S3 istemcisi oluşturuluyor...");
@@ -70,7 +69,14 @@ async fn create_s3_client(config: &AppConfig) -> Result<Option<Arc<S3Client>>> {
 
 
 pub async fn run() -> Result<()> {
-    let _ = dotenvy::from_filename("development.env");
+    // Esnek .env yükleme
+    let env_file = env::var("ENV_FILE").unwrap_or_else(|_| "development.env".to_string());
+    if let Err(e) = dotenvy::from_filename(&env_file) {
+        warn!(file = %env_file, error = %e, "Ortam değişkenleri dosyası yüklenemedi (bu bir hata olmayabilir).");
+    } else {
+        info!(file = %env_file, "Ortam değişkenleri dosyası başarıyla yüklendi.");
+    }
+
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
     let metrics_addr = SocketAddr::new("0.0.0.0".parse().unwrap(), config.metrics_port);
@@ -80,19 +86,16 @@ pub async fn run() -> Result<()> {
         .or_else(|_| EnvFilter::try_new(&config.rust_log))?;
     let subscriber = Registry::default().with(env_filter);
 
-    // DEĞİŞİKLİK: Development ortamında daha detaylı loglama.
     if config.env == "development" {
         let fmt_layer = fmt::layer()
             .with_target(true)
             .with_line_number(true)
-            // DEBUG ve TRACE seviyelerinde detaylı span olaylarını göster
             .with_span_events(FmtSpan::FULL);
         subscriber.with(fmt_layer).init();
     } else {
         let fmt_layer = fmt::layer()
             .json()
             .with_current_span(true)
-            // Production'da span olaylarını GİZLE
             .with_span_events(FmtSpan::NONE); 
         subscriber.with(fmt_layer).init();
     }
@@ -103,7 +106,6 @@ pub async fn run() -> Result<()> {
     let tls_config = tls::load_server_tls_config().await.context("TLS konfigürasyonu yüklenemedi")?;
     let port_manager = PortManager::new(config.rtp_port_min, config.rtp_port_max);
     
-    // YENİ: S3 istemcisini oluştur ve AppState'e ekle.
     let s3_client = create_s3_client(&config).await?;
     let app_state = AppState::new(port_manager.clone(), s3_client);
 
