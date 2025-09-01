@@ -100,6 +100,32 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
         -   [ ] `sentiric_media_recording_saved_total` (başarıyla kaydedilen toplam çağrı sayısı) sayacı eklenmeli. Bu sayaç, `storage_type` (file, s3) etiketiyle ayrıştırılabilmeli.
         -   [ ] `sentiric_media_recording_failed_total` (kaydedilemeyen çağrı sayısı) sayacı eklenmeli.
 
+
+-   [ ] **Görev ID: MEDIA-FEAT-02 - İsteğe Bağlı Çağrı Kaydı Dönüştürme ve Sunma (YÜKSEK ÖNCELİK)**
+    -   **Durum:** ⬜ Planlandı
+    -   **Engelleyici Mi?:** HAYIR, ama `cdr-service` gibi arayüz servislerinin kullanıcıya doğal sesli kayıt dinletme özelliğini doğrudan etkiler.
+    -   **Tahmini Süre:** ~1-2 gün
+    -   **Problem Tanımı:** Kalıcı çağrı kayıtları (`StartRecording`), teknik doğruluk ve STT uyumluluğu için "Ara Format" (`16kHz LPCM`) ile saklanmaktadır. Bu format, telefon hattı fiziğini (8kHz -> 16kHz dönüşümü) simüle ettiği için insan kulağına doğal gelmeyen, perdesi yüksek ("hızlı") bir sese sahiptir. Bu kayıtların doğrudan bir kullanıcıya (örn: bir yönetici) dinletilmesi, kötü bir kullanıcı deneyimi yaratır.
+    -   **Çözüm Mimarisi: "Sunum Katmanı Dönüşümü"**
+        `media-service`, S3'te depolanan ham ve teknik kaydı değiştirmeden, istendiği anda "dinlenebilir" bir formata dönüştüren yeni bir gRPC endpoint'i sunacaktır. Bu, platformdaki tüm ses işleme mantığını tek bir merkezde toplar.
+    -   **Uygulama Adımları:**
+        -   [ ] **1. `sentiric-contracts` Güncellemesi:**
+            -   [ ] `media_service.proto` içine yeni bir `GetPlayableRecording` RPC'si eklenmelidir.
+            -   [ ] `GetPlayableRecordingRequest` (içinde `string recording_uri`, `string target_format`) ve `GetPlayableRecordingResponse` (içinde `bytes audio_chunk`) mesajları tanımlanmalıdır.
+            -   [ ] Bu RPC, `stream` olarak `GetPlayableRecordingResponse` döndürmelidir.
+        -   [ ] **2. `media-service` Implementasyonu (`grpc/service.rs`):**
+            -   [ ] `GetPlayableRecording` fonksiyonu implemente edilmelidir.
+            -   [ ] Fonksiyon, `recording_uri`'yi kullanarak S3'ten ilgili ham WAV dosyasını indirmelidir.
+            -   [ ] İndirilen WAV verisi `16kHz LPCM` sample'larına ayrıştırılmalıdır.
+            -   [ ] **Perde Düzeltme (Pitch Correction):** Bu `16kHz` LPCM verisi, `rubato` kütüphanesi kullanılarak orijinal perdesine geri getirilmelidir. Bu, tipik olarak 16kHz -> 8kHz (orijinal frekans bandına dönüş) ve ardından tekrar 8kHz -> 16kHz (kaliteyi koruyarak) gibi bir yeniden örnekleme zinciriyle veya daha uygun bir pitch-shifting tekniğiyle gerçekleştirilebilir. Amaç, "Chipmunk etkisini" ortadan kaldırmaktır.
+            -   [ ] **Format Dönüşümü:** Perdesi düzeltilmiş `LPCM` verisi, istekte belirtilen `target_format`'a (örn: `audio/mpeg` için MP3) anlık olarak encode edilmelidir. (Başlangıç için sadece `audio/wav` desteklenebilir).
+            -   [ ] Encode edilen ses verisi, uygun boyutlarda parçalara (chunks) ayrılarak gRPC stream'i üzerinden istemciye gönderilmelidir.
+    -   **Kabul ve Doğrulama Kriterleri:**
+        -   [ ] Yeni bir test istemcisi (`playable_recording_client.rs`) oluşturulmalıdır.
+        -   [ ] Bu istemci, `end_to_end_call_validator` tarafından oluşturulmuş perdesi yüksek bir kaydın URI'sini `GetPlayableRecording` RPC'sine göndermelidir.
+        -   [ ] Gelen ses akışı bir dosyaya yazılmalı ve bu dosya dinlendiğinde, sesin perdesinin doğal ve anlaşılır olduğu, hızlanma etkisinin ortadan kalktığı doğrulanmalıdır.
+        -   [ ] Stream'in başarılı bir şekilde tamamlandığı ve istemcinin tüm ses verisini aldığı teyit edilmelidir.
+
 ---
 
 ### **FAZ 3: Gelecek Vizyonu ve Genişletilebilirlik**

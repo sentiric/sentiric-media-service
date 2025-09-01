@@ -104,3 +104,15 @@ sequenceDiagram
 *   **İptal Token'ları:** Uzun süren ses oynatma işlemleri, yeni bir komut geldiğinde (örneğin kullanıcı konuşmaya başladı) hemen iptal edilebilir. Bu, doğal ve kesintisiz bir konuşma akışı sağlamak için kritiktir.
 
 Bu mimari, yüksek eşzamanlı çağrı hacmini karşılamak için hafif, ölçeklenebilir ve hataya dayanıklı bir medya işleme katmanı sunar.
+
+## 🏛️ Çağrı Kayıt Mimarisi: Teknik Doğruluk vs. Dinlenebilirlik
+
+`media-service`, çağrı kayıtlarını depolarken **teknik doğruluğu** önceliklendirir. Bir telefon görüşmesi sırasında 8kHz'lik sesin sistemin iç standardı olan 16kHz'e dönüştürülmesi gibi tüm teknik süreçler, kayda olduğu gibi yansıtılır. Bu, STT (Speech-to-Text) entegrasyonu ve adli analiz için en doğru veriyi sağlar.
+
+Bu teknik yaklaşım, ham kayıt dosyalarının insan kulağına doğal gelmeyen, perdesi yüksek ("hızlı") bir sese sahip olmasına neden olur. Bu, **beklenen bir davranıştır ve sistemin doğru çalıştığının bir göstergesidir.**
+
+Kullanıcıların bu kayıtları dinlemesi gerektiğinde, `media-service`'in sağladığı `GetPlayableRecording` RPC'si kullanılmalıdır. Bu endpoint, S3'teki ham teknik kaydı anlık olarak işleyerek, perdesi düzeltilmiş ve insan kulağına doğal gelen bir ses akışı sunar.
+
+**Özetle:**
+-   **Depolama (`S3 URI`):** Ham, teknik, perdesi yüksek kayıt. **Sadece makineler (STT, analiz araçları) ve `media-service`'in kendisi tarafından kullanılmalıdır.**
+-   **Sunum (`GetPlayableRecording` RPC):** İşlenmiş, doğal sesli akış. **Tüm son kullanıcı arayüzleri (CDR, Yönetici Paneli vb.) kayıt dinletmek için bu RPC'yi kullanmalıdır.**
