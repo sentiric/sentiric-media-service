@@ -1,10 +1,10 @@
-// File: src/grpc/service.rs (GÜNCELLENMİŞ)
+// File: src/grpc/service.rs
 
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
@@ -122,18 +122,16 @@ impl MediaService for MyMediaService {
             Status::invalid_argument("Geçersiz hedef adres formatı")
         })?;
 
-        // Önce devam eden bir oynatma varsa durdurma komutu gönder
         if tx.send(RtpCommand::StopAudio).await.is_err() {
             error!(port = rtp_port, "StopAudio komutu gönderilemedi, kanal kapalı olabilir.");
             return Err(Status::internal("RTP oturum kanalı kapalı."));
         }
 
-        // Yeni oynatma için komut gönder
         let cancellation_token = CancellationToken::new();
         let command = RtpCommand::PlayAudioUri {
             audio_uri: req.audio_uri,
             candidate_target_addr: target_addr,
-            cancellation_token, // Token hala session'a gönderiliyor
+            cancellation_token,
         };
 
         if tx.send(command).await.is_err() {
@@ -143,7 +141,6 @@ impl MediaService for MyMediaService {
 
         info!(port = rtp_port, "PlayAudio komutu başarıyla sıraya alındı.");
 
-        // DÜZELTME: Artık burada BEKLEMİYORUZ. Hemen yanıt dönüyoruz.
         Ok(Response::new(PlayAudioResponse {
             success: true,
             message: "Playback command successfully queued.".to_string(),
@@ -162,16 +159,12 @@ impl MediaService for MyMediaService {
         
         info!("Canlı ses kaydı stream isteği alındı.");
 
-        // İlgili RTP oturumunun komut kanalını bul.
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port)
             .await
             .ok_or_else(|| Status::not_found(format!("Belirtilen porta ({}) ait aktif oturum yok.", rtp_port)))?;
 
-        // 1. gRPC stream'i için yeni bir mpsc kanalı oluştur.
-        // Kanal boyutu (buffer), ağda anlık yığılmalar olursa ses verisinin kaybolmasını önler.
         let (stream_tx, stream_rx) = mpsc::channel(64);
 
-        // 2. RTP oturumuna, ses verisini bu yeni kanala göndermesi için komut yolla.
         let command = RtpCommand::StartLiveAudioStream {
             stream_sender: stream_tx,
             target_sample_rate: req.target_sample_rate,
@@ -184,16 +177,13 @@ impl MediaService for MyMediaService {
 
         info!("RTP oturumuna canlı ses akışını başlatma komutu gönderildi.");
 
-        // 3. Kanalın alıcı ucunu, istemciye döneceğimiz stream'e dönüştür.
         let output_stream = ReceiverStream::new(stream_rx).map(|res| {
-            // Kanalda gelen AudioFrame'i, gRPC'nin RecordAudioResponse'una çevir.
             res.map(|frame| RecordAudioResponse {
                 audio_data: frame.data.into(),
                 media_type: frame.media_type,
             })
         });
 
-        // 4. Stream'i response olarak dön.
         Ok(Response::new(Box::pin(output_stream)))
     }
 
@@ -228,9 +218,30 @@ impl MediaService for MyMediaService {
         let rtp_port = req.server_rtp_port as u16;
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| Status::not_found(format!("Oturum bulunamadı: {}", rtp_port)))?;
-        let command = RtpCommand::StopPermanentRecording;
-        session_tx.send(command).await.map_err(|_| Status::internal("Kalıcı kayıt durdurma komutu gönderilemedi."))?;
-        info!("Kalıcı kayıt durdurma komutu başarıyla gönderildi.");
-        Ok(Response::new(StopRecordingResponse { success: true }))
+
+        // 1. Sonucu almak için bir oneshot kanalı oluştur.
+        let (tx, rx) = oneshot::channel();
+
+        // 2. Komutu, cevap kanalıyla birlikte gönder.
+        let command = RtpCommand::StopPermanentRecording { responder: tx };
+        if session_tx.send(command).await.is_err() {
+            return Err(Status::internal("Kalıcı kayıt durdurma komutu gönderilemedi."));
+        }
+
+        // 3. Arka plan görevinin tamamlanmasını ve sonucu göndermesini bekle.
+        match rx.await {
+            Ok(Ok(final_uri)) => {
+                info!(uri = %final_uri, "Kayıt başarıyla tamamlandı ve kaydedildi.");
+                Ok(Response::new(StopRecordingResponse { success: true }))
+            }
+            Ok(Err(e)) => {
+                error!(error = %e, "Kayıt kaydetme işlemi rtp oturumu tarafından başarısız olarak raporlandı.");
+                Err(Status::internal(format!("Kayıt kaydetme başarısız: {}", e)))
+            }
+            Err(_) => {
+                error!("RTP oturumundan kayıt sonucu alınamadı (kanal kapandı).");
+                Err(Status::internal("RTP oturumundan kayıt sonucu alınamadı."))
+            }
+        }
     }
 }

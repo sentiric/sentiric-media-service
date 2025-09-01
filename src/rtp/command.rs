@@ -1,7 +1,7 @@
-// File: src/rtp/command.rs (GÜNCELLENMİŞ)
+// File: src/rtp/command.rs
 
 use std::net::SocketAddr;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use bytes::Bytes;
@@ -28,14 +28,15 @@ pub enum RtpCommand {
         cancellation_token: CancellationToken,
     },
     StopAudio,
-    // YENİ KOMUT: Canlı ses akışını bu kanala yönlendir.
     StartLiveAudioStream {
         stream_sender: mpsc::Sender<Result<AudioFrame, Status>>,
         target_sample_rate: Option<u32>,
     },
-    // YENİ KOMUT: Canlı ses akışını durdur.
     StopLiveAudioStream,
     StartPermanentRecording(RecordingSession),
-    StopPermanentRecording,
+    StopPermanentRecording {
+        // Bu kanal, kaydetme işleminin sonucunu (başarılı URI veya hata) geri bildirecek.
+        responder: oneshot::Sender<Result<String, String>>,
+    },
     Shutdown,
 }
