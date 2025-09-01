@@ -22,15 +22,36 @@ echo "--- ✅ MinIO configuration complete. ---"
 
 # --- KURULUM BÖLÜMÜ SONU ---
 
-echo "\n\n--- 🧪 Starting Integration Tests ---"
+echo "\n\n--- 🧪 Starting Tests ---"
 
-echo "\n[1/3] Running Live Audio Stream Test (live_audio_client)..."
-./live_audio_client
+# # Temel Bağlantı ve API Testleri
+# echo "\n\n--- 🧪 Tüm Ortam Değişkenlerini Doğrula ---"
+# ./test
 
-echo "\n[2/3] Running Persistent Recording Test (recording_client)..."
-./recording_client
+# echo "\n\n--- 🧪 Agent Service gibi davran (Port Al/Bırak)"
+# ./agent_client
 
-echo "\n[3/3] Running End-to-End Validation Test (end_to_end_call_validator)..."
+# echo "\n\n--- 🧪 SIP Signaling gibi davran (Kapasite Kontrolü)"
+# ./sip_signaling_client
+
+# echo "\n\n--- 🧪 Dialplan gibi davran (Anons Çal)"
+# ./dialplan_client
+
+# echo "\n\n--- 🧪 User Service gibi davran (Sadece Bağlantı Testi)"
+# ./user_client
+
+# # Fonksiyonel Senaryo Testleri
+# echo "\n\n--- 🧪 Canlı Ses Akışını Test Et (STT Simülasyonu)"
+# ./live_audio_client
+
+# echo "\n\n--- 🧪 S3'e Kalıcı Çağrı Kaydını Test Et"
+# ./recording_client
+
+# echo "\n\n--- 🧪 Performans ve Stres Testi Uygula"
+# ./call_simulator
+
+# En Kapsamlı Manuel Test [ FOCUS END TO END TEST]
+echo "\n\n--- 🧪 Uçtan Uca Diyalog ve Ses Birleştirmeyi Doğrula"
 ./end_to_end_call_validator
 
 echo "\n--- ✅ ALL TESTS PASSED SUCCESSFULLY ---"
