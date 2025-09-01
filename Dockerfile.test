@@ -1,0 +1,30 @@
+# --- STAGE 1: Builder ---
+# ... Bu kısım aynı kalıyor ...
+FROM rust:1.88-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y protobuf-compiler git curl libssl-dev pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY . .
+RUN cargo fetch
+RUN cargo build --release --examples
+
+# --- STAGE 2: Test Runner (Final Image) ---
+FROM debian:bookworm-slim
+
+# --- DEĞİŞİKLİK BURADA ---
+# mc (MinIO Client) ve curl'ü ekliyoruz.
+RUN apt-get update && \
+    apt-get install -y netcat-openbsd ca-certificates curl && \
+    curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc && \
+    chmod +x /usr/local/bin/mc && \
+    rm -rf /var/lib/apt/lists/*
+# --- DEĞİŞİKLİK SONU ---
+
+WORKDIR /app
+
+COPY --from=builder /app/target/release/examples/* .
+COPY run-tests.sh .
+RUN chmod +x run-tests.sh
+
+ENTRYPOINT ["./run-tests.sh"]

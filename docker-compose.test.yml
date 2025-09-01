@@ -1,0 +1,62 @@
+version: '3.8'
+
+networks:
+  sentiric-test-net:
+    name: "${NETWORK_NAME:-sentiric-test-net}"
+
+volumes:
+  minio_test_data:
+
+services:
+  minio:
+    image: quay.io/minio/minio
+    env_file: [".env.test"]
+    ports:
+      - "${MINIO_API_PORT}:9000" # S3 API portu
+      - "${MINIO_CONSOLE_PORT}:9001" # Web arayüzü portu    
+    command: server /data --console-address ":9001"
+    volumes:
+      - minio_test_data:/data
+    networks:
+      - sentiric-test-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # minio-setup servisi buradan TAMAMEN SİLİNDİ
+
+  media-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: [".env.test"]
+    volumes:
+      - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
+      - "../sentiric-assets:/app/assets:ro"
+    networks:
+      - sentiric-test-net
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50052"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  test-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    env_file: [".env.test"]
+    networks:
+      - sentiric-test-net
+    volumes:
+      - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
+    depends_on:
+      media-service:
+        condition: service_healthy
+      # minio-setup bağımlılığı buradan TAMAMEN SİLİNDİ

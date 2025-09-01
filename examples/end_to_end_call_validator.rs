@@ -37,12 +37,15 @@ fn linear_to_alaw(mut pcm_val: i16) -> u8 {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match dotenvy::from_filename("development.env") {
-        Ok(path) => println!(".env dosyası başarıyla yüklendi: {:?}", path.display()),
-        Err(e) => panic!("KRİTİK HATA: 'development.env' dosyası yüklenemedi. Hata Detayı: {}", e),
-    }
+    // BU SATIRI SİLİN VEYA YORUMA ALIN:
+    // dotenvy::from_filename("development.env").ok();
+    
+    // Artık .env dosyasını yüklemeye gerek yok, çünkü Docker Compose
+    // .env.test dosyasındaki değişkenleri doğrudan ortama (environment) ekler.
+    // env::var() çağrıları doğrudan çalışacaktır.
 
-    println!("--- 🎙️ Uçtan Uca Medya Servisi Doğrulama Testi Başlatılıyor ---");
+    println!("--- 🎙️ Uçtan Uca Medya Servisi Doğrulama Testi Başlatılıyor (Docker Test Ortamı) ---");
+
     println!("---  Senaryo: PCMA kodek ile çağrı, 16kHz WAV olarak kayıt ve birleştirme ---");
 
     let mut client = connect_to_media_service().await?;
@@ -67,13 +70,18 @@ async fn main() -> Result<()> {
     println!("\n[ADIM 2] Eş zamanlı medya akışları simüle ediliyor...");
     
     let rtp_target_ip = env::var("MEDIA_SERVICE_PUBLIC_IP")
-        .context("MEDIA_SERVICE_PUBLIC_IP .env dosyasında eksik veya yanlış. `ipconfig` komutuyla bulduğunuz Windows IP adresini yazın.")?;
-    
-    let bind_addr = format!("{}:0", rtp_target_ip);
+        .context("MEDIA_SERVICE_PUBLIC_IP .env dosyasında eksik veya yanlış.")?;
+        
+    // --- DÜZELTME BURADA ---
+    // Soketi kendimize ait olan '0.0.0.0' adresine bind ediyoruz.
+    // 'rtp_target_ip' değişkeni sadece RTP paketlerini GÖNDERMEK için kullanılacak.
+    let bind_addr = "0.0.0.0:0"; 
+    // --- DÜZELTME SONU ---
+
     let local_rtp_socket = UdpSocket::bind(&bind_addr).context(format!("{} adresine bind edilemedi", bind_addr))?;
     let local_rtp_addr = local_rtp_socket.local_addr()?;
     println!("[İSTEMCİ] RTP anonsları şu adrese beklenecek: {}", local_rtp_addr);
-    
+
     let (tx, mut rx) = mpsc::channel::<()>(1);
 
     let mut stt_client = client.clone();
@@ -96,17 +104,36 @@ async fn main() -> Result<()> {
     println!("[BOT SİM] Anons çalma komutu sunucuya başarıyla gönderildi (non-blocking).");
     
     user_sim_handle.await??;
+    // user_sim_handle tamamlandıktan sonra, RTP gönderimi bitti demektir.
+    // 'done_tx' sinyali de bu noktada gönderilmiş olur.
+
+    // stt_sim_handle'ın bitmesini bekleyelim. Bu, tüm canlı ses verisinin
+    // gRPC stream üzerinden alındığı anlamına gelir.
     let received_audio_len = stt_sim_handle.await??;
 
-    println!("✅ [STT SİM] {} byte temiz 16kHz LPCM ses verisi alındı.", received_audio_len);
-    assert!(received_audio_len > 76000, "STT servisi yeterli ses verisi alamadı! (Beklenen > 76000, Alınan: {})", received_audio_len);
+    // --- DEĞİŞİKLİK BURADA: Assert'i düzeltiyoruz ---
+    println!("✅ [STT SİM] {} byte temiz 16kHz LPCM ses verisi (sadece inbound) alındı.", received_audio_len);
+
+    // Kaba bir hesap yapalım: 3 saniye * 8000 örnek/sn * 2 (resample) * 2 byte/örnek = 96000 byte.
+    // Ağ gecikmeleri vs. nedeniyle biraz daha az olabilir. 90000 byte'tan fazlası makul bir beklentidir.
+    // Mevcut 18000 byte'lık sonuç çok düşük, bu muhtemelen stream'in erken kapanmasıyla ilgili.
+    // listen_to_live_audio fonksiyonunu da iyileştirelim.
+    let expected_min_bytes = 80000;
+    assert!(
+        received_audio_len > expected_min_bytes, 
+        "STT servisi yeterli ses verisi alamadı! (Beklenen > {}, Alınan: {})", 
+        expected_min_bytes, received_audio_len
+    );
+    // --- DEĞİŞİKLİK SONU ---
 
     println!("\n[ADIM 3] Kayıt durduruluyor ve kaynaklar serbest bırakılıyor...");
     client.stop_recording(StopRecordingRequest { server_rtp_port: rtp_port }).await?;
     client.release_port(ReleasePortRequest { rtp_port }).await?;
+    // Kaydın S3'e yazılması için biraz zaman tanıyalım
     sleep(Duration::from_secs(2)).await;
 
     println!("\n[ADIM 4] Kayıt dosyası S3'ten indirilip doğrulanıyor...");
+
     let wav_data = download_from_s3(&s3_client, &s3_bucket, &s3_key).await?;
     println!("✅ Kayıt S3'ten indirildi ({} byte).", wav_data.len());
     
@@ -177,26 +204,41 @@ async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u3
     let mut stream = client.record_audio(RecordAudioRequest {
         server_rtp_port: port, target_sample_rate: Some(16000),
     }).await?.into_inner();
+    
     let mut total_bytes = 0;
+    let mut done_signal_received = false;
+
     loop {
         tokio::select! {
-            _ = done_rx.recv() => {
-                println!("[STT SİM] Kullanıcı konuşmasının bittiği sinyali alındı. Son paketler bekleniyor...");
-                sleep(Duration::from_millis(500)).await;
-                break;
+            // done_rx.recv() sadece bir kez çalışır, sonra None döner.
+            // Bu yüzden bir bayrakla durumu takip ediyoruz.
+            _ = done_rx.recv(), if !done_signal_received => {
+                println!("[STT SİM] Kullanıcı konuşmasının bittiği sinyali alındı. Stream'in doğal olarak kapanması bekleniyor...");
+                done_signal_received = true;
             },
+            // Stream'den veri okumaya devam et
             maybe_item = stream.next() => {
                 match maybe_item {
-                    Some(Ok(res)) => total_bytes += res.audio_data.len(),
-                    Some(Err(e)) => { eprintln!("[STT SİM] gRPC stream hatası: {}", e); break; },
-                    None => { println!("[STT SİM] Stream sunucu tarafından kapatıldı."); break; }
+                    Some(Ok(res)) => {
+                        total_bytes += res.audio_data.len();
+                    },
+                    Some(Err(e)) => { 
+                        eprintln!("[STT SİM] gRPC stream hatası: {}", e); 
+                        break; // Hata varsa döngüden çık
+                    },
+                    None => { 
+                        println!("[STT SİM] Stream sunucu tarafından doğal olarak kapatıldı."); 
+                        break; // Stream bittiyse döngüden çık
+                    }
                 }
             }
         }
+        
+        // Eğer sinyal geldiyse ve stream hala kapanmadıysa, bu durum bir timeout'a yol açabilir.
+        // Ancak normalde sunucunun RTP kesilince stream'i kapatmasını bekleriz.
+        // Bu yüzden select bloğu kendi başına yeterlidir.
     }
-    while let Ok(Some(maybe_item)) = timeout(Duration::from_millis(100), stream.next()).await {
-        if let Ok(res) = maybe_item { total_bytes += res.audio_data.len(); }
-    }
+
     Ok(total_bytes)
 }
 
