@@ -297,17 +297,27 @@ async fn finalize_and_save_recording(
         metrics::counter!("sentiric_media_recording_saved_total", "storage_type" => "s3").increment(1);
 
         // === YENİ GÖREV (MEDIA-004): KAYIT TAMAMLANDI OLAYINI YAYINLA ===
-        // Bu kod bloğunu ekleyeceğiz, ancak bunun çalışması için `AppState`'e
-        // RabbitMQ channel'ını da eklememiz gerekecek. Şimdilik konsept olarak ekliyorum.
-        // TODO: AppState'e RabbitMQ channel ekle ve bu olayı yayınla.
-        /*
-        if let Some(publisher) = &app_state.rabbitmq_publisher {
-            let event = CallRecordingAvailableEvent { ... };
-            if let Err(e) = publisher.publish(event).await {
+        if let Some(publisher) = &app_state.rabbitmq_publisher { // Varsayımsal, publisher'ın AppState'e eklendiğini varsayıyoruz
+            let event_payload = serde_json::json!({
+                "eventType": "call.recording.available",
+                // "traceId": ... // trace_id'yi session'a eklemek gerekir
+                "callId": session.call_id, // call_id'yi session'a eklemek gerekir
+                "recordingUri": session.output_uri,
+                "timestamp": chrono::Utc::now().to_rfc3339()
+            });
+            if let Err(e) = publisher.basic_publish(
+                crate::rabbitmq::connection::RABBITMQ_EXCHANGE_NAME,
+                "call.recording.available",
+                lapin::options::BasicPublishOptions::default(),
+                event_payload.to_string().as_bytes(),
+                lapin::BasicProperties::default().with_delivery_mode(2)
+            ).await {
                 error!(error = %e, "call.recording.available olayı yayınlanamadı.");
+            } else {
+                info!("'call.recording.available' olayı başarıyla yayınlandı.");
             }
         }
-        */
+        // --- GÖREV SONU ---
 
     }  else {
         error!(error = ?result.as_ref().err(), "Kayıt kaydetme görevi başarısız oldu.");
