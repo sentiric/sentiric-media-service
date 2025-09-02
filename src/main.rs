@@ -1,20 +1,18 @@
-// Mevcut importlarınız
 use sentiric_media_service::run;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // --- YENİ KOD BAŞLANGICI ---
-    // Bu, projedeki tüm rustls kullanımları için 'ring' kripto sağlayıcısını
-    // varsayılan olarak ayarlar. Bu, aws-sdk-s3 ve tonic arasındaki
-    // olası çakışmaları çözer.
-    // Bu satır, herhangi bir TLS işlemi (örn: S3 veya gRPC client/server oluşturma)
-    // başlamadan ÖNCE, main fonksiyonunun en başında olmalıdır.
-    if let Err(e) = rustls::crypto::ring::install_default_provider() {
-        // Bu hata genellikle sadece bir sağlayıcı zaten yüklenmişse oluşur,
-        // bu yüzden genellikle görmezden gelinebilir, ancak biz loglayalım.
-        eprintln!("Could not install default ring crypto provider: {:?}", e);
-    }
-    // --- YENİ KOD SONU ---
+    // --- NİHAİ DÜZELTME BAŞLANGICI ---
+    // Bu, rustls'in 0.22 ve 0.23 versiyonlarında çalışan,
+    // varsayılan kripto sağlayıcısını ayarlamanın standart ve
+    // en doğru yoludur.
+    rustls::crypto::CryptoProvider::install_default(
+        rustls::crypto::ring::default_provider()
+    );
+    // --- NİHAİ DÜZELTME SONU ---
+    
+    // Eski hatalı kodu tamamen siliyoruz:
+    // if let Err(e) = rustls::crypto::ring::install_default_provider() { ... }
 
     // Geri kalan kodunuz aynı
     run().await
