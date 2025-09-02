@@ -32,7 +32,7 @@ symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
 webrtc-util = { version = "0.7.0", features = ["marshal"] }
 
 # TLS
-rustls = "0.22.4"
+# rustls = "0.22.4"
 rustls-pemfile = "2.1.0"
 tokio-rustls = "0.25.0"
 
@@ -48,18 +48,20 @@ async-trait = "0.1.80"
 url = "2.5.0" 
 aws-config = "1.1.8"
 aws-sdk-s3 = "1.20.0"
-http-body = "0.4.5"
+http-body = "0.4.5" 
 aws-credential-types = "1.1.8"
 lapin = "2.3.1"
 serde_json = "1.0"
 
-# --- HATA DÜZELTMESİ (RUSTLS CRYPTO PROVIDER) ---
-# rustls'in hangi kriptografi backend'ini kullanacağını açıkça belirtiyoruz.
-# ring, Rust ekosistemindeki en yaygın ve test edilmiş seçenektir.
-# aws-sdk-s3 gibi kütüphaneler bu bağımlılığı gördüğünde, rustls'i
-# doğru özellikle derleyecektir.
-ring = "0.17.8"
+# --- NİHAİ HATA DÜZELTMESİ (RUSTLS CRYPTO PROVIDER) ---
+# Önceki 'ring' satırını kaldırıp yerine bunu ekliyoruz.
+# Bu, Cargo'ya rustls'i DERLERKEN 'ring' kripto sağlayıcısını
+# kullanmasını AÇIKÇA emreder. Bu en garantili yöntemdir.
+rustls = { version = "0.22.4", features = ["ring"] }
+# NOT: ring'in kendisini doğrudan eklemeye artık gerek yok. rustls bunu yapacak.
+# ring = "0.17.8" # Bu satırı silebilirsiniz veya bırakabilirsiniz, zararı olmaz.
 # --- DÜZELTME SONU ---
+
 
 
 [dependencies.sentiric-contracts]
