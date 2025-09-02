@@ -37,6 +37,7 @@ struct ProcessedAudio {
     source_codec: AudioCodec,
 }
 
+// === DEĞİŞİKLİK 1: load_samples_from_uri fonksiyonu artık resampling yapıyor ===
 async fn load_samples_from_uri(
     uri: &str,
     app_state: &AppState,
@@ -45,8 +46,10 @@ async fn load_samples_from_uri(
     if let Some(path_part) = uri.strip_prefix("file://") {
         let mut final_path = std::path::PathBuf::from(&config.assets_base_path);
         final_path.push(path_part.trim_start_matches('/'));
-        crate::audio::load_or_get_from_cache(&app_state.audio_cache, &final_path).await
+        // Önbelleğe alma mantığını load_wav_and_resample içine taşıyalım
+        load_wav_and_resample(&app_state.audio_cache, &final_path).await
     } else if uri.starts_with("data:") {
+        info!("Data URI'sinden ses yükleniyor...");
         let (_media_type, base64_data) = uri
             .strip_prefix("data:")
             .and_then(|s| s.split_once(";base64,"))
@@ -54,10 +57,55 @@ async fn load_samples_from_uri(
         let audio_bytes = general_purpose::STANDARD
             .decode(base64_data)
             .context("Base64 verisi çözümlenemedi")?;
-        Ok(Arc::new(decode_audio_with_symphonia(audio_bytes)?))
+        // Symphonia zaten doğru sample rate'e çeviriyor, bu kısım doğru.
+        Arc::new(decode_audio_with_symphonia(audio_bytes)?)
     } else {
         Err(anyhow!("Desteklenmeyen URI şeması: {}", uri))
     }
+}
+
+// === YENİ YARDIMCI FONKSİYON ===
+async fn load_wav_and_resample(cache: &AudioCache, path: &PathBuf) -> Result<Arc<Vec<i16>>> {
+    let path_key = path.to_string_lossy().to_string();
+    let mut cache_guard = cache.lock().await;
+
+    if let Some(cached) = cache_guard.get(&path_key) {
+        debug!(path = %path.display(), "Ses önbellekten okundu.");
+        return Ok(cached.clone());
+    }
+    
+    info!(path = %path.display(), "Ses diskten okunuyor ve işleniyor...");
+    let path_owned = path.clone();
+    let (spec, samples_i16) = spawn_blocking(move || -> Result<(WavSpec, Vec<i16>)> {
+        let mut reader = hound::WavReader::open(path_owned)?;
+        let spec = reader.spec();
+        let samples = reader.samples::<i16>().collect::<Result<Vec<_>, _>>()?;
+        Ok((spec, samples))
+    }).await??;
+
+    if spec.sample_rate == crate::rtp::stream::INTERNAL_SAMPLE_RATE {
+        let samples_arc = Arc::new(samples_i16);
+        cache_guard.insert(path_key, samples_arc.clone());
+        return Ok(samples_arc);
+    }
+
+    // Yeniden örnekleme gerekiyor
+    let samples_f32: Vec<f32> = samples_i16.iter().map(|&s| s as f32 / 32768.0).collect();
+    let params = rubato::SincInterpolationParameters {
+        sinc_len: 256, f_cutoff: 0.95, interpolation: rubato::SincInterpolationType::Linear,
+        oversampling_factor: 256, window: rubato::WindowFunction::BlackmanHarris2,
+    };
+    let mut resampler = rubato::SincFixedIn::<f32>::new(
+        crate::rtp::stream::INTERNAL_SAMPLE_RATE as f64 / spec.sample_rate as f64,
+        2.0, params, samples_f32.len(), 1,
+    )?;
+    let resampled = resampler.process(&[samples_f32], None)?.remove(0);
+    let final_samples_i16: Vec<i16> = resampled.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect();
+
+    let samples_arc = Arc::new(final_samples_i16);
+    cache_guard.insert(path_key, samples_arc.clone());
+    info!(path = %path.display(), "Ses önbelleğe alındı (yeniden örneklendi).");
+    Ok(samples_arc)
 }
 
 // YENİ: Gelen RTP paketini işleyip standart 16kHz LPCM formatına çeviren task
@@ -113,8 +161,12 @@ pub async fn rtp_session_handler(
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
 
                         if let Some(rec_session) = &mut permanent_recording_session {
+                            // === DEĞİŞİKLİK 3: Giden sesi de kayda ekle ===
                             match load_samples_from_uri(&audio_uri, &config.app_state, &config.app_config).await {
-                                Ok(samples_16khz) => rec_session.samples.extend_from_slice(&samples_16khz),
+                                Ok(samples_16khz) => {
+                                    info!(samples_count = samples_16khz.len(), "Giden anons kalıcı kayda ekleniyor.");
+                                    rec_session.samples.extend_from_slice(&samples_16khz);
+                                }
                                 Err(e) => error!(error = ?e, "Kayıt için giden ses yüklenemedi."),
                             }
                         }
@@ -173,6 +225,7 @@ pub async fn rtp_session_handler(
                             live_stream_sender = None;
                         }
                     }
+                    // === DEĞİŞİKLİK 2: Gelen sesi de kayda ekle ===
                     if let Some(session) = &mut permanent_recording_session {
                         session.samples.extend_from_slice(&processed_audio.samples_16khz);
                     }
