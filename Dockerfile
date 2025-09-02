@@ -21,6 +21,8 @@ WORKDIR /app
 
 COPY . .
 
+RUN echo "Cache break: $CACHE_BREAK"
+
 RUN cargo build --release
 
 # --- STAGE 2: Final (Minimal) Image ---
