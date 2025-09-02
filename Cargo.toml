@@ -48,17 +48,23 @@ async-trait = "0.1.80"
 url = "2.5.0" 
 aws-config = "1.1.8"
 aws-sdk-s3 = "1.20.0"
-http-body = "0.4.5" 
+http-body = "0.4.5"
 aws-credential-types = "1.1.8"
-
-# --- EKSİK BAĞIMLILIKLAR EKLENDİ ---
 lapin = "2.3.1"
 serde_json = "1.0"
-# --- EKSİK BAĞIMLILIKLAR SONU ---
+
+# --- HATA DÜZELTMESİ (RUSTLS CRYPTO PROVIDER) ---
+# rustls'in hangi kriptografi backend'ini kullanacağını açıkça belirtiyoruz.
+# ring, Rust ekosistemindeki en yaygın ve test edilmiş seçenektir.
+# aws-sdk-s3 gibi kütüphaneler bu bağımlılığı gördüğünde, rustls'i
+# doğru özellikle derleyecektir.
+ring = "0.17.8"
+# --- DÜZELTME SONU ---
+
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.8.8" # YENİ SÜRÜMÜ KULLAN
+tag = "v1.8.8"
 package = "sentiric-contracts"
 
 [dev-dependencies]
