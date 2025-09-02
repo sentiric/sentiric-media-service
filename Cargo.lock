@@ -3647,7 +3647,6 @@ dependencies = [
  "metrics-exporter-prometheus",
  "prost",
  "rand 0.8.5",
- "ring",
  "rtp",
  "rubato",
  "rustls 0.22.4",
