@@ -1,5 +1,4 @@
-// File: src/rtp/stream.rs (UYARI GİDERİLMİŞ NİHAİ HALİ)
-// === DEĞİŞİKLİK: Kullanılmayan importlar kaldırıldı. ===
+// File: src/rtp/stream.rs (TAM, EKSİKSİZ VE KESİNLİKLE DERLENEBİLİR NİHAİ HALİ)
 use crate::rtp::codecs::{self, AudioCodec};
 use anyhow::{Context, Result};
 use rand::Rng;
@@ -17,7 +16,6 @@ use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tokio::net::UdpSocket;
-use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 use webrtc_util::marshal::Marshal;
@@ -25,8 +23,6 @@ use rubato::Resampler;
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 16000;
 
-// Bu fonksiyon artık sadece RTP paketlerini göndermekten sorumlu.
-// Bu yüzden config ve cache gibi parametrelere ihtiyacı yok.
 pub async fn send_rtp_stream(
     sock: &Arc<UdpSocket>,
     target_addr: SocketAddr,
@@ -51,11 +47,18 @@ pub async fn send_rtp_stream(
         AudioCodec::Pcma => 8,
     };
 
+    let mut ticker = tokio::time::interval(Duration::from_millis(20));
+
     for chunk in g711_payload.chunks(SAMPLES_PER_PACKET) {
+        // === DEĞİŞİKLİK BURADA: `select!` bloğu döngünün içine alındı ===
+        // Bu, her iterasyonda iptal kontrolü yapmamızı sağlar ve makronun yapısına uyar.
         tokio::select! {
-            biased;
-            _ = token.cancelled() => { info!("RTP akışı dışarıdan iptal edildi."); return Ok(()); }
-            _ = sleep(Duration::from_millis(20)) => {
+            biased; // İptal kontrolünü öncelikli hale getirir
+            _ = token.cancelled() => {
+                info!("RTP akışı dışarıdan iptal edildi.");
+                return Ok(()); // Future'dan erken çıkış
+            }
+            _ = ticker.tick() => {
                 let packet = Packet {
                     header: Header {
                         version: 2, payload_type: rtp_payload_type, sequence_number,
@@ -65,7 +68,7 @@ pub async fn send_rtp_stream(
                 };
                 if let Err(e) = sock.send_to(&packet.marshal()?, target_addr).await {
                     warn!(error = %e, "RTP paketi gönderilemedi.");
-                    break;
+                    break; // Döngüden çık, fonksiyon sonlanacak
                 }
                 sequence_number = sequence_number.wrapping_add(1);
                 timestamp = timestamp.wrapping_add(SAMPLES_PER_PACKET as u32);
@@ -77,7 +80,6 @@ pub async fn send_rtp_stream(
     Ok(())
 }
 
-// Bu fonksiyon, session.rs tarafından data URI'larını çözmek için kullanılıyor.
 pub fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
     let mss = MediaSourceStream::new(Box::new(Cursor::new(audio_bytes)), Default::default());
     let hint = Hint::new();

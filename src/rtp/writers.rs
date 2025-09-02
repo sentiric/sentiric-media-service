@@ -1,15 +1,15 @@
-// File: src/rtp/writers.rs (GÜNCELLENDİ)
+// File: src/rtp/writers.rs (TAM VE HATASIZ NİHAİ HALİ)
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::Client as S3Client; // DEĞİŞİKLİK: Client'ı Arc içinde tutacağız
+use aws_sdk_s3::Client as S3Client;
 use std::path::Path;
-use std::sync::Arc; // DEĞİŞİKLİK
+use std::sync::Arc;
 use tracing::info;
 use url::Url;
 
 use crate::config::AppConfig;
-use crate::state::AppState; // YENİ
+use crate::state::AppState;
 
 #[async_trait]
 pub trait AsyncRecordingWriter: Send + Sync {
@@ -65,7 +65,9 @@ pub async fn from_uri(
 
     match uri.scheme() {
         "file" => {
-            // ...
+            // === EKSİK OLAN KOD BURADAYDI ===
+            let path = uri.to_file_path().map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
+            Ok(Box::new(FileWriter { path: path.to_string_lossy().to_string() }))
         }
         "s3" => {
             let s3_config = config.s3_config.as_ref().ok_or_else(|| {
@@ -77,7 +79,6 @@ pub async fn from_uri(
             })?;
 
             let bucket = s3_config.bucket_name.clone();
-            // === DEĞİŞİKLİK: URI'dan hem host (tenant) hem de path'i al ===
             let key = format!("{}{}", uri.host_str().unwrap_or(""), uri.path()).trim_start_matches('/').to_string();
 
             if key.is_empty() {

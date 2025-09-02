@@ -1,4 +1,4 @@
-// File: src/grpc/service.rs (UYARI GİDERİLMİŞ NİHAİ HALİ)
+// File: src/grpc/service.rs (TEMİZLENMİŞ NİHAİ HALİ)
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,7 +7,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-// === DEĞİŞİKLİK: 'error' import'u kaldırıldı. ===
 use tracing::{info, instrument, warn};
 use metrics::{counter, gauge};
 use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
