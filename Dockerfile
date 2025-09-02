@@ -1,6 +1,8 @@
 # --- STAGE 1: Builder ---
 FROM rust:1.88-slim-bookworm AS builder
 
+ARG CACHE_BREAK=default 
+
 # Gerekli derleme araçlarını ve buf CLI'ı kuruyoruz.
 # libssl-dev, openssl-sys crate'i için gereklidir.
 RUN apt-get update && \
