@@ -1,15 +1,17 @@
 # --- STAGE 1: Planner - Sadece bağımlılıkları planlamak için ---
-# Bu aşama, bağımlılıkları derlemeden önce sadece "planlar".
-# Bu, Docker'ın daha iyi cache yapmasını sağlar.
 FROM rust:1.88-slim-bookworm AS planner
 WORKDIR /app
+# Sadece bağımlılıkları derlemek için dummy bir proje oluştur.
 RUN cargo init --bin
 
-# Sadece bağımlılık tanımlarını kopyala
+# Sadece bağımlılık tanımlarını kopyala. Bu katman cache'lenecek.
 COPY Cargo.toml Cargo.lock ./
 
-# Sadece bağımlılıkları çöz, derleme yapma. Bu çok hızlı bir adımdır.
-RUN cargo build --release --locked --out-dir=./out
+# Bağımlılıkları önceden derle. Bu en uzun süren adımdır.
+# `--locked` flag'i Cargo.lock dosyasını kullanmaya zorlar.
+RUN cargo build --release --locked
+# Sadece derlenmiş bağımlılıkları tutmak için kendi kodumuzu temizle.
+RUN rm -f target/release/deps/planner*
 
 # --- STAGE 2: Builder - Bağımlılıkları ve kodu derlemek için ---
 FROM rust:1.88-slim-bookworm AS builder
@@ -20,27 +22,21 @@ RUN apt-get update && \
     build-essential \
     pkg-config \
     libssl-dev \
-    # Not: Bu aşamada artık protobuf-compiler, git, curl'e ihtiyacımız olmayabilir
-    # çünkü kontratlar ve diğer her şey zaten context'te var. Temiz tutalım.
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Önce sadece bağımlılıkları kopyala
+# Önce sadece bağımlılık tanımlarını tekrar kopyala
 COPY Cargo.toml Cargo.lock ./
 
-# Planner aşamasından derlenmiş bağımlılıkları kopyala (bu cache'lenir)
+# Planner aşamasından ÖNCEDEN DERLENMİŞ bağımlılıkları kopyala. Bu çok hızlıdır.
 COPY --from=planner /app/target/release/deps/ ./target/release/deps/
 
-# Şimdi tüm kaynak kodunu kopyala
-# Sadece .rs dosyaları değiştiğinde bu ve sonraki katmanlar yeniden çalışır.
+# Şimdi SADECE var olan kaynak kodunu kopyala
 COPY src ./src
 COPY examples ./examples
-COPY build.rs ./build.rs
-# sentiric-contracts submodule'ünü de kopyalamak için (eğer varsa)
-# COPY sentiric-contracts ./sentiric-contracts
 
-# Son olarak, sadece kendi kodumuzu derle (bağımlılıklar zaten derlendi)
+# Son olarak, sadece kendi kodumuzu derle (bağımlılıklar zaten derlendiği için bu da hızlıdır)
 RUN cargo build --release --locked
 
 # --- STAGE 3: Final - Çalıştırılabilir minimal imaj ---
