@@ -73,6 +73,10 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
         -   [ ] `src/rtp/session.rs` içindeki `finalize_and_save_recording` fonksiyonu, S3'e yazma işlemi başarılı olduğunda `RabbitMQ`'ya `sentiric-contracts`'te tanımlı `CallRecordingAvailableEvent` formatında bir olay yayınlamalıdır. Bu olayın içinde `call_id` ve `recording_uri` bulunmalıdır.
             
 
+YENİ GÖREV (media-service): MEDIA-FEAT-03 - RabbitMQ Publisher Entegrasyonu
+Açıklama: media-service'in AppState'ine ve başlangıç mantığına, RabbitMQ'ya olay yayınlayabilmek için bir Publisher (Lapin Channel) eklenmesi. Bu, MEDIA-004 görevinin ön koşuludur.
+            
+
 ---
 ### **FAZ 2: Gelişmiş Medya Yetenekleri ve Yönetim**
 
