@@ -1,16 +1,18 @@
 # --- STAGE 1: Planner - Sadece bağımlılıkları planlamak için ---
 FROM rust:1.88-slim-bookworm AS planner
 WORKDIR /app
-# Sadece bağımlılıkları derlemek için dummy bir proje oluştur.
+# Bağımlılıkları derlemek için dummy bir proje oluştur.
 RUN cargo init --bin
 
-# Sadece bağımlılık tanımlarını kopyala. Bu katman cache'lenecek.
+# Sadece bağımlılık tanımlarını kopyala.
 COPY Cargo.toml Cargo.lock ./
 
-# Bağımlılıkları önceden derle. Bu en uzun süren adımdır.
-# `--locked` flag'i Cargo.lock dosyasını kullanmaya zorlar.
+# DÜZELTME: Planner aşaması da OpenSSL geliştirme dosyalarına ihtiyaç duyar.
+RUN apt-get update && apt-get install -y libssl-dev pkg-config && rm -rf /var/lib/apt/lists/*
+
+# Bağımlılıkları önceden derle.
 RUN cargo build --release --locked
-# Sadece derlenmiş bağımlılıkları tutmak için kendi kodumuzu temizle.
+# Kendi kodumuzu temizle.
 RUN rm -f target/release/deps/planner*
 
 # --- STAGE 2: Builder - Bağımlılıkları ve kodu derlemek için ---
@@ -20,8 +22,8 @@ FROM rust:1.88-slim-bookworm AS builder
 RUN apt-get update && \
     apt-get install -y \
     build-essential \
-    pkg-config \
     libssl-dev \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -29,14 +31,15 @@ WORKDIR /app
 # Önce sadece bağımlılık tanımlarını tekrar kopyala
 COPY Cargo.toml Cargo.lock ./
 
-# Planner aşamasından ÖNCEDEN DERLENMİŞ bağımlılıkları kopyala. Bu çok hızlıdır.
+# Planner aşamasından ÖNCEDEN DERLENMİŞ bağımlılıkları kopyala.
 COPY --from=planner /app/target/release/deps/ ./target/release/deps/
 
 # Şimdi SADECE var olan kaynak kodunu kopyala
 COPY src ./src
 COPY examples ./examples
+# NOT: Eğer gelecekte build.rs eklerseniz, buraya COPY komutunu ekleyebilirsiniz.
 
-# Son olarak, sadece kendi kodumuzu derle (bağımlılıklar zaten derlendiği için bu da hızlıdır)
+# Son olarak, sadece kendi kodumuzu derle
 RUN cargo build --release --locked
 
 # --- STAGE 3: Final - Çalıştırılabilir minimal imaj ---
