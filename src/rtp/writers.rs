@@ -34,7 +34,6 @@ impl AsyncRecordingWriter for FileWriter {
 }
 
 struct S3Writer {
-    // DEĞİŞİKLİK: Artık S3 client'ını Arc ile paylaşıyoruz.
     client: Arc<S3Client>,
     bucket: String,
     key: String,
@@ -52,12 +51,11 @@ impl AsyncRecordingWriter for S3Writer {
             .send()
             .await
             .context("S3'ye obje yüklenemedi")?;
-        info!("Kayıt dosyası başarıyla S3 bucket'ına yazıldı.");
+        info!(bucket = %self.bucket, key = %self.key, "Kayıt dosyası başarıyla S3 bucket'ına yazıldı.");
         Ok(())
     }
 }
 
-// DEĞİŞİKLİK: Fonksiyon artık AppConfig yerine AppState alıyor.
 pub async fn from_uri(
     uri_str: &str,
     app_state: &AppState,
@@ -67,21 +65,20 @@ pub async fn from_uri(
 
     match uri.scheme() {
         "file" => {
-            let path = uri.to_file_path().map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
-            Ok(Box::new(FileWriter { path: path.to_string_lossy().to_string() }))
+            // ...
         }
         "s3" => {
             let s3_config = config.s3_config.as_ref().ok_or_else(|| {
                 anyhow!("S3 URI'si belirtildi ancak S3 konfigürasyonu ortamda bulunamadı.")
             })?;
             
-            // YENİ: S3 istemcisini oluşturmak yerine AppState'ten alıyoruz.
             let client = app_state.s3_client.clone().ok_or_else(|| {
                 anyhow!("S3 URI'si kullanıldı ancak paylaşılan S3 istemcisi başlatılamamış.")
             })?;
 
             let bucket = s3_config.bucket_name.clone();
-            let key = uri.path().trim_start_matches('/').to_string();
+            // === DEĞİŞİKLİK: URI'dan hem host (tenant) hem de path'i al ===
+            let key = format!("{}{}", uri.host_str().unwrap_or(""), uri.path()).trim_start_matches('/').to_string();
 
             if key.is_empty() {
                 return Err(anyhow!("S3 URI'sinde dosya yolu (key) belirtilmelidir."));

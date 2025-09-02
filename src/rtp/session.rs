@@ -155,14 +155,10 @@ pub async fn rtp_session_handler(
                         if actual_remote_addr.is_none() { actual_remote_addr = Some(candidate_target_addr); }
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
                         let codec_to_use = outbound_codec.unwrap_or(AudioCodec::Pcmu);
-
                         let app_state_clone = config.app_state.clone();
                         let config_clone = config.app_config.clone();
                         let socket_clone = socket.clone();
                         
-                        // === SAHİPLİK HATASI DÜZELTMESİ ===
-                        // `permanent_recording_session`'ı doğrudan `move` etmiyoruz.
-                        // Onun yerine, sadece çalınacak ses sample'larını yüklüyoruz.
                         let samples_to_play_and_record = match load_samples_from_uri(&audio_uri, &app_state_clone, &config_clone).await {
                             Ok(s) => Some(s),
                             Err(e) => {
@@ -172,9 +168,11 @@ pub async fn rtp_session_handler(
                         };
                         
                         if let Some(samples) = samples_to_play_and_record {
+                            // === DEĞİŞİKLİK BURADA: Klonla ve `move` et ===
+                            let samples_clone_for_recording = samples.clone();
                             if let Some(session) = &mut permanent_recording_session {
-                                info!(samples_count = samples.len(), "Giden anons kalıcı kayda ekleniyor.");
-                                session.samples.extend_from_slice(&samples);
+                                info!(samples_count = samples_clone_for_recording.len(), "Giden anons kalıcı kayda ekleniyor.");
+                                session.samples.extend_from_slice(&samples_clone_for_recording);
                             }
 
                             tokio::spawn(async move {
@@ -233,6 +231,7 @@ pub async fn rtp_session_handler(
                             live_stream_sender = None;
                         }
                     }
+                    // === DEĞİŞİKLİK BURADA: Gelen sesi de kayda ekle ===
                     if let Some(session) = &mut permanent_recording_session {
                         session.samples.extend_from_slice(&processed_audio.samples_16khz);
                     }
