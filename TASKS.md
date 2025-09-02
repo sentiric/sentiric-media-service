@@ -46,41 +46,7 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
         -   [x] **Ortam Bağımsızlığı:** Bu testin başarılı olması için gereken tüm ortam yapılandırmaları `docker-compose.test.yml` ve `.env.test` dosyaları ile sağlanmıştır. Test, beklenen miktarda ses verisini başarıyla işlemektedir.
 
 ---
-### **FAZ 1.5: STABİLİZASYON VE ANAYASAL UYUM (YENİ FAZ)**
-
-**Amaç:** Platformdaki tüm ses kalitesi sorunlarını (cızırtı, hızlandırılmış ses, format uyumsuzluğu) kökten çözmek ve `media-service`'i, gelen ve giden tüm ses akışlarının kalitesinden ve formatından sorumlu **tek merkez (Single Source of Truth)** haline getirmek.
-
--   [x] **Görev ID: MEDIA-REFACTOR-01 - Merkezi Ses İşleme ve Transcoding Motoru (KRİTİK & ACİL)**
-    -   **Durum:** **Tamamlandı****
-    -   **Bulgular:** Canlı testlerde, telefon şebekesinden gelen 8kHz sesin, platformun iç standardı olan 16kHz'e doğru bir şekilde dönüştürülmeden işlendiği tespit edilmiştir. Bu, hem canlı dinlemede (STT) hem de çağrı kayıtlarında "hızlandırılmış/Chipmunk" etkisine, anlaşılamayan anonslara ve hatalı transkripsiyonlara yol açmaktadır. Bu, platformun temel fonksiyonelliğini bloke eden kritik bir hatadır.
-    -   **Çözüm Stratejisi (Anayasal Kural):** "Ara Format" (Pivot Format) yaklaşımı benimsenecektir. `media-service`, platformun tek ses adaptörü olarak görev yapacaktır.
-        1.  **Giriş (Decode & Resample):** Gelen tüm 8kHz G.711 RTP paketleri, alındığı anda standart 16kHz LPCM formatına dönüştürülecektir.
-        2.  **İşleme (İç Akış):** Tüm iç işlemler (canlı akışı STT'ye gönderme, kalıcı kayda ekleme) bu standart ve temiz 16kHz format üzerinden gerçekleştirilecektir.
-        3.  **Çıkış (Resample & Encode):** Standart formattaki ses (TTS yanıtı, anons), kullanıcıya gönderilmeden hemen önce hedefin beklediği 8kHz G.711 formatına dönüştürülecektir.
-    -   **Kabul Kriterleri:**
-        -   [ ] `rtp/codecs.rs` modülü, tüm G.711 <-> 16kHz LPCM dönüşüm mantığını barındırmalıdır.
-        -   [ ] `rtp_session_handler`, gelen RTP paketlerini anında 16kHz LPCM'e dönüştürmelidir.
-        -   [ ] `RecordAudio` gRPC stream'i, istemciye sadece temiz 16kHz LPCM verisi göndermelidir.
-        -   [ ] `StartRecording` ile oluşturulan `.wav` dosyaları her zaman `16000 Hz` örnekleme oranına sahip olmalıdır.
-        -   [ ] `PlayAudio` ile çalınan sesler, gönderilmeden önce 8kHz G.711'e encode edilmelidir.
-        -   [ ] **Nihai Doğrulama:** Düzeltme sonrası yapılan bir test çağrısının S3'e kaydedilen ses dosyası dinlendiğinde, hem kullanıcının hem de sistemin seslerinin **normal hızda ve anlaşılır** olduğu duyulmalıdır.
-    -   **Tahmini Süre:** ~2 gün
-
--   [ ] **Görev ID: MEDIA-004 - Kayıt Tamamlandığında Olay Yayınlama (YÜKSEK ÖNCELİK)**
-    -   **Durum:** ⬜ **Yapılacak (ACİL)**
-    -   **Açıklama:** Bir çağrı kaydı başarıyla S3/MinIO'ya yazıldıktan sonra, bu kaydın URI'ini içeren bir `call.recording.available` olayını RabbitMQ'ya yayınlamak. Bu, `cdr-service`'in kaydı ilgili çağrıyla ilişkilendirmesi için kritiktir.
-    -   **Kabul Kriterleri:**
-        -   [ ] `src/rtp/session.rs` içindeki `finalize_and_save_recording` fonksiyonu, S3'e yazma işlemi başarılı olduğunda `RabbitMQ`'ya `sentiric-contracts`'te tanımlı `CallRecordingAvailableEvent` formatında bir olay yayınlamalıdır. Bu olayın içinde `call_id` ve `recording_uri` bulunmalıdır.
-            
-
-YENİ GÖREV (media-service): MEDIA-FEAT-03 - RabbitMQ Publisher Entegrasyonu
-Açıklama: media-service'in AppState'ine ve başlangıç mantığına, RabbitMQ'ya olay yayınlayabilmek için bir Publisher (Lapin Channel) eklenmesi. Bu, MEDIA-004 görevinin ön koşuludur.
-            
-
----
-### **FAZ 2: Gelişmiş Medya Yetenekleri ve Yönetim**
-
-**Amaç:** Platformun çağrı yönetimi yeteneklerini zenginleştirmek, production ortamına hazırlamak ve daha güvenli hale getirmek.
+### **FAZ 2: Platform Entegrasyonu ve Veri Akışı (Mevcut Odak)**
 
 -   [x] **Görev ID: MEDIA-001B - Kalıcı Çağrı Kaydı**
     -   **Açıklama:** Çağrı sesini bir dosyaya kaydetme özelliği.
@@ -94,6 +60,27 @@ Açıklama: media-service'in AppState'ine ve başlangıç mantığına, RabbitMQ
         -   [x] `docker-compose` içinde `minio` servisi tanımlandı.
         -   [x] `media-service`, ortam değişkenleri aracılığıyla yerel MinIO hedefine kayıt yapabiliyor.
         -   [x] Altyapı, farklı profillerde (lokal vs cloud) farklı S3 hedeflerini destekleyecek şekilde esnek yapılandırıldı.
+
+
+-   **Görev ID: MEDIA-FEAT-03 - RabbitMQ Publisher Entegrasyonu**
+    -   **Durum:** ⬜ **Yapılacak**
+    -   **Öncelik:** **KRİTİK**
+    -   **Stratejik Önem:** Bu görev, `media-service`'in platformun asenkron dünyasıyla konuşabilmesi için temel altyapıyı oluşturur. Bu olmadan `MEDIA-004` yapılamaz.
+    -   **Çözüm Stratejisi:** `main.rs` içinde bir `lapin::Channel` oluşturulmalı ve bu, `AppState` üzerinden tüm `rtp_session_handler`'lara `Arc` ile paylaşılmalıdır.
+    -   **Kabul Kriterleri:**
+        -   [ ] Servis başladığında, RabbitMQ'ya başarıyla bağlandığına ve `sentiric_events` exchange'ini deklare ettiğine dair bir log görülmelidir.
+        -   [ ] `AppState` yapısı, `Arc<lapin::Channel>` içermelidir.
+    -   **Tahmini Süre:** ~4-6 Saat
+
+-   **Görev ID: MEDIA-004 - Kayıt Tamamlandığında Olay Yayınlama**
+    -   **Durum:** ⬜ **Yapılacak (Bloklandı)**
+    -   **Öncelik:** YÜKSEK
+    -   **Stratejik Önem:** Çağrı kayıtlarının platform tarafından erişilebilir hale gelmesini sağlar.
+    -   **Bağımlılıklar:** `MEDIA-FEAT-03`.
+    -   **Kabul Kriterleri:**
+        -   [ ] `finalize_and_save_recording` fonksiyonu, S3'e yazma işlemi başarılı olduğunda, RabbitMQ'ya `call.recording.available` tipinde bir olay yayınlamalıdır.
+        -   [ ] Yayınlanan olayın payload'u, `call_id` ve doğru S3 `recording_uri`'sini içermelidir.
+    -   **Tahmini Süre:** ~2-3 Saat
 
 -   [ ] **Görev ID: MEDIA-FEAT-02 - İsteğe Bağlı Çağrı Kaydı Dönüştürme ve Sunma (YENİ GÖREV - YÜKSEK ÖNCELİK)**
     -   **Durum:** ⬜ **Planlandı**
@@ -118,12 +105,6 @@ Açıklama: media-service'in AppState'ine ve başlangıç mantığına, RabbitMQ
         -   [ ] Yeni bir test istemcisi (`playable_recording_client.rs`) oluşturulmalıdır.
         -   [ ] Bu istemci, `end_to_end_call_validator` tarafından oluşturulmuş perdesi yüksek bir kaydın URI'sini `GetPlayableRecording` RPC'sine göndermelidir.
         -   [ ] Gelen ses akışı bir dosyaya yazılmalı ve bu dosya dinlendiğinde, sesin perdesinin doğal ve anlaşılır olduğu, hızlanma etkisinin ortadan kalktığı doğrulanmalıdır.
-
--   [ ] **Görev ID: MEDIA-004 - Kayıt Tamamlandığında Olay Yayınlama (YÜKSEK ÖNCELİK)**
-    -   **Durum:** ⬜ Planlandı
-    -   **Açıklama:** Bir çağrı kaydı başarıyla S3/MinIO'ya yazıldıktan sonra, bu kaydın URI'ini içeren bir `call.recording.available` olayını RabbitMQ'ya yayınlamak. Bu, `cdr-service`'in kaydı ilgili çağrıyla ilişkilendirmesi için kritiktir.
-    -   **Kabul Kriterleri:**
-        -   [ ] `src/rtp/session.rs` içindeki `finalize_and_save_recording` fonksiyonu, S3'e yazma işlemi başarılı olduğunda `RabbitMQ`'ya `sentiric-contracts`'te tanımlı `CallRecordingAvailableEvent` formatında bir olay yayınlamalıdır.
 
 -   [ ] **Görev ID: SEC-001 - Güvenli Medya Akışı (SRTP Desteği)**
     -   **Açıklama:** Medya akışını SRTP ile şifreleyerek çağrıların dinlenmesini engellemek.
