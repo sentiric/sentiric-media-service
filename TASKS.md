@@ -50,8 +50,8 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
 
 **Amaç:** Platformdaki tüm ses kalitesi sorunlarını (cızırtı, hızlandırılmış ses, format uyumsuzluğu) kökten çözmek ve `media-service`'i, gelen ve giden tüm ses akışlarının kalitesinden ve formatından sorumlu **tek merkez (Single Source of Truth)** haline getirmek.
 
--   [ ] **Görev ID: MEDIA-REFACTOR-01 - Merkezi Ses İşleme ve Transcoding Motoru (KRİTİK & ACİL)**
-    -   **Durum:** ⬜ **Yapılacak (İLK GÖREV)**
+-   [x] **Görev ID: MEDIA-REFACTOR-01 - Merkezi Ses İşleme ve Transcoding Motoru (KRİTİK & ACİL)**
+    -   **Durum:** **Tamamlandı****
     -   **Bulgular:** Canlı testlerde, telefon şebekesinden gelen 8kHz sesin, platformun iç standardı olan 16kHz'e doğru bir şekilde dönüştürülmeden işlendiği tespit edilmiştir. Bu, hem canlı dinlemede (STT) hem de çağrı kayıtlarında "hızlandırılmış/Chipmunk" etkisine, anlaşılamayan anonslara ve hatalı transkripsiyonlara yol açmaktadır. Bu, platformun temel fonksiyonelliğini bloke eden kritik bir hatadır.
     -   **Çözüm Stratejisi (Anayasal Kural):** "Ara Format" (Pivot Format) yaklaşımı benimsenecektir. `media-service`, platformun tek ses adaptörü olarak görev yapacaktır.
         1.  **Giriş (Decode & Resample):** Gelen tüm 8kHz G.711 RTP paketleri, alındığı anda standart 16kHz LPCM formatına dönüştürülecektir.
