@@ -1,30 +1,30 @@
-// File: src/rtp/session.rs (TAM VE EKSİKSİZ SON HALİ)
+// File: src/rtp/session.rs (TAM VE EKSİKSİZ NİHAİ HALİ)
 use crate::config::AppConfig;
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
-use crate::rtp::stream::{decode_audio_with_symphonia, send_announcement_from_uri};
+use crate::rtp::stream::{decode_audio_with_symphonia, send_rtp_stream};
 use crate::rtp::writers;
 use crate::state::AppState;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine};
-use hound::{WavWriter, WavSpec}; // WavSpec eklendi
+use hound::{WavWriter, WavSpec};
 use metrics::gauge;
 use rtp::packet::Packet;
 use std::io::Cursor;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::path::PathBuf; // PathBuf eklendi
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::{spawn_blocking, JoinHandle};
-use tokio::time::{Instant, sleep};
+use tokio::time::{sleep, Instant};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::{debug, error, info, instrument, warn};
 use webrtc_util::marshal::Unmarshal;
 use crate::rtp::codecs::{self, AudioCodec};
-use crate::audio::AudioCache; // AudioCache eklendi
-use rubato::Resampler; // Resampler trait'i eklendi
+use crate::audio::AudioCache;
+use rubato::Resampler;
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -44,7 +44,7 @@ async fn load_samples_from_uri(
     config: &Arc<AppConfig>,
 ) -> Result<Arc<Vec<i16>>> {
     if let Some(path_part) = uri.strip_prefix("file://") {
-        let mut final_path = std::path::PathBuf::from(&config.assets_base_path);
+        let mut final_path = PathBuf::from(&config.assets_base_path);
         final_path.push(path_part.trim_start_matches('/'));
         load_wav_and_resample(&app_state.audio_cache, &final_path).await
     } else if uri.starts_with("data:") {
@@ -56,7 +56,6 @@ async fn load_samples_from_uri(
         let audio_bytes = general_purpose::STANDARD
             .decode(base64_data)
             .context("Base64 verisi çözümlenemedi")?;
-        // HATA DÜZELTME: Sonucu Ok() içine al
         Ok(Arc::new(decode_audio_with_symphonia(audio_bytes)?))
     } else {
         Err(anyhow!("Desteklenmeyen URI şeması: {}", uri))
@@ -74,7 +73,6 @@ async fn load_wav_and_resample(cache: &AudioCache, path: &PathBuf) -> Result<Arc
     
     info!(path = %path.display(), "Ses diskten okunuyor ve işleniyor...");
     let path_owned = path.clone();
-    // HATA DÜZELTME: spawn_blocking'in sonucunu ?? ile açarak hatayı yukarı iletiyoruz.
     let (spec, samples_i16) = spawn_blocking(move || -> Result<(WavSpec, Vec<i16>)> {
         let mut reader = hound::WavReader::open(path_owned)?;
         let spec = reader.spec();
@@ -88,6 +86,7 @@ async fn load_wav_and_resample(cache: &AudioCache, path: &PathBuf) -> Result<Arc
         return Ok(samples_arc);
     }
 
+    info!(from = spec.sample_rate, to = crate::rtp::stream::INTERNAL_SAMPLE_RATE, "Anons dosyası yeniden örnekleniyor...");
     let samples_f32: Vec<f32> = samples_i16.iter().map(|&s| s as f32 / 32768.0).collect();
     let params = rubato::SincInterpolationParameters {
         sinc_len: 256, f_cutoff: 0.95, interpolation: rubato::SincInterpolationType::Linear,
@@ -155,19 +154,35 @@ pub async fn rtp_session_handler(
                         current_playback_token = Some(cancellation_token.clone());
                         if actual_remote_addr.is_none() { actual_remote_addr = Some(candidate_target_addr); }
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
-
-                        if let Some(rec_session) = &mut permanent_recording_session {
-                            match load_samples_from_uri(&audio_uri, &config.app_state, &config.app_config).await {
-                                Ok(samples_16khz) => {
-                                    info!(samples_count = samples_16khz.len(), "Giden anons kalıcı kayda ekleniyor.");
-                                    rec_session.samples.extend_from_slice(&samples_16khz);
-                                }
-                                Err(e) => error!(error = ?e, "Kayıt için giden ses yüklenemedi."),
-                            }
-                        }
-                        
                         let codec_to_use = outbound_codec.unwrap_or(AudioCodec::Pcmu);
-                        tokio::spawn(send_announcement_from_uri(socket.clone(), target, audio_uri, config.app_state.audio_cache.clone(), config.app_config.clone(), cancellation_token, codec_to_use));
+
+                        let app_state_clone = config.app_state.clone();
+                        let config_clone = config.app_config.clone();
+                        let socket_clone = socket.clone();
+                        
+                        // === SAHİPLİK HATASI DÜZELTMESİ ===
+                        // `permanent_recording_session`'ı doğrudan `move` etmiyoruz.
+                        // Onun yerine, sadece çalınacak ses sample'larını yüklüyoruz.
+                        let samples_to_play_and_record = match load_samples_from_uri(&audio_uri, &app_state_clone, &config_clone).await {
+                            Ok(s) => Some(s),
+                            Err(e) => {
+                                error!(error = ?e, "Çalınacak ses yüklenemedi.");
+                                None
+                            }
+                        };
+                        
+                        if let Some(samples) = samples_to_play_and_record {
+                            if let Some(session) = &mut permanent_recording_session {
+                                info!(samples_count = samples.len(), "Giden anons kalıcı kayda ekleniyor.");
+                                session.samples.extend_from_slice(&samples);
+                            }
+
+                            tokio::spawn(async move {
+                                if let Err(e) = send_rtp_stream(&socket_clone, target, &samples, cancellation_token, codec_to_use).await {
+                                    error!(error = ?e, "RTP stream gönderiminde hata oluştu.");
+                                }
+                            });
+                        }
                     },
                     RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate: _ } => {
                         live_stream_sender = Some(stream_sender);

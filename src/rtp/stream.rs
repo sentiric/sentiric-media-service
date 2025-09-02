@@ -1,14 +1,12 @@
-// File: src/rtp/stream.rs (TAM VE EKSİKSİZ NİHAİ HALİ)
-use crate::config::AppConfig;
+// File: src/rtp/stream.rs (UYARI GİDERİLMİŞ NİHAİ HALİ)
+// === DEĞİŞİKLİK: Kullanılmayan importlar kaldırıldı. ===
 use crate::rtp::codecs::{self, AudioCodec};
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose, Engine as _};
+use anyhow::{Context, Result};
 use rand::Rng;
 use rtp::header::Header;
 use rtp::packet::Packet;
 use std::io::Cursor;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
@@ -21,66 +19,15 @@ use symphonia::core::probe::Hint;
 use tokio::net::UdpSocket;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, warn};
+use tracing::{info, warn};
 use webrtc_util::marshal::Marshal;
-use crate::audio::AudioCache; // AudioCache için import
-use rubato::Resampler; // === EKSİK OLAN VE ŞİMDİ EKLENEN KRİTİK IMPORT ===
+use rubato::Resampler;
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 16000;
 
-#[instrument(skip_all, fields(remote = %target_addr, uri, codec = ?target_codec))]
-pub async fn send_announcement_from_uri(
-    sock: Arc<UdpSocket>,
-    target_addr: SocketAddr,
-    audio_uri: String,
-    // === DEĞİŞİKLİK: Kullanılmayan 'cache' parametresi kaldırıldı ===
-    // Bu fonksiyon artık doğrudan önbelleğe alma işlemi yapmıyor, bu sorumluluk session.rs'e taşındı.
-    _cache: AudioCache,
-    config: Arc<AppConfig>,
-    token: CancellationToken,
-    target_codec: AudioCodec,
-) {
-    let uri_preview = audio_uri.chars().take(70).collect::<String>();
-    tracing::Span::current().record("uri", &uri_preview.as_str());
-    info!("Anons gönderimi başlıyor...");
-
-    let result: Result<()> = async {
-        let samples_16khz = if let Some(path_part) = audio_uri.strip_prefix("file://") {
-            let mut final_path = PathBuf::from(&config.assets_base_path);
-            final_path.push(path_part.trim_start_matches('/'));
-            // Doğrudan dosyayı okuyup işliyoruz. Önbelleğe alma işi `session.rs`'de yapılıyor.
-            let audio_bytes = tokio::fs::read(&final_path).await?;
-            Arc::new(decode_audio_with_symphonia(audio_bytes)?)
-        } else if audio_uri.starts_with("data:") {
-            info!("Data URI'sinden ses yükleniyor...");
-            let (_media_type, base64_data) = audio_uri
-                .strip_prefix("data:")
-                .and_then(|s| s.split_once(";base64,"))
-                .context("Geçersiz data URI formatı")?;
-            let audio_bytes = general_purpose::STANDARD
-                .decode(base64_data)
-                .context("Base64 verisi çözümlenemedi")?;
-            Arc::new(decode_audio_with_symphonia(audio_bytes)?)
-        } else {
-            return Err(anyhow!("Desteklenmeyen URI şeması: {}", uri_preview));
-        };
-
-        send_rtp_stream(&sock, target_addr, &samples_16khz, token, target_codec).await
-    }
-    .await;
-
-    if let Err(e) = result {
-        if e.downcast_ref::<tokio::time::error::Elapsed>().is_some()
-            || e.to_string().contains("cancelled")
-        {
-            warn!(error = ?e, "Anons gönderimi iptal edildi veya zaman aşımına uğradı.");
-        } else {
-            error!(error = ?e, "Anons gönderimi sırasında bir hata oluştu.");
-        }
-    }
-}
-
-async fn send_rtp_stream(
+// Bu fonksiyon artık sadece RTP paketlerini göndermekten sorumlu.
+// Bu yüzden config ve cache gibi parametrelere ihtiyacı yok.
+pub async fn send_rtp_stream(
     sock: &Arc<UdpSocket>,
     target_addr: SocketAddr,
     samples_16khz: &[i16],
@@ -130,6 +77,7 @@ async fn send_rtp_stream(
     Ok(())
 }
 
+// Bu fonksiyon, session.rs tarafından data URI'larını çözmek için kullanılıyor.
 pub fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
     let mss = MediaSourceStream::new(Box::new(Cursor::new(audio_bytes)), Default::default());
     let hint = Hint::new();
