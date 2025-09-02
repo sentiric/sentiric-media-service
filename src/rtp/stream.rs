@@ -1,5 +1,4 @@
-// File: src/rtp/stream.rs (GÜNCELLENDİ)
-use crate::audio::{self, AudioCache};
+// File: src/rtp/stream.rs (TAM VE EKSİKSİZ NİHAİ HALİ)
 use crate::config::AppConfig;
 use crate::rtp::codecs::{self, AudioCodec};
 use anyhow::{anyhow, Context, Result};
@@ -7,7 +6,6 @@ use base64::{engine::general_purpose, Engine as _};
 use rand::Rng;
 use rtp::header::Header;
 use rtp::packet::Packet;
-use rubato::Resampler;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -25,15 +23,19 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 use webrtc_util::marshal::Marshal;
+use crate::audio::AudioCache; // AudioCache için import
+use rubato::Resampler; // === EKSİK OLAN VE ŞİMDİ EKLENEN KRİTİK IMPORT ===
 
-const INTERNAL_SAMPLE_RATE: u32 = 16000;
+pub const INTERNAL_SAMPLE_RATE: u32 = 16000;
 
 #[instrument(skip_all, fields(remote = %target_addr, uri, codec = ?target_codec))]
 pub async fn send_announcement_from_uri(
     sock: Arc<UdpSocket>,
     target_addr: SocketAddr,
     audio_uri: String,
-    cache: AudioCache,
+    // === DEĞİŞİKLİK: Kullanılmayan 'cache' parametresi kaldırıldı ===
+    // Bu fonksiyon artık doğrudan önbelleğe alma işlemi yapmıyor, bu sorumluluk session.rs'e taşındı.
+    _cache: AudioCache,
     config: Arc<AppConfig>,
     token: CancellationToken,
     target_codec: AudioCodec,
@@ -46,7 +48,9 @@ pub async fn send_announcement_from_uri(
         let samples_16khz = if let Some(path_part) = audio_uri.strip_prefix("file://") {
             let mut final_path = PathBuf::from(&config.assets_base_path);
             final_path.push(path_part.trim_start_matches('/'));
-            audio::load_or_get_from_cache(&cache, &final_path).await?
+            // Doğrudan dosyayı okuyup işliyoruz. Önbelleğe alma işi `session.rs`'de yapılıyor.
+            let audio_bytes = tokio::fs::read(&final_path).await?;
+            Arc::new(decode_audio_with_symphonia(audio_bytes)?)
         } else if audio_uri.starts_with("data:") {
             info!("Data URI'sinden ses yükleniyor...");
             let (_media_type, base64_data) = audio_uri

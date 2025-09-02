@@ -1,4 +1,4 @@
-// File: src/rtp/session.rs (TAM VE DOĞRU SÜRÜM)
+// File: src/rtp/session.rs (TAM VE EKSİKSİZ SON HALİ)
 use crate::config::AppConfig;
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
@@ -7,23 +7,24 @@ use crate::rtp::writers;
 use crate::state::AppState;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine};
-use hound::WavWriter;
+use hound::{WavWriter, WavSpec}; // WavSpec eklendi
 use metrics::gauge;
 use rtp::packet::Packet;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
-// use std::time::Duration; // BU SATIRI SİLİN VEYA YORUMA ALIN
+use std::path::PathBuf; // PathBuf eklendi
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
 use tokio::task::{spawn_blocking, JoinHandle};
-use tokio::time::{sleep, Instant};
+use tokio::time::{Instant, sleep};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::{debug, error, info, instrument, warn};
 use webrtc_util::marshal::Unmarshal;
-
 use crate::rtp::codecs::{self, AudioCodec};
+use crate::audio::AudioCache; // AudioCache eklendi
+use rubato::Resampler; // Resampler trait'i eklendi
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -37,7 +38,6 @@ struct ProcessedAudio {
     source_codec: AudioCodec,
 }
 
-// === DEĞİŞİKLİK 1: load_samples_from_uri fonksiyonu artık resampling yapıyor ===
 async fn load_samples_from_uri(
     uri: &str,
     app_state: &AppState,
@@ -46,7 +46,6 @@ async fn load_samples_from_uri(
     if let Some(path_part) = uri.strip_prefix("file://") {
         let mut final_path = std::path::PathBuf::from(&config.assets_base_path);
         final_path.push(path_part.trim_start_matches('/'));
-        // Önbelleğe alma mantığını load_wav_and_resample içine taşıyalım
         load_wav_and_resample(&app_state.audio_cache, &final_path).await
     } else if uri.starts_with("data:") {
         info!("Data URI'sinden ses yükleniyor...");
@@ -57,14 +56,13 @@ async fn load_samples_from_uri(
         let audio_bytes = general_purpose::STANDARD
             .decode(base64_data)
             .context("Base64 verisi çözümlenemedi")?;
-        // Symphonia zaten doğru sample rate'e çeviriyor, bu kısım doğru.
-        Arc::new(decode_audio_with_symphonia(audio_bytes)?)
+        // HATA DÜZELTME: Sonucu Ok() içine al
+        Ok(Arc::new(decode_audio_with_symphonia(audio_bytes)?))
     } else {
         Err(anyhow!("Desteklenmeyen URI şeması: {}", uri))
     }
 }
 
-// === YENİ YARDIMCI FONKSİYON ===
 async fn load_wav_and_resample(cache: &AudioCache, path: &PathBuf) -> Result<Arc<Vec<i16>>> {
     let path_key = path.to_string_lossy().to_string();
     let mut cache_guard = cache.lock().await;
@@ -76,6 +74,7 @@ async fn load_wav_and_resample(cache: &AudioCache, path: &PathBuf) -> Result<Arc
     
     info!(path = %path.display(), "Ses diskten okunuyor ve işleniyor...");
     let path_owned = path.clone();
+    // HATA DÜZELTME: spawn_blocking'in sonucunu ?? ile açarak hatayı yukarı iletiyoruz.
     let (spec, samples_i16) = spawn_blocking(move || -> Result<(WavSpec, Vec<i16>)> {
         let mut reader = hound::WavReader::open(path_owned)?;
         let spec = reader.spec();
@@ -89,7 +88,6 @@ async fn load_wav_and_resample(cache: &AudioCache, path: &PathBuf) -> Result<Arc
         return Ok(samples_arc);
     }
 
-    // Yeniden örnekleme gerekiyor
     let samples_f32: Vec<f32> = samples_i16.iter().map(|&s| s as f32 / 32768.0).collect();
     let params = rubato::SincInterpolationParameters {
         sinc_len: 256, f_cutoff: 0.95, interpolation: rubato::SincInterpolationType::Linear,
@@ -108,13 +106,11 @@ async fn load_wav_and_resample(cache: &AudioCache, path: &PathBuf) -> Result<Arc
     Ok(samples_arc)
 }
 
-// YENİ: Gelen RTP paketini işleyip standart 16kHz LPCM formatına çeviren task
 fn process_packet_task(packet_data: Vec<u8>) -> JoinHandle<Option<ProcessedAudio>> {
     spawn_blocking(move || {
         let mut packet_buf = &packet_data[..];
         if let Ok(packet) = Packet::unmarshal(&mut packet_buf) {
             if let Ok(incoming_codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
-                // BURASI KRİTİK: Gelen sesi anında standart formata çeviriyoruz.
                 match codecs::decode_g711_to_lpcm16(&packet.payload, incoming_codec) {
                     Ok(samples_16khz) => Some(ProcessedAudio { samples_16khz, source_codec: incoming_codec }),
                     Err(e) => {
@@ -161,7 +157,6 @@ pub async fn rtp_session_handler(
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
 
                         if let Some(rec_session) = &mut permanent_recording_session {
-                            // === DEĞİŞİKLİK 3: Giden sesi de kayda ekle ===
                             match load_samples_from_uri(&audio_uri, &config.app_state, &config.app_config).await {
                                 Ok(samples_16khz) => {
                                     info!(samples_count = samples_16khz.len(), "Giden anons kalıcı kayda ekleniyor.");
@@ -211,9 +206,7 @@ pub async fn rtp_session_handler(
                         outbound_codec = Some(processed_audio.source_codec);
                     }
 
-                    // Canlı dinleme ve kalıcı kayıt artık her zaman temiz 16kHz veri kullanır.
                     if let Some(sender) = &live_stream_sender {
-                        // ... sender'a processed_audio.samples_16khz gönderilir ..
                         let media_type = "audio/L16;rate=16000".to_string();
                         let mut bytes = Vec::with_capacity(processed_audio.samples_16khz.len() * 2);
                         for &sample in &processed_audio.samples_16khz {
@@ -225,7 +218,6 @@ pub async fn rtp_session_handler(
                             live_stream_sender = None;
                         }
                     }
-                    // === DEĞİŞİKLİK 2: Gelen sesi de kayda ekle ===
                     if let Some(session) = &mut permanent_recording_session {
                         session.samples.extend_from_slice(&processed_audio.samples_16khz);
                     }
