@@ -1,60 +1,61 @@
-// File: src/state.rs (GÜNCELLENDİ)
+// File: src/state.rs
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, info};
-
-// YENİ: S3 istemcisini AppState'e eklemek için import.
 use aws_sdk_s3::Client as S3Client;
-
+use lapin::Channel as LapinChannel;
 use crate::audio::AudioCache;
 use crate::rtp::command::RtpCommand;
+use crate::config::AppConfig; // AppConfig'i import ediyoruz
 
 type SessionChannels = Arc<Mutex<HashMap<u16, mpsc::Sender<RtpCommand>>>>;
 type PortsPool = Arc<Mutex<Vec<u16>>>;
 type QuarantinedPorts = Arc<Mutex<Vec<(u16, Instant)>>>;
 
-//=================================================
-// MERKEZİ UYGULAMA DURUMU (APPSTATE)
-//=================================================
 #[derive(Clone)]
 pub struct AppState {
     pub port_manager: PortManager,
     pub audio_cache: AudioCache,
-    // YENİ: Paylaşılan S3 istemcisi. Option<> çünkü S3 konfigürasyonu olmayabilir.
     pub s3_client: Option<Arc<S3Client>>,
-    // Gelecekte eklenecekler:
-    // pub conference_manager: ConferenceManager,
+    pub rabbitmq_publisher: Option<Arc<LapinChannel>>,
 }
 
 impl AppState {
-    // DEĞİŞİKLİK: new fonksiyonu artık S3 istemcisini de alıyor.
-    pub fn new(port_manager: PortManager, s3_client: Option<Arc<S3Client>>) -> Self {
+    pub fn new(
+        port_manager: PortManager, 
+        s3_client: Option<Arc<S3Client>>,
+        rabbitmq_publisher: Option<Arc<LapinChannel>>
+    ) -> Self {
         Self {
             port_manager,
             audio_cache: Arc::new(Mutex::new(HashMap::new())),
             s3_client,
+            rabbitmq_publisher,
         }
     }
 }
-//=================================================
 
 #[derive(Clone)]
 pub struct PortManager {
     session_channels: SessionChannels,
     available_ports: PortsPool,
     quarantined_ports: QuarantinedPorts,
+    // --- DEĞİŞİKLİK BURADA: Config'i PortManager'a ekliyoruz ---
+    pub config: Arc<AppConfig>, 
 }
 
 impl PortManager {
-    pub fn new(rtp_port_min: u16, rtp_port_max: u16) -> Self {
+    // --- DEĞİŞİKLİK BURADA: new fonksiyonu artık config alıyor ---
+    pub fn new(rtp_port_min: u16, rtp_port_max: u16, config: Arc<AppConfig>) -> Self {
         let initial_ports: Vec<u16> = (rtp_port_min..=rtp_port_max).filter(|&p| p % 2 == 0).collect();
         info!(port_count = initial_ports.len(), "Kullanılabilir port havuzu oluşturuldu.");
         Self {
             session_channels: Arc::new(Mutex::new(HashMap::new())),
             available_ports: Arc::new(Mutex::new(initial_ports)),
             quarantined_ports: Arc::new(Mutex::new(Vec::new())),
+            config, // ve burada atıyoruz
         }
     }
 

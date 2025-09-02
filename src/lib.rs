@@ -1,4 +1,4 @@
-// File: src/lib.rs (TAM VE DOĞRU SÜRÜM - v3)
+// File: src/lib.rs
 pub mod config;
 pub mod state;
 pub mod grpc;
@@ -6,6 +6,7 @@ pub mod rtp;
 pub mod audio;
 pub mod tls;
 pub mod metrics;
+pub mod rabbitmq;
 
 pub use sentiric_contracts::sentiric::media::v1::{
     media_service_server::{MediaService, MediaServiceServer},
@@ -22,15 +23,8 @@ use tonic::transport::Server;
 use std::net::SocketAddr;
 use crate::metrics::start_metrics_server;
 use tracing::{info, warn};
-use tracing_subscriber::{
-    prelude::*,
-    EnvFilter,
-    fmt::{self, format::FmtSpan},
-    Registry
-};
-
+use tracing_subscriber::{prelude::*, EnvFilter, fmt::{self, format::FmtSpan}, Registry};
 use state::{AppState, PortManager};
-
 use std::env;
 use aws_config::meta::region::RegionProviderChain;
 use aws_config::{BehaviorVersion, Region};
@@ -67,16 +61,13 @@ async fn create_s3_client(config: &AppConfig) -> Result<Option<Arc<S3Client>>> {
     Ok(None)
 }
 
-
 pub async fn run() -> Result<()> {
-    // Esnek .env yükleme
     let env_file = env::var("ENV_FILE").unwrap_or_else(|_| "development.env".to_string());
     if let Err(e) = dotenvy::from_filename(&env_file) {
         warn!(file = %env_file, error = %e, "Ortam değişkenleri dosyası yüklenemedi (bu bir hata olmayabilir).");
     } else {
         info!(file = %env_file, "Ortam değişkenleri dosyası başarıyla yüklendi.");
     }
-
     let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
     let metrics_addr = SocketAddr::new("0.0.0.0".parse().unwrap(), config.metrics_port);
@@ -87,28 +78,35 @@ pub async fn run() -> Result<()> {
     let subscriber = Registry::default().with(env_filter);
 
     if config.env == "development" {
-        let fmt_layer = fmt::layer()
-            .with_target(true)
-            .with_line_number(true)
-            // .with_span_events(FmtSpan::FULL); // BU SATIRI YORUMA ALIN
-            .with_span_events(FmtSpan::NONE); // VEYA BUNU EKLEYİN
+        let fmt_layer = fmt::layer().with_target(true).with_line_number(true).with_span_events(FmtSpan::NONE);
         subscriber.with(fmt_layer).init();
     } else {
-        let fmt_layer = fmt::layer()
-            .json()
-            .with_current_span(true)
-            .with_span_events(FmtSpan::NONE); 
+        let fmt_layer = fmt::layer().json().with_current_span(true).with_span_events(FmtSpan::NONE); 
         subscriber.with(fmt_layer).init();
     }
     
     info!(service_name = "sentiric-media-service", "Loglama altyapısı başlatıldı.");
     info!("Konfigürasyon başarıyla yüklendi.");
-
+    
     let tls_config = tls::load_server_tls_config().await.context("TLS konfigürasyonu yüklenemedi")?;
-    let port_manager = PortManager::new(config.rtp_port_min, config.rtp_port_max);
+    
+    // --- DEĞİŞİKLİK BURADA: PortManager'a config'i de veriyoruz ---
+    let port_manager = PortManager::new(config.rtp_port_min, config.rtp_port_max, config.clone());
+    // --- DEĞİŞİKLİK SONU ---
     
     let s3_client = create_s3_client(&config).await?;
-    let app_state = AppState::new(port_manager.clone(), s3_client);
+    
+    let rabbit_channel = if let Some(url) = &config.rabbitmq_url {
+        let channel = rabbitmq::connect_with_retry(url).await?;
+        rabbitmq::declare_exchange(&channel).await?;
+        info!(exchange_name = rabbitmq::EXCHANGE_NAME, "RabbitMQ exchange'i deklare edildi.");
+        Some(channel)
+    } else {
+        warn!("RABBITMQ_URL bulunamadı, olay yayınlama özelliği devre dışı.");
+        None
+    };
+    
+    let app_state = AppState::new(port_manager.clone(), s3_client, rabbit_channel);
 
     let reclamation_manager = app_state.port_manager.clone();
     let quarantine_duration = config.rtp_port_quarantine_duration;
@@ -149,6 +147,7 @@ async fn shutdown_signal() {
 }
 
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,14 +155,10 @@ mod tests {
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
-    #[ignore] // Bu test tam bir servis başlatır, CI'da koşmak yerine manuel çalıştırılmalı.
+    #[ignore]
     async fn test_start_recording_rpc_exists() {
         let _ = dotenvy::from_filename("development.env");
-
-        tokio::spawn(async {
-            run().await.unwrap();
-        });
-
+        tokio::spawn(async { run().await.unwrap(); });
         sleep(Duration::from_secs(2)).await;
 
         let client_cert_path = std::env::var("AGENT_SERVICE_CERT_PATH").unwrap();
@@ -193,7 +188,6 @@ mod tests {
             .expect("İstemci bağlanamadı");
 
         let mut client = MediaServiceClient::new(channel);
-
         let allocate_res = client.allocate_port(AllocatePortRequest {
             call_id: "internal-test-call".to_string(),
         }).await.expect("AllocatePort başarısız");
@@ -204,10 +198,11 @@ mod tests {
             output_uri: "file:///test.wav".to_string(),
             sample_rate: Some(16000),
             format: Some("wav".to_string()),
+            call_id: "internal-test-call".to_string(),
+            trace_id: "internal-test-trace".to_string(),
         }).await;
 
         assert!(result.is_ok(), "StartRecording RPC çağrısı başarısız oldu: {:?}", result.err());
-        
         let response_status = result.unwrap().into_inner();
         assert!(response_status.success, "StartRecording yanıtı 'success: false' döndürdü.");
         

@@ -1,5 +1,4 @@
 // File: src/rtp/command.rs
-
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -13,12 +12,16 @@ pub struct AudioFrame {
     pub media_type: String, // Örn: "audio/L16;rate=16000"
 }
 
+// --- DEĞİŞİKLİK BURADA: Gerekli alanlar eklendi ---
 #[derive(Debug)]
 pub struct RecordingSession {
     pub output_uri: String,
     pub spec: WavSpec,
     pub samples: Vec<i16>,
+    pub call_id: String,
+    pub trace_id: String,
 }
+// --- DEĞİŞİKLİK SONU ---
 
 #[derive(Debug)]
 pub enum RtpCommand {

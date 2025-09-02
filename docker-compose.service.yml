@@ -4,9 +4,23 @@ networks:
   sentiric-net: { name: "${NETWORK_NAME:-sentiric-net}", driver: bridge }
 
 volumes:
+  rabbitmq_data:
   minio_data:
 
 services:
+
+  rabbitmq:
+    build: { context: ../sentiric-rabbitmq }
+    env_file: ["${ENV_FILE_PATH}"]
+    ports: ["15672:15672", "5672:5672"]
+    volumes: [rabbitmq_data:/var/lib/rabbitmq/]
+    networks: [sentiric-net]
+    restart: always
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
   minio:
     image: quay.io/minio/minio
@@ -47,3 +61,7 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    depends_on: {
+      minio: { condition: service_healthy },
+      rabbitmq: { condition: service_healthy },
+    }         

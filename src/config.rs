@@ -1,11 +1,9 @@
-// File: src/config.rs (GÜNCELLENMİŞ)
-
+// src/config.rs
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
 use anyhow::{Result, Context, bail};
 
-// S3Config'e bucket_name eklendi
 #[derive(Debug, Clone)]
 pub struct S3Config {
     pub endpoint_url: String,
@@ -27,52 +25,27 @@ pub struct AppConfig {
     pub rust_log: String,
     pub metrics_port: u16,
     pub s3_config: Option<S3Config>,
-    // --- YENİ YAPILANDIRMA ALANLARI ---
     pub rtp_session_inactivity_timeout: Duration,
     pub rtp_command_channel_buffer: usize,
     pub live_audio_stream_buffer: usize,
+    pub rabbitmq_url: Option<String>,
 }
 
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
-        let grpc_port: u16 = env::var("MEDIA_SERVICE_GRPC_PORT")
-            .context("MEDIA_SERVICE_GRPC_PORT eksik")?
-            .parse()?;
-            
-        let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN")
-            .context("RTP_SERVICE_PORT_MIN eksik")?
-            .parse()?;
-            
-        let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX")
-            .context("RTP_SERVICE_PORT_MAX eksik")?
-            .parse()?;
+        let grpc_port: u16 = env::var("MEDIA_SERVICE_GRPC_PORT").context("MEDIA_SERVICE_GRPC_PORT eksik")?.parse()?;
+        let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN").context("RTP_SERVICE_PORT_MIN eksik")?.parse()?;
+        let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX").context("RTP_SERVICE_PORT_MAX eksik")?.parse()?;
             
         if rtp_port_min >= rtp_port_max {
             bail!("RTP port aralığı geçersiz: min ({}) >= max ({}).", rtp_port_min, rtp_port_max);
         }
 
-        let quarantine_seconds: u64 = env::var("RTP_SERVICE_PORT_QUARANTINE_SECONDS")
-            .unwrap_or_else(|_| "5".to_string())
-            .parse()
-            .context("RTP_SERVICE_PORT_QUARANTINE_SECONDS geçerli bir sayı olmalı")?;
-        
-        let metrics_port: u16 = env::var("MEDIA_SERVICE_METRICS_PORT")
-            .unwrap_or_else(|_| "9091".to_string())
-            .parse()
-            .context("MEDIA_SERVICE_METRICS_PORT geçerli bir sayı olmalı")?;
-        
-        // --- YENİ DEĞERLERİ ORTAMDAN OKU ---
-        let inactivity_seconds: u64 = env::var("RTP_SESSION_INACTIVITY_TIMEOUT_SECONDS")
-            .unwrap_or_else(|_| "30".to_string())
-            .parse()?;
-        
-        let command_buffer: usize = env::var("RTP_COMMAND_CHANNEL_BUFFER")
-            .unwrap_or_else(|_| "32".to_string())
-            .parse()?;
-        
-        let stream_buffer: usize = env::var("LIVE_AUDIO_STREAM_BUFFER")
-            .unwrap_or_else(|_| "64".to_string())
-            .parse()?;
+        let quarantine_seconds: u64 = env::var("RTP_SERVICE_PORT_QUARANTINE_SECONDS").unwrap_or_else(|_| "5".to_string()).parse().context("RTP_SERVICE_PORT_QUARANTINE_SECONDS geçerli bir sayı olmalı")?;
+        let metrics_port: u16 = env::var("MEDIA_SERVICE_METRICS_PORT").unwrap_or_else(|_| "9091".to_string()).parse().context("MEDIA_SERVICE_METRICS_PORT geçerli bir sayı olmalı")?;
+        let inactivity_seconds: u64 = env::var("RTP_SESSION_INACTIVITY_TIMEOUT_SECONDS").unwrap_or_else(|_| "30".to_string()).parse()?;
+        let command_buffer: usize = env::var("RTP_COMMAND_CHANNEL_BUFFER").unwrap_or_else(|_| "32".to_string()).parse()?;
+        let stream_buffer: usize = env::var("LIVE_AUDIO_STREAM_BUFFER").unwrap_or_else(|_| "64".to_string()).parse()?;
 
         let s3_config = if env::var("S3_ENDPOINT_URL").is_ok() {
             Some(S3Config {
@@ -85,6 +58,8 @@ impl AppConfig {
         } else {
             None
         };
+        
+        let rabbitmq_url = env::var("RABBITMQ_URL").ok();
 
         Ok(AppConfig {
             grpc_listen_addr: format!("[::]:{}", grpc_port).parse()?,
@@ -97,7 +72,7 @@ impl AppConfig {
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             metrics_port,
             s3_config,
-            // --- YENİ DEĞERLERİ STRUCT'A ATA ---
+            rabbitmq_url,
             rtp_session_inactivity_timeout: Duration::from_secs(inactivity_seconds),
             rtp_command_channel_buffer: command_buffer,
             live_audio_stream_buffer: stream_buffer,

@@ -1,27 +1,26 @@
-// File: src/grpc/service.rs (TEMİZLENMİŞ NİHAİ HALİ)
+// File: src/grpc/service.rs
+use crate::config::AppConfig;
+use crate::grpc::error::ServiceError;
+use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
+use crate::rtp::command::{RecordingSession, RtpCommand};
+use crate::rtp::session::{rtp_session_handler, RtpSessionConfig};
+use crate::state::AppState;
+use crate::{
+    AllocatePortRequest, AllocatePortResponse, MediaService, PlayAudioRequest, PlayAudioResponse,
+    RecordAudioRequest, RecordAudioResponse, ReleasePortRequest, ReleasePortResponse,
+    StartRecordingRequest, StartRecordingResponse, StopRecordingRequest, StopRecordingResponse,
+};
+use hound::{SampleFormat, WavSpec};
+use metrics::{counter, gauge};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
-use tokio_stream::{Stream, wrappers::ReceiverStream, StreamExt};
+use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
-use metrics::{counter, gauge};
-use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
-use hound::{WavSpec, SampleFormat};
-
-use crate::{
-    AllocatePortRequest, AllocatePortResponse, MediaService, PlayAudioRequest, PlayAudioResponse,
-    ReleasePortRequest, ReleasePortResponse, RecordAudioRequest, RecordAudioResponse,
-    StartRecordingRequest, StartRecordingResponse, StopRecordingRequest, StopRecordingResponse,
-};
-use crate::config::AppConfig;
-use crate::rtp::command::{RtpCommand, RecordingSession};
-use crate::rtp::session::{rtp_session_handler, RtpSessionConfig};
-use crate::state::AppState;
-use crate::grpc::error::ServiceError;
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -34,15 +33,17 @@ impl MyMediaService {
     }
 }
 
-fn extract_uri_scheme(uri: &str) -> &str { 
-    if let Some(scheme_end) = uri.find(':') { &uri[..scheme_end] } else { "unknown" } 
+fn extract_uri_scheme(uri: &str) -> &str {
+    if let Some(scheme_end) = uri.find(':') { &uri[..scheme_end] } else { "unknown" }
 }
 
 fn get_trace_id_from_metadata<T>(request: &Request<T>) -> String {
-    request.metadata().get("x-trace-id")
+    request
+        .metadata()
+        .get("x-trace-id")
         .and_then(|value| value.to_str().ok())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| "trace-id-not-found".to_string())
+        .unwrap_or_else(|| format!("trace-{}", uuid::Uuid::new_v4()))
 }
 
 #[tonic::async_trait]
@@ -183,21 +184,30 @@ impl MediaService for MyMediaService {
     #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port, uri = %request.get_ref().output_uri))]
     async fn start_recording(&self, request: Request<StartRecordingRequest>) -> Result<Response<StartRecordingResponse>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "start_recording").increment(1);
-        let req = request.into_inner();
-        let rtp_port = req.server_rtp_port as u16;
+        let req_ref = request.get_ref();
+        let rtp_port = req_ref.server_rtp_port as u16;
+        
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| ServiceError::SessionNotFound { port: rtp_port })?;
+        
+        let call_id = req_ref.call_id.clone();
+        let trace_id = req_ref.trace_id.clone();
+
         let spec = WavSpec {
             channels: 1,
-            sample_rate: req.sample_rate.unwrap_or(16000),
+            sample_rate: req_ref.sample_rate.unwrap_or(16000),
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
+
         let recording_session = RecordingSession {
-            output_uri: req.output_uri,
+            output_uri: req_ref.output_uri.clone(),
             spec,
             samples: Vec::new(),
+            call_id,
+            trace_id,
         };
+        
         let command = RtpCommand::StartPermanentRecording(recording_session);
         session_tx.send(command).await
             .map_err(|_| ServiceError::CommandSendError("StartPermanentRecording".to_string()))?;

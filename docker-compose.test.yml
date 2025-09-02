@@ -7,8 +7,23 @@ networks:
 
 volumes:
   minio_test_data:
+  rabbitmq_test_data:
 
 services:
+
+  rabbitmq:
+    build: { context: ../sentiric-rabbitmq }
+    env_file: [".env.test"]
+    ports: ["15672:15672", "5672:5672"]
+    volumes: [rabbitmq_test_data:/var/lib/rabbitmq/]
+    networks: [sentiric-net]
+    restart: always
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   minio:
     image: quay.io/minio/minio
     # DEĞİŞİKLİK: Artık .env.test kullanıyor
@@ -44,9 +59,10 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
-    depends_on:
-      minio:
-        condition: service_healthy
+    depends_on: {
+      minio: { condition: service_healthy },
+      rabbitmq: { condition: service_healthy },
+    }             
 
   test-runner:
     build:
