@@ -16,7 +16,7 @@ Thumbs.db
 
 # Cargo geçici dosyaları
 **/*.rs.bk
-Cargo.lock # (duruma göre, açıklaması aşağıda)
+
 .cargo/
 
 # Test ve coverage çıktıları
