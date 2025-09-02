@@ -1,4 +1,4 @@
-// File: src/rtp/codecs.rs (BİRİM TESTLERİ EKLENDİ)
+// File: src/rtp/codecs.rs
 // Açıklama: Bu modül, media-service'in ses işleme beynidir.
 // Gelen çeşitli ses formatlarını (PCMU, PCMA) standart bir ara formata (16kHz LPCM) çevirir
 // ve bu standart formattaki sesi, hedefin beklediği formata (tekrar PCMU/PCMA) dönüştürür.

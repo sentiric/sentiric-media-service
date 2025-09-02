@@ -46,7 +46,27 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
         -   [x] **Ortam Bağımsızlığı:** Bu testin başarılı olması için gereken tüm ortam yapılandırmaları `docker-compose.test.yml` ve `.env.test` dosyaları ile sağlanmıştır. Test, beklenen miktarda ses verisini başarıyla işlemektedir.
 
 ---
+### **FAZ 1.5: STABİLİZASYON VE ANAYASAL UYUM (YENİ FAZ)**
 
+**Amaç:** Platformdaki tüm ses kalitesi sorunlarını (cızırtı, hızlandırılmış ses, format uyumsuzluğu) kökten çözmek ve `media-service`'i, gelen ve giden tüm ses akışlarının kalitesinden ve formatından sorumlu **tek merkez (Single Source of Truth)** haline getirmek.
+
+-   [ ] **Görev ID: MEDIA-REFACTOR-01 - Merkezi Ses İşleme ve Transcoding Motoru (KRİTİK & ACİL)**
+    -   **Durum:** ⬜ **Yapılacak (İLK GÖREV)**
+    -   **Bulgular:** Canlı testlerde, telefon şebekesinden gelen 8kHz sesin, platformun iç standardı olan 16kHz'e doğru bir şekilde dönüştürülmeden işlendiği tespit edilmiştir. Bu, hem canlı dinlemede (STT) hem de çağrı kayıtlarında "hızlandırılmış/Chipmunk" etkisine, anlaşılamayan anonslara ve hatalı transkripsiyonlara yol açmaktadır. Bu, platformun temel fonksiyonelliğini bloke eden kritik bir hatadır.
+    -   **Çözüm Stratejisi (Anayasal Kural):** "Ara Format" (Pivot Format) yaklaşımı benimsenecektir. `media-service`, platformun tek ses adaptörü olarak görev yapacaktır.
+        1.  **Giriş (Decode & Resample):** Gelen tüm 8kHz G.711 RTP paketleri, alındığı anda standart 16kHz LPCM formatına dönüştürülecektir.
+        2.  **İşleme (İç Akış):** Tüm iç işlemler (canlı akışı STT'ye gönderme, kalıcı kayda ekleme) bu standart ve temiz 16kHz format üzerinden gerçekleştirilecektir.
+        3.  **Çıkış (Resample & Encode):** Standart formattaki ses (TTS yanıtı, anons), kullanıcıya gönderilmeden hemen önce hedefin beklediği 8kHz G.711 formatına dönüştürülecektir.
+    -   **Kabul Kriterleri:**
+        -   [ ] `rtp/codecs.rs` modülü, tüm G.711 <-> 16kHz LPCM dönüşüm mantığını barındırmalıdır.
+        -   [ ] `rtp_session_handler`, gelen RTP paketlerini anında 16kHz LPCM'e dönüştürmelidir.
+        -   [ ] `RecordAudio` gRPC stream'i, istemciye sadece temiz 16kHz LPCM verisi göndermelidir.
+        -   [ ] `StartRecording` ile oluşturulan `.wav` dosyaları her zaman `16000 Hz` örnekleme oranına sahip olmalıdır.
+        -   [ ] `PlayAudio` ile çalınan sesler, gönderilmeden önce 8kHz G.711'e encode edilmelidir.
+        -   [ ] **Nihai Doğrulama:** Düzeltme sonrası yapılan bir test çağrısının S3'e kaydedilen ses dosyası dinlendiğinde, hem kullanıcının hem de sistemin seslerinin **normal hızda ve anlaşılır** olduğu duyulmalıdır.
+    -   **Tahmini Süre:** ~2 gün
+
+---
 ### **FAZ 2: Gelişmiş Medya Yetenekleri ve Yönetim**
 
 **Amaç:** Platformun çağrı yönetimi yeteneklerini zenginleştirmek, production ortamına hazırlamak ve daha güvenli hale getirmek.

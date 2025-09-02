@@ -60,11 +60,13 @@ async fn load_samples_from_uri(
     }
 }
 
+// YENİ: Gelen RTP paketini işleyip standart 16kHz LPCM formatına çeviren task
 fn process_packet_task(packet_data: Vec<u8>) -> JoinHandle<Option<ProcessedAudio>> {
     spawn_blocking(move || {
         let mut packet_buf = &packet_data[..];
         if let Ok(packet) = Packet::unmarshal(&mut packet_buf) {
             if let Ok(incoming_codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
+                // BURASI KRİTİK: Gelen sesi anında standart formata çeviriyoruz.
                 match codecs::decode_g711_to_lpcm16(&packet.payload, incoming_codec) {
                     Ok(samples_16khz) => Some(ProcessedAudio { samples_16khz, source_codec: incoming_codec }),
                     Err(e) => {
@@ -157,7 +159,9 @@ pub async fn rtp_session_handler(
                         outbound_codec = Some(processed_audio.source_codec);
                     }
 
+                    // Canlı dinleme ve kalıcı kayıt artık her zaman temiz 16kHz veri kullanır.
                     if let Some(sender) = &live_stream_sender {
+                        // ... sender'a processed_audio.samples_16khz gönderilir ..
                         let media_type = "audio/L16;rate=16000".to_string();
                         let mut bytes = Vec::with_capacity(processed_audio.samples_16khz.len() * 2);
                         for &sample in &processed_audio.samples_16khz {
