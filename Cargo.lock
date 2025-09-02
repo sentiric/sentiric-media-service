@@ -3240,11 +3240,10 @@ dependencies = [
 
 [[package]]
 name = "rtp"
-version = "0.6.8"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2a095411ff00eed7b12e4c6a118ba984d113e1079582570d56a5ee723f11f80"
+checksum = "ed668d0114c8f796a262ba1362dc8c463b4a243b96208d073091e2cd88f4d1b6"
 dependencies = [
- "async-trait",
  "bytes",
  "rand 0.8.5",
  "serde",
@@ -3650,6 +3649,7 @@ dependencies = [
  "ring",
  "rtp",
  "rubato",
+ "rustls 0.22.4",
  "rustls-pemfile 2.2.0",
  "sentiric-contracts",
  "serde_json",
