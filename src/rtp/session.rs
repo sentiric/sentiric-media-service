@@ -231,7 +231,7 @@ pub async fn rtp_session_handler(
                             live_stream_sender = None;
                         }
                     }
-                    // === DEĞİŞİKLİK BURADA: Gelen sesi de kayda ekle ===
+                    // === BU SATIR KRİTİK: GELEN SESİ KAYDA EKLE ===
                     if let Some(session) = &mut permanent_recording_session {
                         session.samples.extend_from_slice(&processed_audio.samples_16khz);
                     }
@@ -295,7 +295,21 @@ async fn finalize_and_save_recording(
     if result.is_ok() {
         info!("Çağrı kaydı başarıyla tamamlandı.");
         metrics::counter!("sentiric_media_recording_saved_total", "storage_type" => "s3").increment(1);
-    } else {
+
+        // === YENİ GÖREV (MEDIA-004): KAYIT TAMAMLANDI OLAYINI YAYINLA ===
+        // Bu kod bloğunu ekleyeceğiz, ancak bunun çalışması için `AppState`'e
+        // RabbitMQ channel'ını da eklememiz gerekecek. Şimdilik konsept olarak ekliyorum.
+        // TODO: AppState'e RabbitMQ channel ekle ve bu olayı yayınla.
+        /*
+        if let Some(publisher) = &app_state.rabbitmq_publisher {
+            let event = CallRecordingAvailableEvent { ... };
+            if let Err(e) = publisher.publish(event).await {
+                error!(error = %e, "call.recording.available olayı yayınlanamadı.");
+            }
+        }
+        */
+
+    }  else {
         error!(error = ?result.as_ref().err(), "Kayıt kaydetme görevi başarısız oldu.");
         metrics::counter!("sentiric_media_recording_failed_total", "storage_type" => "s3").increment(1);
     }

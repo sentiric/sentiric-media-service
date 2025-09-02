@@ -66,6 +66,13 @@ Bu belge, `media-service`'in, `sentiric-governance` anayasasında tanımlanan ro
         -   [ ] **Nihai Doğrulama:** Düzeltme sonrası yapılan bir test çağrısının S3'e kaydedilen ses dosyası dinlendiğinde, hem kullanıcının hem de sistemin seslerinin **normal hızda ve anlaşılır** olduğu duyulmalıdır.
     -   **Tahmini Süre:** ~2 gün
 
+-   [ ] **Görev ID: MEDIA-004 - Kayıt Tamamlandığında Olay Yayınlama (YÜKSEK ÖNCELİK)**
+    -   **Durum:** ⬜ **Yapılacak (ACİL)**
+    -   **Açıklama:** Bir çağrı kaydı başarıyla S3/MinIO'ya yazıldıktan sonra, bu kaydın URI'ini içeren bir `call.recording.available` olayını RabbitMQ'ya yayınlamak. Bu, `cdr-service`'in kaydı ilgili çağrıyla ilişkilendirmesi için kritiktir.
+    -   **Kabul Kriterleri:**
+        -   [ ] `src/rtp/session.rs` içindeki `finalize_and_save_recording` fonksiyonu, S3'e yazma işlemi başarılı olduğunda `RabbitMQ`'ya `sentiric-contracts`'te tanımlı `CallRecordingAvailableEvent` formatında bir olay yayınlamalıdır. Bu olayın içinde `call_id` ve `recording_uri` bulunmalıdır.
+            
+
 ---
 ### **FAZ 2: Gelişmiş Medya Yetenekleri ve Yönetim**
 
