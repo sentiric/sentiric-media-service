@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Temel Asenkron ve gRPC
+# Temel Asenkron ve gRPC (Orijinal versiyonlara sadık kalalım)
 tokio = { version = "1", features = ["full"] }
 tonic = { version = "0.11.0", features = ["tls"] }
 prost = "0.12.3"
@@ -31,17 +31,17 @@ rubato = "0.14.1"
 symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
 webrtc-util = { version = "0.7.0", features = ["marshal"] }
 
-# TLS
-# rustls = "0.22.4"
+# TLS (SADECE GEREKLİ OLANLAR)
 rustls-pemfile = "2.1.0"
-tokio-rustls = "0.25.0"
+# rustls'i doğrudan belirtmek yerine, ring'i ekleyerek onu dolaylı yoldan konfigüre ediyoruz.
+ring = "0.17.8"
 
 # Yardımcı Kütüphaneler
 rand = "0.8.5"
 chrono = "0.4.31"
 base64 = "0.22.1"
 backtrace = "0.3.72"
-uuid = { version = "1.8.0", features = ["v4"] } # EKSİK BAĞIMLILIK EKLENDİ
+uuid = { version = "1.8.0", features = ["v4"] }
 
 # Kayıt ve S3 Bağımlılıkları
 async-trait = "0.1.80"
@@ -52,17 +52,6 @@ http-body = "0.4.5"
 aws-credential-types = "1.1.8"
 lapin = "2.3.1"
 serde_json = "1.0"
-
-# --- NİHAİ HATA DÜZELTMESİ (RUSTLS CRYPTO PROVIDER) ---
-# Önceki 'ring' satırını kaldırıp yerine bunu ekliyoruz.
-# Bu, Cargo'ya rustls'i DERLERKEN 'ring' kripto sağlayıcısını
-# kullanmasını AÇIKÇA emreder. Bu en garantili yöntemdir.
-rustls = { version = "0.22.4", features = ["ring"] }
-# NOT: ring'in kendisini doğrudan eklemeye artık gerek yok. rustls bunu yapacak.
-# ring = "0.17.8" # Bu satırı silebilirsiniz veya bırakabilirsiniz, zararı olmaz.
-# --- DÜZELTME SONU ---
-
-
 
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
