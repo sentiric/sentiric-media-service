@@ -1,11 +1,10 @@
 # =================================================================
-#    SENTIRIC PLATFORM - STANDART CI/CD DOCKER YAYINLAMA (v3.1 - Düzeltilmiş)
+#    SENTIRIC PLATFORM - STANDART CI/CD DOCKER YAYINLAMA (v3.2 - Production-Ready)
 # =================================================================
 # Bu CI/CD dosyası:
 # 1. Submodule'leri (örn: sentiric-contracts) otomatik olarak çeker.
 # 2. Dockerfile'a SERVICE_NAME argümanını dinamik olarak gönderir.
-# 3. Docker build'lerini cache ile hızlandırır.
-# 4. GitHub Actions ifade sözdizimi hatasını düzeltir.
+# 3. GÜVENİLİRLİK İÇİN CACHE KULLANMAZ. Her build temiz bir ortamda yapılır.
 # =================================================================
 name: Docker Image CI
 
@@ -49,7 +48,7 @@ jobs:
           REPO_NAME="${{ github.repository }}"
           echo "SERVICE_NAME=${REPO_NAME#*/}" >> $GITHUB_ENV
 
-      # Adım 5: Docker imajını oluştur, cache'le ve yayınla
+      # Adım 5: Docker imajını oluştur ve yayınla (CACHE'SİZ)
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
@@ -59,6 +58,7 @@ jobs:
           # build-args ile Dockerfile'a doğru SERVICE_NAME'i gönder
           build-args: |
             SERVICE_NAME=${{ env.SERVICE_NAME }}
-          # Derleme katmanlarını cache'leyerek sonraki build'leri hızlandır
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Güvenilirlik için cache'i devre dışı bırakıyoruz.
+          # no-cache: true kullanmak, build sürecini yavaşlatır ancak
+          # her seferinde temiz ve tekrarlanabilir bir imaj oluşturmayı garanti eder.
+          no-cache: true
