@@ -1,7 +1,7 @@
 // File: src/rtp/session.rs
 use crate::audio::load_or_get_from_cache;
 use crate::config::AppConfig;
-use crate::metrics::ACTIVE_SESSIONS;
+use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
 use crate::rabbitmq;
 use crate::rtp::codecs::{self, AudioCodec};
 use crate::rtp::command::{AudioFrame, RtpCommand};
@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::Status;
 use tracing::{debug, error, info, instrument, warn};
 use webrtc_util::marshal::Unmarshal;
+use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction}; // rubato import
 
 use super::command::RecordingSession;
 
@@ -224,10 +225,33 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
     }
     
     let result: Result<()> = async {
+        // --- YENİ: Downsampling Mantığı ---
+        // Kaydedilen 16kHz veriyi, dinlenebilir olması için 8kHz'e düşür.
+        let samples_16k = session.samples;
+        let samples_8k = spawn_blocking(move || -> Result<Vec<i16>> {
+            let pcm_f32: Vec<f32> = samples_16k.iter().map(|&s| s as f32 / 32768.0).collect();
+            let params = SincInterpolationParameters {
+                sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear,
+                oversampling_factor: 256, window: WindowFunction::BlackmanHarris2,
+            };
+            let mut resampler = SincFixedIn::<f32>::new(
+                8000.0 / 16000.0, 2.0, params, pcm_f32.len(), 1,
+            )?;
+            let resampled_f32 = resampler.process(&[pcm_f32], None)?.remove(0);
+            Ok(resampled_f32.into_iter()
+                .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect())
+        }).await.context("Downsampling task'i başarısız oldu")??;
+        info!("Kayıt 16kHz'den 8kHz'e düşürüldü. Orjinal örnek: {}, Yeni örnek: {}", samples_16k.len(), samples_8k.len());
+        // --- Downsampling Sonu ---
+
+        let mut spec_8k = session.spec;
+        spec_8k.sample_rate = 8000; // WavSpec'i 8kHz olarak güncelle
+
         let wav_data = spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
             let mut buffer = Cursor::new(Vec::new());
-            let mut writer = WavWriter::new(&mut buffer, session.spec)?;
-            for sample in session.samples {
+            let mut writer = WavWriter::new(&mut buffer, spec_8k)?; // 8kHz spec'i kullan
+            for sample in samples_8k { // 8kHz örnekleri yaz
                 writer.write_sample(sample)?;
             }
             writer.finalize()?;
@@ -255,7 +279,7 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
         metrics::counter!("sentiric_media_recording_saved_total", "storage_type" => "s3").increment(1);
 
         if let Some(publisher) = &app_state.rabbitmq_publisher {
-            // --- DÜZELTME BURADA ---
+            // --- YENİ: call_id ve trace_id payload'a eklendi ---
             let event_payload = serde_json::json!({
                 "eventType": "call.recording.available",
                 "traceId": session.trace_id,
@@ -263,7 +287,7 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
                 "recordingUri": session.output_uri,
                 "timestamp": chrono::Utc::now().to_rfc3339()
             });
-            // --- DÜZELTME SONU ---
+            
             if let Err(e) = publisher.basic_publish(
                 rabbitmq::EXCHANGE_NAME,
                 "call.recording.available",
