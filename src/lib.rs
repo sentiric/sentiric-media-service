@@ -62,7 +62,7 @@ async fn create_s3_client(config: &AppConfig) -> Result<Option<Arc<S3Client>>> {
 }
 
 pub async fn run() -> Result<()> {
-    let env_file = env::var("ENV_FILE").unwrap_or_else(|_| "development.env".to_string());
+    let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env.docker".to_string());
     if let Err(e) = dotenvy::from_filename(&env_file) {
         warn!(file = %env_file, error = %e, "Ortam değişkenleri dosyası yüklenemedi (bu bir hata olmayabilir).");
     } else {
@@ -85,14 +85,24 @@ pub async fn run() -> Result<()> {
         subscriber.with(fmt_layer).init();
     }
     
-    info!(service_name = "sentiric-media-service", "Loglama altyapısı başlatıldı.");
-    info!("Konfigürasyon başarıyla yüklendi.");
+    // YENİ: Build-time değişkenlerini environment'tan oku
+    let service_version = env::var("SERVICE_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+    let git_commit = env::var("GIT_COMMIT").unwrap_or_else(|_| "unknown".to_string());
+    let build_date = env::var("BUILD_DATE").unwrap_or_else(|_| "unknown".to_string());
+
+    // YENİ: Başlangıçta versiyon bilgisini logla
+    info!(
+        service_name = "sentiric-media-service",
+        version = %service_version,
+        commit = %git_commit,
+        build_date = %build_date,
+        profile = %config.env,
+        "🚀 Servis başlatılıyor..."
+    );
     
     let tls_config = tls::load_server_tls_config().await.context("TLS konfigürasyonu yüklenemedi")?;
     
-    // --- DEĞİŞİKLİK BURADA: PortManager'a config'i de veriyoruz ---
     let port_manager = PortManager::new(config.rtp_port_min, config.rtp_port_max, config.clone());
-    // --- DEĞİŞİKLİK SONU ---
     
     let s3_client = create_s3_client(&config).await?;
     
@@ -115,7 +125,6 @@ pub async fn run() -> Result<()> {
     });
 
     let media_service = MyMediaService::new(config.clone(), app_state);
-    info!(config = ?config, "Media Service hazırlanıyor...");
     
     let server_addr = config.grpc_listen_addr;
     info!(address = %server_addr, "Güvenli gRPC sunucusu dinlemeye başlıyor...");
