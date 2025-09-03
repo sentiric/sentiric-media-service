@@ -1,7 +1,6 @@
 // File: src/rtp/session.rs
 use crate::audio::load_or_get_from_cache;
 use crate::config::AppConfig;
-// DÜZELTME 1: Kullanılmayan import kaldırıldı.
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rabbitmq;
 use crate::rtp::codecs::{self, AudioCodec};
@@ -225,12 +224,15 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
         return Ok(());
     }
     
+    // YENİ: Session'dan call_id ve trace_id'yi olay yayınlama için kopyala
+    let call_id_for_event = session.call_id.clone();
+    let trace_id_for_event = session.trace_id.clone();
+    let output_uri_for_event = session.output_uri.clone();
+    
     let result: Result<()> = async {
-        // --- YENİ: Downsampling Mantığı [ BU ÇOK ÖNEMLİ ] ---
+        // --- ÖNEMLİ: Downsampling Mantığı [  ] ---
         // Kaydedilen 16kHz veriyi, dinlenebilir olması için 8kHz'e düşür.        
         let samples_16k = session.samples;
-        
-        // DÜZELTME 2: 'samples_16k' taşınmadan önce uzunluğunu bir değişkene alıyoruz.
         let original_len = samples_16k.len();
 
         let samples_8k = spawn_blocking(move || -> Result<Vec<i16>> {
@@ -248,7 +250,6 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
                 .collect())
         }).await.context("Downsampling task'i başarısız oldu")??;
         
-        // DÜZELTME 3: Log mesajında artık 'original_len' değişkenini kullanıyoruz.
         info!("Kayıt 16kHz'den 8kHz'e düşürüldü. Orjinal örnek: {}, Yeni örnek: {}", original_len, samples_8k.len());
 
         let mut spec_8k = session.spec;
@@ -285,11 +286,12 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
         metrics::counter!("sentiric_media_recording_saved_total", "storage_type" => "s3").increment(1);
 
         if let Some(publisher) = &app_state.rabbitmq_publisher {
+            // --- YENİ: call_id ve trace_id payload'a eklendi ---
             let event_payload = serde_json::json!({
                 "eventType": "call.recording.available",
-                "traceId": session.trace_id,
-                "callId": session.call_id,
-                "recordingUri": session.output_uri,
+                "traceId": trace_id_for_event,
+                "callId": call_id_for_event,
+                "recordingUri": output_uri_for_event,
                 "timestamp": chrono::Utc::now().to_rfc3339()
             });
             
