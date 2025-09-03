@@ -26,7 +26,7 @@ Bu faz, platformdaki tüm ses kalitesi sorunlarını çözmüş ve servisi, plat
 
 -   [x] **Görev ID: MEDIA-004 - Kayıt Tamamlandığında Olay Yayınlama**
     -   **Durum:** ✅ **Tamamlandı**
-    -   **Açıklama:** Bir çağrı kaydı başarıyla S3'e yazıldıktan sonra, `cdr-service`'in bu bilgiyi alıp veritabanına işlemesi için `call.recording.available` olayının RabbitMQ'ya yayınlanması sağlandı.
+    -   **Açıklama:** Bir çağrı kaydı başarıyla S3'e yazıldıktan sonra, `cdr-service`'in bu bilgiyi alıp veritabanına işlemesi için `call.recording.available` olayının RabbitMQ'ya yayınlanması sağlandı. **(Bu düzeltme ile call_id ve trace_id eklenerek tam olarak tamamlandı.)**
 
 ---
 

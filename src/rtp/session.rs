@@ -238,11 +238,9 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
 
         info!(wav_size_bytes = wav_data.len(), "WAV verisi başarıyla oluşturuldu.");
         
-        // --- HATA DÜZELTMESİ: Eksik config parametresi eklendi ---
-        let writer = writers::from_uri(&session.output_uri, &app_state, &app_state.port_manager.config.clone()) // config.app_config.clone() yerine
+        let writer = writers::from_uri(&session.output_uri, &app_state, &app_state.port_manager.config.clone())
             .await
             .context("Kayıt yazıcısı (writer) oluşturulamadı")?;
-        // --- HATA DÜZELTMESİ SONU ---
             
         writer
             .write(wav_data)
@@ -257,6 +255,7 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
         metrics::counter!("sentiric_media_recording_saved_total", "storage_type" => "s3").increment(1);
 
         if let Some(publisher) = &app_state.rabbitmq_publisher {
+            // --- DÜZELTME BURADA ---
             let event_payload = serde_json::json!({
                 "eventType": "call.recording.available",
                 "traceId": session.trace_id,
@@ -264,6 +263,7 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
                 "recordingUri": session.output_uri,
                 "timestamp": chrono::Utc::now().to_rfc3339()
             });
+            // --- DÜZELTME SONU ---
             if let Err(e) = publisher.basic_publish(
                 rabbitmq::EXCHANGE_NAME,
                 "call.recording.available",
