@@ -230,11 +230,9 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
     let output_uri_for_event = session.output_uri.clone();
     
     let result: Result<()> = async {
-        // --- ÖNEMLİ: Downsampling Mantığı [  ] ---
-        // Kaydedilen 16kHz veriyi, dinlenebilir olması için 8kHz'e düşür.        
+        // --- YENİ DOWNSAMPLING MANTIĞI ---
         let samples_16k = session.samples;
-        let original_len = samples_16k.len();
-
+        
         let samples_8k = spawn_blocking(move || -> Result<Vec<i16>> {
             let pcm_f32: Vec<f32> = samples_16k.iter().map(|&s| s as f32 / 32768.0).collect();
             let params = SincInterpolationParameters {
@@ -244,20 +242,22 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
             let mut resampler = SincFixedIn::<f32>::new(
                 8000.0 / 16000.0, 2.0, params, pcm_f32.len(), 1,
             )?;
-            let resampled_f32 = resampler.process(&[pcm_f32], None)?.remove(0);
+            let resampled_f32 = resampler.process(&[pcm_f32], None)?.remove(0)?;
             Ok(resampled_f32.into_iter()
                 .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                 .collect())
         }).await.context("Downsampling task'i başarısız oldu")??;
         
-        info!("Kayıt 16kHz'den 8kHz'e düşürüldü. Orjinal örnek: {}, Yeni örnek: {}", original_len, samples_8k.len());
+        info!("Kayıt 16kHz'den 8kHz'e düşürüldü.");
 
         let mut spec_8k = session.spec;
-        spec_8k.sample_rate = 8000;
+        spec_8k.sample_rate = 8000; // Spec'i de 8kHz olarak güncelle
 
         let wav_data = spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
             let mut buffer = Cursor::new(Vec::new());
+            // Güncellenmiş spec ile yaz
             let mut writer = WavWriter::new(&mut buffer, spec_8k)?;
+            // Downsample edilmiş veriyi yaz
             for sample in samples_8k {
                 writer.write_sample(sample)?;
             }
@@ -266,17 +266,14 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
         })
         .await
         .context("WAV dosyası oluşturma task'i başarısız oldu")??;
+        // --- DOWNSAMPLING SONU ---
 
         info!(wav_size_bytes = wav_data.len(), "WAV verisi başarıyla oluşturuldu.");
-        
         let writer = writers::from_uri(&session.output_uri, &app_state, &app_state.port_manager.config.clone())
             .await
             .context("Kayıt yazıcısı (writer) oluşturulamadı")?;
             
-        writer
-            .write(wav_data)
-            .await
-            .context("Veri S3'e veya dosyaya yazılamadı")?;
+        writer.write(wav_data).await.context("Veri S3'e veya dosyaya yazılamadı")?;
         Ok(())
     }
     .await;
