@@ -224,15 +224,14 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
         return Ok(());
     }
     
-    // YENİ: Session'dan call_id ve trace_id'yi olay yayınlama için kopyala
     let call_id_for_event = session.call_id.clone();
     let trace_id_for_event = session.trace_id.clone();
     let output_uri_for_event = session.output_uri.clone();
     
     let result: Result<()> = async {
-        // --- YENİ DOWNSAMPLING MANTIĞI ---
         let samples_16k = session.samples;
-        
+        let original_len = samples_16k.len();
+
         let samples_8k = spawn_blocking(move || -> Result<Vec<i16>> {
             let pcm_f32: Vec<f32> = samples_16k.iter().map(|&s| s as f32 / 32768.0).collect();
             let params = SincInterpolationParameters {
@@ -242,22 +241,28 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
             let mut resampler = SincFixedIn::<f32>::new(
                 8000.0 / 16000.0, 2.0, params, pcm_f32.len(), 1,
             )?;
-            let resampled_f32 = resampler.process(&[pcm_f32], None)?.remove(0)?;
+            
+            // --- DÜZELTME BURADA (1/2) ---
+            let mut resampled_channels = resampler.process(&[pcm_f32], None)?;
+            if resampled_channels.is_empty() {
+                return Err(anyhow!("Resampler ses kanalı döndürmedi."));
+            }
+            let resampled_f32 = resampled_channels.remove(0);
+            // --- DÜZELTME SONU ---
+            
             Ok(resampled_f32.into_iter()
                 .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                 .collect())
         }).await.context("Downsampling task'i başarısız oldu")??;
         
-        info!("Kayıt 16kHz'den 8kHz'e düşürüldü.");
+        info!("Kayıt 16kHz'den 8kHz'e düşürüldü. Orjinal örnek: {}, Yeni örnek: {}", original_len, samples_8k.len());
 
         let mut spec_8k = session.spec;
-        spec_8k.sample_rate = 8000; // Spec'i de 8kHz olarak güncelle
+        spec_8k.sample_rate = 8000;
 
         let wav_data = spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
             let mut buffer = Cursor::new(Vec::new());
-            // Güncellenmiş spec ile yaz
             let mut writer = WavWriter::new(&mut buffer, spec_8k)?;
-            // Downsample edilmiş veriyi yaz
             for sample in samples_8k {
                 writer.write_sample(sample)?;
             }
@@ -266,14 +271,17 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
         })
         .await
         .context("WAV dosyası oluşturma task'i başarısız oldu")??;
-        // --- DOWNSAMPLING SONU ---
 
         info!(wav_size_bytes = wav_data.len(), "WAV verisi başarıyla oluşturuldu.");
+        
         let writer = writers::from_uri(&session.output_uri, &app_state, &app_state.port_manager.config.clone())
             .await
             .context("Kayıt yazıcısı (writer) oluşturulamadı")?;
             
-        writer.write(wav_data).await.context("Veri S3'e veya dosyaya yazılamadı")?;
+        writer
+            .write(wav_data)
+            .await
+            .context("Veri S3'e veya dosyaya yazılamadı")?;
         Ok(())
     }
     .await;
@@ -283,7 +291,6 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
         metrics::counter!("sentiric_media_recording_saved_total", "storage_type" => "s3").increment(1);
 
         if let Some(publisher) = &app_state.rabbitmq_publisher {
-            // --- YENİ: call_id ve trace_id payload'a eklendi ---
             let event_payload = serde_json::json!({
                 "eventType": "call.recording.available",
                 "traceId": trace_id_for_event,
