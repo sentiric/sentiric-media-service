@@ -16,7 +16,8 @@ services:
     env_file: [".env.test"]
     ports: ["15672:15672", "5672:5672"]
     volumes: [rabbitmq_test_data:/var/lib/rabbitmq/]
-    networks: [sentiric-net]
+    networks:
+      - sentiric-test-net
     restart: always
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
