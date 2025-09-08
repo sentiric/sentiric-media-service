@@ -14,6 +14,7 @@ RUN apt-get update && \
     chmod +x /usr/local/bin/buf && \
     rm -rf /var/lib/apt/lists/*
 
+# Build argümanlarını bu aşamada tanımla
 ARG GIT_COMMIT
 ARG BUILD_DATE
 ARG SERVICE_VERSION
@@ -22,10 +23,12 @@ WORKDIR /app
 
 COPY . .
 
+# Build-time environment değişkenlerini ayarla ki Rust kodu bunları okuyabilsin (isteğe bağlı ama iyi pratik)
 ENV GIT_COMMIT=${GIT_COMMIT}
 ENV BUILD_DATE=${BUILD_DATE}
 ENV SERVICE_VERSION=${SERVICE_VERSION}
 
+# Derlemeyi yap
 RUN cargo build --release
 
 # --- STAGE 2: Final (Minimal) Image ---
@@ -36,16 +39,18 @@ RUN apt-get update && apt-get install -y netcat-openbsd ca-certificates && rm -r
 
 # GÜVENLİK: Root olmayan bir kullanıcı oluştur
 RUN addgroup --system --gid 1001 appgroup && \
-    adduser --system --no-create-home --uid 1001 --ingroup appgroup
+    adduser --system --no-create-home --uid 1001 --ingroup appgroup appuser
 
+# DÜZELTME: Build argümanlarını final stage'de TEKRAR TANIMLA
 ARG GIT_COMMIT
 ARG BUILD_DATE
 ARG SERVICE_VERSION
 
-# YENİ: Argümanları environment değişkenlerine ata
+# DÜZELTME: Argümanları environment değişkenlerine ata ki runtime'da erişilebilsin.
 ENV GIT_COMMIT=${GIT_COMMIT}
 ENV BUILD_DATE=${BUILD_DATE}
 ENV SERVICE_VERSION=${SERVICE_VERSION}
+
 WORKDIR /app
 
 # Dosyaları kopyala ve sahipliği yeni kullanıcıya ver

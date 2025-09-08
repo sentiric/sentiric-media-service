@@ -1,5 +1,3 @@
-// File: examples/recording_client.rs (GÜNCELLENMİŞ)
-
 use anyhow::Result;
 use std::env;
 use std::net::UdpSocket;
@@ -17,39 +15,35 @@ use rand::Rng;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // development.env dosyasını .dockerignore'a ekleyebiliriz
-    // ama test için burada kalması sorun değil.
-    dotenvy::from_filename("development.env").ok();
-    println!("--- Gerçek Kayıt Simülasyonu (Programatik RTP Akışı ile) ---");
+    dotenvy::from_filename(".env.test").ok();
+    println!("--- Gercek Kayit Simulasyonu (Programatik RTP Akisi ile) ---");
 
-    // DÜZELTME: connect_to_media_service fonksiyonu iki kez çağrılıyor gibi görünüyor,
-    // birleştirelim ve logu düzeltelim.
     let mut client = connect_to_media_service().await?;
-    println!("✅ Media Service'e bağlantı başarılı!");
+    println!("- Media Service'e baglanti basarili!");
+
+    let call_id = format!("real-rec-call-{}", rand::random::<u32>());
+    let trace_id = format!("trace-{}", rand::random::<u32>());
 
     let allocate_res = client.allocate_port(AllocatePortRequest {
-        call_id: format!("real-rec-call-{}", rand::random::<u32>()),
+        call_id: call_id.clone(),
     }).await?;
     let rtp_port = allocate_res.into_inner().rtp_port;
 
-    // --- EN ÖNEMLİ DÜZELTME BURADA ---
-    // URI'ı "s3://BUCKET_ADI/dosya_yolu" yerine "s3:///dosya_yolu" olarak değiştiriyoruz.
-    // Bucket adı artık media-service'in kendi konfigürasyonundan (S3_BUCKET_NAME) gelecek.
     let output_uri = format!("s3:///test/test_recording_client_{}.wav", rtp_port);
+
     
-    // Kullanılmayan değişken uyarısını kaldıralım.
-    // let _output_path = format!("/sentiric-media-record/real_sound_on_port_{}.wav", rtp_port);
-    
-    println!("\nAdım 1: Kayıt başlatılıyor. Hedef: {}", output_uri);
+    println!("\nAdim 1: Kayit baslatiliyor. Hedef: {}", output_uri);
     client.start_recording(StartRecordingRequest {
         server_rtp_port: rtp_port,
-        output_uri: output_uri.clone(), // Klonlayarak kullanıyoruz
+        output_uri: output_uri.clone(),
         sample_rate: Some(8000),
         format: Some("wav".to_string()),
+        call_id,
+        trace_id,
     }).await?;
-    println!("✅ Kayıt başlatma komutu gönderildi.");
+    println!("- Kayit baslatma komutu gonderildi.");
 
-    println!("\nAdım 2: Ayrı bir task üzerinden RTP ses akışı başlatılıyor...");
+    println!("\nAdim 2: Ayri bir task uzerinden RTP ses akisi baslatiliyor...");
 
     let rtp_target_ip = env::var("MEDIA_SERVICE_RTP_TARGET_IP")
     .unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -58,26 +52,23 @@ async fn main() -> Result<()> {
         send_test_rtp_stream(&rtp_target_ip, rtp_port as u16).await;
     });
     
-    println!("(Ana task, ses akışının tamamlanması için 5 saniye bekliyor...)");
+    println!("(Ana task, ses akisinin tamamlanmasi icin 5 saniye bekliyor...)");
     sleep(Duration::from_secs(5)).await;
 
-    // rtp_stream_handle.join() kullanmak daha iyi bir pratik olabilir,
-    // ama await de çalışır.
     rtp_stream_handle.await?;
 
-    println!("\nAdım 3: Kayıt durduruluyor...");
+    println!("\nAdim 3: Kayit durduruluyor...");
     client.stop_recording(StopRecordingRequest { server_rtp_port: rtp_port }).await?;
-    println!("✅ Kayıt durdurma komutu gönderildi.");
+    println!("- Kayit durdurma komutu gonderildi.");
 
     sleep(Duration::from_secs(1)).await;
 
-    println!("\nAdım 4: Port serbest bırakılıyor...");
+    println!("\nAdim 4: Port serbest birakiliyor...");
     client.release_port(ReleasePortRequest { rtp_port }).await?;
-    println!("✅ Port serbest bırakıldı.");
+    println!("- Port serbest birakildi.");
     
-    println!("\n--- Simülasyon Tamamlandı ---");
-    // DÜZELTME: Çıktı mesajını güncelleyelim.
-    println!("Kayıt dosyası MinIO bucket'ında ({}) oluşturulmuş olmalı.", output_uri);
+    println!("\n--- Simulasyon Tamamlandi ---");
+    println!("Kayit dosyasi MinIO bucket'inda ({}) olusturulmus olmali.", output_uri);
     Ok(())
 }
 
@@ -95,12 +86,11 @@ async fn connect_to_media_service() -> Result<MediaServiceClient<Channel>> {
         .ca_certificate(server_ca_certificate)
         .identity(client_identity);
     
-    println!("Media Service'e bağlanılıyor: {}", server_addr);
+    println!("Media Service'e baglaniliyor: {}", server_addr);
     let channel = Channel::from_shared(server_addr)?.tls_config(tls_config)?.connect().await?;
     Ok(MediaServiceClient::new(channel))
 }
 
-// ... send_test_rtp_stream fonksiyonu aynı ...
 async fn send_test_rtp_stream(host: &str, port: u16) {
     let test_audio_payload: [u8; 160] = [
         0xff, 0xec, 0xdc, 0xcd, 0xc0, 0xb3, 0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d,
@@ -115,19 +105,16 @@ async fn send_test_rtp_stream(host: &str, port: u16) {
         0xa8, 0x9d, 0x93, 0x8a, 0x82, 0x80, 0x82, 0x8a, 0x93, 0x9d, 0xa8, 0xb3, 0xc0, 0xcd, 0xdc, 0xec
     ];
     let target_addr = format!("{}:{}", host, port);
-    println!("[RTP Gönderici] Hedef: {}", target_addr);
+    println!("[RTP Gonderici] Hedef: {}", target_addr);
     let socket = UdpSocket::bind("0.0.0.0:0").unwrap();
     let mut packet = Packet { header: rtp::header::Header { version: 2, payload_type: 0, sequence_number: rand::thread_rng().gen(), timestamp: rand::thread_rng().gen(), ssrc: rand::thread_rng().gen(), ..Default::default() }, payload: Vec::from(test_audio_payload).into(), };
-    println!("[RTP Gönderici] 2 saniye boyunca ses gönderiliyor...");
+    println!("[RTP Gonderici] 2 saniye boyunca ses gonderiliyor...");
     for _ in 0..100 {
         let packet_bytes = packet.marshal().unwrap();
-        if let Err(e) = socket.send_to(&packet_bytes, &target_addr) { eprintln!("[RTP Gönderici] Paket gönderilemedi: {}", e); break; }
+        if let Err(e) = socket.send_to(&packet_bytes, &target_addr) { eprintln!("[RTP Gonderici] Paket gonderilemedi: {}", e); break; }
         packet.header.sequence_number = packet.header.sequence_number.wrapping_add(1);
         packet.header.timestamp = packet.header.timestamp.wrapping_add(160);
         sleep(Duration::from_millis(20)).await;
     }
-    println!("[RTP Gönderici] Ses gönderme tamamlandı.");
+    println!("[RTP Gonderici] Ses gonderme tamamlandi.");
 }
-
-// usage
-// cargo run --example recording_client
