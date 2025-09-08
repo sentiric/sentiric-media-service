@@ -1,38 +1,43 @@
-# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v5.5 - Çift Yönlü Ses)
+# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v6.0 - Stabilite ve Modernizasyon)
 
 Bu belge, media-service'in geliştirme yol haritasını, tamamlanan görevleri ve mevcut öncelikleri tanımlar.
 
 ---
 
-### **FAZ 1: Temel Medya Yetenekleri (Mevcut Durum)**
+### **FAZ 1: Temel Medya Yetenekleri (Tamamlandı)**
 
-**Amaç:** Platformun temel medya işlevlerini (port yönetimi, ses çalma, kayıt) sağlayan altyapıyı kurmak.
-
--   [x] **Görev ID: MEDIA-CORE-01 - Port Yönetimi:** `AllocatePort` ve `ReleasePort` RPC'leri ile dinamik RTP portu tahsisi ve karantina mekanizması.
--   [x] **Görev ID: MEDIA-CORE-02 - Ses Çalma (`PlayAudio`):** `file://` (önceden kaydedilmiş) ve `data:` (TTS'ten gelen) URI'lerini destekleyen ses çalma yeteneği.
--   [x] **Görev ID: MEDIA-CORE-03 - Canlı Ses Akışı (`RecordAudio`):** Gelen RTP sesini gRPC üzerinden canlı olarak stream etme yeteneği.
--   [x] **Görev ID: MEDIA-CORE-04 - Kalıcı Kayıt Altyapısı:** `Start/StopRecording` RPC'leri ve S3/MinIO'ya kayıt yazma altyapısı.
--   [x] **Görev ID: MEDIA-FEAT-03 - RabbitMQ Entegrasyonu:** Kayıt tamamlandığında olay yayınlama yeteneği.
--   [x] **Görev ID: MEDIA-004 - Zenginleştirilmiş Olay Yayınlama:** `call.recording.available` olayına `call_id` ve `trace_id` ekleyerek `cdr-service` ile entegrasyonu sağlama.
+-   [x] **Görev ID: MEDIA-CORE-01 - Port Yönetimi**
+-   [x] **Görev ID: MEDIA-CORE-02 - Ses Çalma (`PlayAudio`)**
+-   [x] **Görev ID: MEDIA-CORE-03 - Canlı Ses Akışı (`RecordAudio`)**
+-   [x] **Görev ID: MEDIA-CORE-04 - Kalıcı Kayıt Altyapısı**
+-   [x] **Görev ID: MEDIA-FEAT-03 - RabbitMQ Entegrasyonu**
+-   [x] **Görev ID: MEDIA-004 - Zenginleştirilmiş Olay Yayınlama**
 
 ---
 
-### **FAZ 2: Çift Yönlü Ses Kararlılığı ve Bütünlüğü (Mevcut Odak)**
+### **FAZ 2: Çift Yönlü Ses Kararlılığı ve Mimari Sağlamlaştırma (Mevcut Odak)**
 
-**Amaç:** Canlı testlerde tespit edilen kritik tek yönlü ses ve bozuk kayıt sorunlarını çözerek, platformun en temel gereksinimi olan çift yönlü, temiz ses iletişimini garanti altına almak.
+**Amaç:** Canlı testlerde tespit edilen kritik hataları çözmek, servisi platform standartlarına uygun, dayanıklı ve güvenli bir mimariye kavuşturmak.
 
 -   **Görev ID: MEDIA-BUG-01 - Tek Yönlü Ses ve Bozuk Kayıt Sorununu Giderme (KRİTİK)**
     -   **Durum:** ⬜ **Yapılacak (ÖNCELİK 1)**
-    -   **Problem Tanımı:** Canlı testler, son kullanıcıdan gelen sesin ne STT servisine doğru bir şekilde ulaştığını ne de kalıcı çağrı kaydına doğru kaydedildiğini göstermiştir. Kayıtlarda sadece sistemin (TTS) sesi duyulmakta, kullanıcının sesi ise ya hiç duyulmamakta ya da bozuk bir 'cızırtı' olarak yer almaktadır. Bu durum, `stt-service`'in hatalı transkripsiyon yapmasına ve `agent-service`'in diyalog döngüsünü kırmasına neden olan temel sorundur.
-    -   **Kök Neden Analizi:** Sorunun, `media-service`'in gelen RTP paketlerini çözme (decode), sistemin iç standardı olan 16kHz LPCM formatına yeniden örnekleme (resample) veya bu sesi giden sesle birleştirme (mix) aşamasındaki bir hatadan kaynaklandığı kuvvetle muhtemeldir.
+    -   **Problem Tanımı:** Son kullanıcıdan gelen sesin STT servisine ve kalıcı kayda bozuk veya hiç ulaşmaması. Bu, diyalog akışını kıran en temel sorundur.
     -   **Çözüm Stratejisi:**
-        1.  **Girdi Doğrulama:** Gelen RTP paketlerinin `payload`'ları ham olarak loglanmalı ve beklenen formatta (örn: G.711 PCMU) olduğu doğrulanmalıdır.
-        2.  **Birim Testleri:** `rtp/codecs.rs` modülündeki G.711 -> LPCM dönüşüm ve `rubato` ile yapılan yeniden örnekleme mantığı için, bilinen bir girdi ve beklenen bir çıktı ile birim testleri yazılmalıdır. `sentiric-sip-core-service` projesindeki başarılı codec işleme mantığı referans alınabilir.
-        3.  **Birleştirme Mantığı İncelemesi:** Gelen (kullanıcı) ve giden (TTS) ses kanallarını kalıcı kayıt için birleştiren mantık, bir kanalın diğerini ezmediğinden veya bozmadığından emin olmak için dikkatle incelenmelidir.
+        1.  Gelen RTP paketlerinin çözümlenmesi (decode), yeniden örneklenmesi (resample) ve ses kanallarının birleştirilmesi (mix) adımları, `sentiric-sip-core-service`'teki başarılı codec işleme mantığı referans alınarak ve birim testleri yazılarak dikkatle incelenecektir.
     -   **Kabul Kriterleri:**
         -   [ ] Bir test araması sonrası S3'e kaydedilen `.wav` dosyasında, **hem kullanıcının sesi hem de sistemin sesi** net ve anlaşılır bir şekilde duyulmalıdır.
         -   [ ] `stt-service`, test araması sırasında kullanıcının konuştuğu anlamlı cümleleri doğru bir şekilde metne çevirebilmelidir.
-        -   [ ] `agent-service`, kullanıcının konuşmasını anladığı için sürekli olarak `ANNOUNCE_SYSTEM_CANT_UNDERSTAND` veya `ANNOUNCE_SYSTEM_CANT_HEAR_YOU` anonslarını tetiklememelidir.
+
+-   **Görev ID: MEDIA-REFACTOR-01 - Dayanıklı Başlatma ve Graceful Shutdown**
+    -   **Durum:** ⬜ **Yapılacak (ÖNCELİK 2)**
+    -   **Problem Tanımı:** Servis, başlangıçta bağımlılıkları hazır değilse `panic!` ile çökmektedir. Bu, dağıtık ortamlarda kırılgan bir davranıştır.
+    -   **Çözüm Stratejisi:** `main.rs` ve `lib.rs` (`run` fonksiyonu), servisin hemen başlayıp arka planda periyodik olarak RabbitMQ ve S3 gibi bağımlılıklara bağlanmayı deneyeceği ve `CTRL+C` ile her an kontrollü bir şekilde kapatılabileceği şekilde yeniden yapılandırılacaktır. `unwrap()` ve `expect()` kullanımları, `Result` döndüren daha güvenli yapılarla değiştirilecektir.
+
+-   **Görev ID: MEDIA-IMPRV-01 - Dockerfile Güvenlik ve Standardizasyonu**
+    -   **Durum:** ⬜ **Yapılacak**
+    -   **Açıklama:** `Dockerfile`, root kullanıcısıyla çalışmaktadır.
+    -   **Kabul Kriterleri:**
+        -   [ ] Güvenlik en iyi uygulamalarına uymak için, imaj içinde root olmayan bir `appuser` oluşturulmalı ve uygulama bu kullanıcı ile çalıştırılmalıdır.
 
 ---
 
