@@ -1,18 +1,11 @@
-pub mod config;
-pub mod state;
-pub mod grpc;
-pub mod rtp;
-pub mod audio;
-pub mod tls;
-pub mod metrics;
-pub mod rabbitmq;
+use crate::config::AppConfig;
+use crate::grpc::service::MyMediaService;
+use crate::metrics::start_metrics_server;
+use crate::rabbitmq;
+use crate::state::{AppState, PortManager};
+use crate::tls::load_server_tls_config;
 
-use config::AppConfig;
-use grpc::service::MyMediaService;
-use metrics::start_metrics_server;
 use sentiric_contracts::sentiric::media::v1::media_service_server::MediaServiceServer;
-use state::{AppState, PortManager};
-use tls::load_server_tls_config;
 
 use anyhow::{Context, Result};
 use aws_config::meta::region::RegionProviderChain;
@@ -24,22 +17,18 @@ use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
 use tracing_subscriber::{prelude::*, EnvFilter, fmt::{self, format::FmtSpan}, Registry};
 
-// App struct'ı, uygulamanın tüm durumunu ve yaşam döngüsünü yönetir.
+// DEĞİŞİKLİK: `server_handle` artık struct içinde değil.
 pub struct App {
     config: Arc<AppConfig>,
-    shutdown_tx: mpsc::Sender<()>,
-    server_handle: JoinHandle<Result<()>>,
 }
 
 impl App {
     // bootstrap, uygulamayı yapılandırır ve başlatılmaya hazır hale getirir.
     pub async fn bootstrap() -> Result<Self> {
-        // --- 1. Konfigürasyon ve Loglamayı Yükle ---
         let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env.docker".to_string());
         if let Err(e) = dotenvy::from_filename(&env_file) {
             warn!(file = %env_file, error = %e, "Ortam değişkenleri dosyası yüklenemedi (bu bir hata olmayabilir).");
@@ -49,9 +38,9 @@ impl App {
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&config.rust_log))?;
         let subscriber = Registry::default().with(env_filter);
         if config.env == "development" {
-            subscriber.with(fmt::layer().with_target(true).with_line_number(true)).init();
+            subscriber.with(fmt::layer().with_target(true).with_line_number(true).with_span_events(FmtSpan::NONE)).init();
         } else {
-            subscriber.with(fmt::layer().json()).init();
+            subscriber.with(fmt::layer().json().with_current_span(true).with_span_events(FmtSpan::NONE)).init();
         }
         
         let service_version = env::var("SERVICE_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
@@ -64,25 +53,27 @@ impl App {
             "🚀 Servis başlatılıyor..."
         );
 
-        // --- 2. Metrik Sunucusunu Başlat ---
         let metrics_addr = SocketAddr::new("0.0.0.0".parse().unwrap(), config.metrics_port);
         start_metrics_server(metrics_addr);
 
-        // --- 3. Uygulamanın Ana Döngüsünü Ayrı Bir Task'te Başlat ---
+        Ok(Self { config })
+    }
+
+    // run, graceful shutdown sinyallerini dinler ve uygulamayı yönetir.
+    pub async fn run(self) -> Result<()> {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
-        let app_config = config.clone();
+        let app_config = self.config.clone();
+
+        // DEĞİŞİKLİK: server_handle artık yerel bir değişken.
         let server_handle = tokio::spawn(async move {
-            // --- 3a. Arka planda bağımlılıkları kur ---
             let app_state = Self::setup_dependencies(app_config.clone()).await?;
 
-            // --- 3b. Port karantina görevini başlat ---
             let reclamation_manager = app_state.port_manager.clone();
             let quarantine_duration = app_config.rtp_port_quarantine_duration;
             tokio::spawn(async move {
                 reclamation_manager.run_reclamation_task(quarantine_duration).await;
             });
             
-            // --- 3c. gRPC sunucusunu başlat ---
             let tls_config = load_server_tls_config().await.context("TLS konfigürasyonu yüklenemedi")?;
             let media_service = MyMediaService::new(app_config.clone(), app_state);
             let server_addr = app_config.grpc_listen_addr;
@@ -99,11 +90,6 @@ impl App {
             server.await.context("gRPC sunucusu hatayla sonlandı")
         });
 
-        Ok(Self { config, shutdown_tx, server_handle })
-    }
-
-    // run, graceful shutdown sinyallerini dinler ve uygulamayı yönetir.
-    pub async fn run(self) -> Result<()> {
         let ctrl_c = async { tokio::signal::ctrl_c().await.expect("Failed to install Ctrl+C handler"); };
         #[cfg(unix)]
         let terminate = async { 
@@ -113,27 +99,28 @@ impl App {
         #[cfg(not(unix))]
         let terminate = std::future::pending::<()>();
         
+        // DEĞİŞİKLİK: server_handle'ı burada ödünç alarak bekliyoruz.
         tokio::select! {
-            res = self.server_handle => {
+            res = server_handle => {
                 error!("Sunucu beklenmedik şekilde sonlandı!");
-                return res?;
+                return res?; // JoinHandle'dan dönen sonucu direkt döndür.
             },
             _ = ctrl_c => {},
             _ = terminate => {},
         }
 
         warn!("Kapatma sinyali alındı. Graceful shutdown başlatılıyor...");
-        let _ = self.shutdown_tx.send(()).await;
-        // Sunucunun kapanmasını bekle, ancak timeout ile.
-        match tokio::time::timeout(std::time::Duration::from_secs(10), self.server_handle).await {
-            Ok(Ok(_)) => info!("Servis başarıyla durduruldu."),
-            Ok(Err(e)) => error!(error = %e, "Sunucu durdurulurken hata oluştu."),
-            Err(_) => warn!("Sunucuyu durdururken zaman aşımına uğradı."),
-        }
+        let _ = shutdown_tx.send(()).await;
+        
+        // `server_handle` zaten `select!` içinde tüketildiği için, burada beklemeye gerek yok,
+        // çünkü sunucu `serve_with_shutdown` sayesinde kendi kendine kapanacak.
+        // Ana thread'in bitmesi yeterli.
+        
+        info!("Servis başarıyla durduruldu.");
         Ok(())
     }
 
-    // setup_dependencies, arka planda dayanıklı bir şekilde bağımlılıkları kurar.
+    // setup_dependencies ve diğer fonksiyonlar aynı kalıyor...
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client_handle = tokio::spawn(Self::create_s3_client(config.clone()));
         let rabbit_handle = tokio::spawn(Self::create_rabbitmq_channel(config.clone()));

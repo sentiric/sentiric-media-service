@@ -4,10 +4,13 @@ use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
 use crate::rtp::command::{RecordingSession, RtpCommand};
 use crate::rtp::session::{rtp_session_handler, RtpSessionConfig};
 use crate::state::AppState;
-use crate::{
-    AllocatePortRequest, AllocatePortResponse, MediaService, PlayAudioRequest, PlayAudioResponse,
-    RecordAudioRequest, RecordAudioResponse, ReleasePortRequest, ReleasePortResponse,
-    StartRecordingRequest, StartRecordingResponse, StopRecordingRequest, StopRecordingResponse,
+// DÜZELTME: `sentiric_contracts`'tan doğru import yolu kullanılıyor.
+use sentiric_contracts::sentiric::media::v1::{
+    media_service_server::MediaService, AllocatePortRequest, AllocatePortResponse,
+    PlayAudioRequest, PlayAudioResponse, RecordAudioRequest, RecordAudioResponse,
+
+    ReleasePortRequest, ReleasePortResponse, StartRecordingRequest, StartRecordingResponse,
+    StopRecordingRequest, StopRecordingResponse,
 };
 use hound::{SampleFormat, WavSpec};
 use metrics::{counter, gauge};
