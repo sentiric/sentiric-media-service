@@ -59,7 +59,7 @@ serde_json = "1.0.117"
 # Kontratların en son, protoc sorunu çözülmüş versiyonu
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.8.8"
+tag = "v1.8.9"
 package = "sentiric-contracts"
 
 [dev-dependencies]

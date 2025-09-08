@@ -1,4 +1,3 @@
-// File: src/rtp/session.rs (TAM VE NİHAİ DÜZELTİLMİŞ HALİ)
 use crate::audio::load_or_get_from_cache;
 use crate::config::AppConfig;
 use crate::metrics::ACTIVE_SESSIONS;
@@ -14,6 +13,7 @@ use hound::WavWriter;
 use lapin::{options::BasicPublishOptions, BasicProperties};
 use metrics::gauge;
 use rtp::packet::Packet;
+use std::cmp;
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -42,16 +42,11 @@ struct ProcessedAudio {
     source_codec: AudioCodec,
 }
 
-// =========================================================================
-// === SES YÜKLEME VE İŞLEME DÜZELTMESİ: Anonsları 16kHz'e yükseltme ===
-// =========================================================================
-
 async fn load_and_resample_samples_from_uri(
     uri: &str,
     app_state: &AppState,
     config: &Arc<AppConfig>,
 ) -> Result<Arc<Vec<i16>>> {
-    // 1. Data URI'lerini (TTS'den gelen) doğrudan 16kHz LPCM olarak decode et
     if uri.starts_with("data:") {
         info!("Data URI'sinden (TTS) ses yükleniyor...");
         let (_media_type, base64_data) = uri
@@ -61,21 +56,17 @@ async fn load_and_resample_samples_from_uri(
         let audio_bytes = general_purpose::STANDARD
             .decode(base64_data)
             .context("Base64 verisi çözümlenemedi")?;
-        // Symphonia, sesi doğrudan sistemin standart 16kHz formatına çevirir.
         return Ok(Arc::new(decode_audio_with_symphonia(audio_bytes)?));
     }
 
-    // 2. File URI'lerini (anonslar) önce 8kHz olarak yükle, sonra 16kHz'e yükselt
     if let Some(path_part) = uri.strip_prefix("file://") {
         let mut final_path = PathBuf::from(&config.assets_base_path);
         final_path.push(path_part.trim_start_matches('/'));
 
-        // Anons dosyasını 8kHz olarak yükle (WAV dosyaları bu formatta olmalı)
         let samples_from_file_8khz = load_or_get_from_cache(&app_state.audio_cache, &final_path).await?;
-        
+
         info!(samples_count = samples_from_file_8khz.len(), "Anons (8kHz) yüklendi, 16kHz'e yükseltiliyor...");
-        
-        // Yeniden örnekleme işlemini CPU yoğun olduğu için ayrı bir task'te yap
+
         let resampled_samples_16khz = spawn_blocking(move || -> Result<Vec<i16>> {
             let pcm_f32: Vec<f32> = samples_from_file_8khz.iter().map(|&s| s as f32 / 32768.0).collect();
             let params = SincInterpolationParameters {
@@ -88,16 +79,13 @@ async fn load_and_resample_samples_from_uri(
             let resampled_f32 = resampled_channels.remove(0);
             Ok(resampled_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect())
         }).await.context("Anonsu 16kHz'e yükseltme task'i başarısız oldu")??;
-        
+
         info!(samples_count = resampled_samples_16khz.len(), "Anons 16kHz'e başarıyla yükseltildi.");
         return Ok(Arc::new(resampled_samples_16khz));
     }
 
     Err(anyhow!("Desteklenmeyen URI şeması: {}", uri))
 }
-
-// ======================== DÜZELTME SONU ========================
-
 
 fn process_packet_task(packet_data: Vec<u8>) -> JoinHandle<Option<ProcessedAudio>> {
     spawn_blocking(move || {
@@ -112,7 +100,6 @@ fn process_packet_task(packet_data: Vec<u8>) -> JoinHandle<Option<ProcessedAudio
         } else { None }
     })
 }
-
 
 #[instrument(skip_all, fields(rtp_port = config.port))]
 pub async fn rtp_session_handler(
@@ -130,7 +117,7 @@ pub async fn rtp_session_handler(
     let inactivity_timeout = config.app_config.rtp_session_inactivity_timeout;
     let mut last_activity = Instant::now();
     let mut processing_task: Option<JoinHandle<Option<ProcessedAudio>>> = None;
-    
+
     loop {
         let timeout_check = sleep(inactivity_timeout);
         tokio::pin!(timeout_check);
@@ -146,17 +133,17 @@ pub async fn rtp_session_handler(
                         if actual_remote_addr.is_none() { actual_remote_addr = Some(candidate_target_addr); }
                         let target = actual_remote_addr.unwrap_or(candidate_target_addr);
                         let codec_to_use = outbound_codec.unwrap_or(AudioCodec::Pcmu);
-                        
-                        // DEĞİŞİKLİK: Yeni, akıllı yükleyici fonksiyonunu kullanıyoruz.
-                        let samples_to_play_and_record = match load_and_resample_samples_from_uri(&audio_uri, &config.app_state, &config.app_config).await {
+
+                        let samples_to_play = match load_and_resample_samples_from_uri(&audio_uri, &config.app_state, &config.app_config).await {
                             Ok(s) => Some(s),
                             Err(e) => { error!(error = ?e, "Çalınacak ses yüklenemedi."); None }
                         };
-                        
-                        if let Some(samples_16khz) = samples_to_play_and_record {
+
+                        if let Some(samples_16khz) = samples_to_play {
+                            // DEĞİŞİKLİK: Sesi outbound_samples'a ekle.
                             if let Some(session) = &mut permanent_recording_session {
                                 info!(samples_count = samples_16khz.len(), "Giden ses (16kHz) kalıcı kayda ekleniyor.");
-                                session.samples.extend_from_slice(&samples_16khz);
+                                session.outbound_samples.extend_from_slice(&samples_16khz);
                             }
                             let socket_clone = socket.clone();
                             tokio::spawn(async move {
@@ -166,7 +153,6 @@ pub async fn rtp_session_handler(
                             });
                         }
                     },
-                    // ... (Diğer RtpCommand'ler aynı kalır) ...
                     RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate: _ } => {
                         live_stream_sender = Some(stream_sender);
                     },
@@ -212,8 +198,9 @@ pub async fn rtp_session_handler(
                             live_stream_sender = None;
                         }
                     }
+                    // DEĞİŞİKLİK: Gelen sesi inbound_samples'a ekle.
                     if let Some(session) = &mut permanent_recording_session {
-                        session.samples.extend_from_slice(&processed_audio.samples_16khz);
+                        session.inbound_samples.extend_from_slice(&processed_audio.samples_16khz);
                     }
                 }
             },
@@ -243,11 +230,10 @@ pub async fn rtp_session_handler(
 }
 
 
-#[instrument(skip_all, fields(uri = %session.output_uri, samples = session.samples.len(), call_id = %session.call_id, trace_id = %session.trace_id))]
+#[instrument(skip_all, fields(uri = %session.output_uri, call_id = %session.call_id, trace_id = %session.trace_id))]
 async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
-    // Bu fonksiyonun geri kalanı doğru çalışıyor ve değiştirilmesine gerek yok.
     info!("Kayıt sonlandırma ve kaydetme süreci başlatıldı.");
-    if session.samples.is_empty() {
+    if session.inbound_samples.is_empty() && session.outbound_samples.is_empty() {
         warn!("Kaydedilecek ses verisi yok, boş dosya oluşturulmayacak.");
         return Ok(());
     }
@@ -255,13 +241,25 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
     let call_id_for_event = session.call_id.clone();
     let trace_id_for_event = session.trace_id.clone();
     let output_uri_for_event = session.output_uri.clone();
-    
-    let result: Result<()> = async {
-        let samples_16k = session.samples;
-        let original_len = samples_16k.len();
 
-        let samples_8k = spawn_blocking(move || -> Result<Vec<i16>> {
-            let pcm_f32: Vec<f32> = samples_16k.iter().map(|&s| s as f32 / 32768.0).collect();
+    // DEĞİŞİKLİK: Yeni birleştirme ve yeniden örnekleme mantığı.
+    let result: Result<()> = async {
+        let mixed_samples_16k = spawn_blocking(move || {
+            let len = cmp::max(session.inbound_samples.len(), session.outbound_samples.len());
+            let mut mixed = Vec::with_capacity(len);
+            for i in 0..len {
+                let inbound_sample = session.inbound_samples.get(i).cloned().unwrap_or(0) as i32;
+                let outbound_sample = session.outbound_samples.get(i).cloned().unwrap_or(0) as i32;
+                let mixed_sample = (inbound_sample + outbound_sample).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                mixed.push(mixed_sample);
+            }
+            mixed
+        }).await.context("Ses kanallarını birleştirme task'i başarısız oldu")?;
+        
+        info!(samples_16k = mixed_samples_16k.len(), "Gelen ve giden ses kanalları başarıyla birleştirildi.");
+
+        let downsampled_samples_8k = spawn_blocking(move || -> Result<Vec<i16>> {
+            let pcm_f32: Vec<f32> = mixed_samples_16k.iter().map(|&s| s as f32 / 32768.0).collect();
             let params = SincInterpolationParameters {
                 sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear,
                 oversampling_factor: 256, window: WindowFunction::BlackmanHarris2,
@@ -271,18 +269,17 @@ async fn finalize_and_save_recording(session: RecordingSession, app_state: AppSt
             )?;
             let mut resampled_channels = resampler.process(&[pcm_f32], None)?;
             if resampled_channels.is_empty() { return Err(anyhow!("Resampler ses kanalı döndürmedi.")); }
-            let resampled_f32 = resampled_channels.remove(0);
-            Ok(resampled_f32.into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect())
-        }).await.context("Downsampling task'i başarısız oldu")??;
+            Ok(resampled_channels.remove(0).into_iter().map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16).collect())
+        }).await.context("8kHz'e düşürme task'i başarısız oldu")??;
         
-        info!("Kayıt 16kHz'den 8kHz'e düşürüldü. Orjinal örnek: {}, Yeni örnek: {}", original_len, samples_8k.len());
-
+        info!(samples_8k = downsampled_samples_8k.len(), "Kayıt 8kHz'e başarıyla düşürüldü.");
+        
         let mut spec_8k = session.spec;
         spec_8k.sample_rate = 8000;
         let wav_data = spawn_blocking(move || -> Result<Vec<u8>, hound::Error> {
             let mut buffer = Cursor::new(Vec::new());
             let mut writer = WavWriter::new(&mut buffer, spec_8k)?;
-            for sample in samples_8k { writer.write_sample(sample)?; }
+            for sample in downsampled_samples_8k { writer.write_sample(sample)?; }
             writer.finalize()?;
             Ok(buffer.into_inner())
         }).await.context("WAV dosyası oluşturma task'i başarısız oldu")??;
