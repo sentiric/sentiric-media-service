@@ -94,12 +94,15 @@ async fn main() -> Result<()> {
     client.release_port(ReleasePortRequest { rtp_port }).await?;
 
     println!("\n[ADIM 4] Kayıt dosyası S3'ten indirilip doğrulanılıyor...");
-    sleep(Duration::from_secs(2)).await; // S3'e yazma için zaman tanı
+    // --- DEĞİŞİKLİK BURADA ---
+    // S3'e yazma işleminin tamamlanması için bekleme süresini artıralım.
+    sleep(Duration::from_secs(3)).await; // ESKİ DEĞER: 2 saniye -> YENİ DEĞER: 3 saniye
+    // -------------------------
     let wav_data = download_from_s3(&s3_client, &s3_bucket, &s3_key).await?;
     let reader = WavReader::new(Cursor::new(wav_data))?;
     let spec = reader.spec();
     let duration = reader.duration() as f32 / spec.sample_rate as f32;
-
+    
     println!("\n--- WAV Dosyası Analizi ---");
     println!("  - Süre: {:.2} saniye", duration);
     println!("  - Örnekleme Hızı: {} Hz", spec.sample_rate);
