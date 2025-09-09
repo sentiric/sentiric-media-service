@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     println!("- Kayıt başlatıldı. Hedef: {}", output_uri);
 
     println!("\n[ADIM 2] Eş zamanlı medya akışları simüle ediliyor...");
-    let rtp_target_ip = env::var("MEDIA_SERVICE_RTP_TARGET_IP").context("MEDIA_SERVICE_RTP_TARGET_IP .env dosyasında eksik veya yanlış.")?;
+    // rtp_target_ip değişkeni artık burada okunmuyor, rtp_utils içinde okunacak.
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let local_rtp_addr = socket.local_addr()?;
     println!("- [İSTEMCİ] Anonslar bu adrese beklenecek: {}", local_rtp_addr);
@@ -61,12 +61,16 @@ async fn main() -> Result<()> {
     
     sleep(Duration::from_millis(200)).await;
 
+    // --- DEĞİŞİKLİK BURADA (DOĞRU HALİ) ---
+    // Fonksiyon artık host IP'sini argüman olarak almıyor.
     let user_sim_handle = tokio::spawn(
-        send_pcmu_rtp_stream(rtp_target_ip.clone(), rtp_port as u16, Duration::from_secs(4), 440.0)
+        send_pcmu_rtp_stream(rtp_port as u16, Duration::from_secs(4), 440.0)
     );
+    // ------------------------------------
     
     sleep(Duration::from_millis(500)).await;
     println!("- [BOT SIM] 'welcome.wav' anonsu çalınıyor...");
+    
     client.play_audio(PlayAudioRequest {
         audio_uri: "file://audio/tr/welcome.wav".to_string(),
         server_rtp_port: rtp_port, rtp_target_addr: local_rtp_addr.to_string(),
@@ -97,8 +101,8 @@ async fn main() -> Result<()> {
     // --- DEĞİŞİKLİK BURADA ---
     // Zamanlama sorunlarını ekarte etmek için bekleme süresini önemli ölçüde artıralım.
     // CI/CD ortamları yavaş olabilir ve S3'ün tutarlılığı zaman alabilir.
-    println!("- (S3 tutarlılığı ve dosyanın yazılması için 10 saniye bekleniyor...)");
-    sleep(Duration::from_secs(10)).await; // ESKİ DEĞER: 3 saniye -> YENİ DEĞER: 10 saniye
+    // println!("- (S3 tutarlılığı ve dosyanın yazılması için 10 saniye bekleniyor...)");
+    // sleep(Duration::from_secs(10)).await; // ESKİ DEĞER: 3 saniye -> YENİ DEĞER: 10 saniye
     // -------------------------
     let wav_data = download_from_s3(&s3_client, &s3_bucket, &s3_key).await?;
     let reader = WavReader::new(Cursor::new(wav_data))?;
@@ -139,8 +143,29 @@ async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u3
     Ok(total_bytes)
 }
 
+// Bu fonksiyonu her iki test dosyasında da güncelleyin:
+// end_to_end_call_validator.rs ve realistic_call_flow.rs
 async fn download_from_s3(client: &S3Client, bucket: &str, key: &str) -> Result<Vec<u8>> {
-    let resp = client.get_object().bucket(bucket).key(key).send().await?;
-    let data = resp.body.collect().await?.into_bytes().to_vec();
-    Ok(data)
+    const MAX_RETRIES: u32 = 5;
+    const RETRY_DELAY_SECONDS: u64 = 3;
+
+    for attempt in 1..=MAX_RETRIES {
+        println!("- (S3'ten indirme denemesi {}/{})", attempt, MAX_RETRIES);
+        match client.get_object().bucket(bucket).key(key).send().await {
+            Ok(resp) => {
+                let data = resp.body.collect().await?.into_bytes().to_vec();
+                println!("- Dosya başarıyla indirildi.");
+                return Ok(data);
+            }
+            Err(e) => {
+                if attempt == MAX_RETRIES {
+                    // Son denemede de başarısız olursa hatayı döndür
+                    return Err(e.into());
+                }
+                println!("- Dosya bulunamadı veya bir hata oluştu, {} saniye sonra tekrar denenecek...", RETRY_DELAY_SECONDS);
+                sleep(Duration::from_secs(RETRY_DELAY_SECONDS)).await;
+            }
+        }
+    }
+    unreachable!(); // Bu satıra asla ulaşılmamalı
 }

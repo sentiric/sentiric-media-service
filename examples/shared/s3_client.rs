@@ -1,4 +1,3 @@
-// examples/shared/s3_client.rs
 use anyhow::Result;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
@@ -21,9 +20,12 @@ pub async fn connect_to_s3() -> Result<S3Client> {
         .load()
         .await;
         
+    // --- DEĞİŞİKLİK BURADA ---
+    // test-runner'ın da path-style erişimi kullanmasını zorunlu kıl.
     let s3_config = aws_sdk_s3::config::Builder::from(&config)
-        .force_path_style(true)
+        .force_path_style(true) 
         .build();
+    // -------------------------
         
     Ok(S3Client::from_conf(s3_config))
 }
