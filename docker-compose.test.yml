@@ -1,4 +1,4 @@
-# File: docker-compose.test.yml (GÜNCELLENMİŞ - SABİT IP)
+# docker-compose.test.yml (SABİT IP ADRESLERİ İLE)
 version: '3.8'
 
 networks:
@@ -22,7 +22,7 @@ services:
     volumes: [rabbitmq_test_data:/var/lib/rabbitmq/]
     networks:
       sentiric-test-net:
-        ipv4_address: "${RABBITMQ_IPV4_ADDRESS}"
+        ipv4_address: "${RABBITMQ_IPV4_ADDRESS}" # SABİT IP
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 30s
@@ -38,7 +38,7 @@ services:
     volumes: [minio_test_data:/data]
     networks:
       sentiric-test-net:
-        ipv4_address: "${MINIO_IPV4_ADDRESS}"
+        ipv4_address: "${MINIO_IPV4_ADDRESS}" # SABİT IP
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
@@ -61,7 +61,7 @@ services:
       - "${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}:${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}/udp"      
     networks:
       sentiric-test-net:
-        ipv4_address: "${MEDIA_SERVICE_IPV4_ADDRESS}"
+        ipv4_address: "${MEDIA_SERVICE_IPV4_ADDRESS}" # SABİT IP
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "50052"]
       interval: 5s
@@ -82,7 +82,7 @@ services:
     environment:
       - ENV_FILE=.env.test
     networks:
-      - sentiric-test-net
+      - sentiric-test-net # IP'ye ihtiyacı yok, diğerlerine IP'leri üzerinden erişecek
     volumes:
       - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
     depends_on:

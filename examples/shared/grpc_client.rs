@@ -1,4 +1,3 @@
-// examples/shared/grpc_client.rs
 use anyhow::Result;
 use sentiric_contracts::sentiric::media::v1::media_service_client::MediaServiceClient;
 use std::env;
@@ -8,14 +7,20 @@ pub async fn connect_to_media_service() -> Result<MediaServiceClient<Channel>> {
     let client_cert_path = env::var("AGENT_SERVICE_CERT_PATH")?;
     let client_key_path = env::var("AGENT_SERVICE_KEY_PATH")?;
     let ca_path = env::var("GRPC_TLS_CA_PATH")?;
-    let media_service_url = env::var("MEDIA_SERVICE_GRPC_URL")?;
-    let server_addr = format!("https://{}", media_service_url);
+    
+    // Bağlantı için IP adresini kullan
+    let media_service_grpc_url = env::var("MEDIA_SERVICE_GRPC_URL")?;
+    let server_addr = format!("https://{}", media_service_grpc_url);
+
+    // Sertifika doğrulaması için host adını (CN/SAN) kullan
+    let media_service_host_name = env::var("MEDIA_SERVICE_HOST_NAME")
+        .expect("Sertifika doğrulaması için MEDIA_SERVICE_HOST_NAME gereklidir.");
 
     let client_identity = Identity::from_pem(tokio::fs::read(&client_cert_path).await?, tokio::fs::read(&client_key_path).await?);
     let server_ca_certificate = Certificate::from_pem(tokio::fs::read(&ca_path).await?);
     
     let tls_config = ClientTlsConfig::new()
-        .domain_name(env::var("MEDIA_SERVICE_HOST")?)
+        .domain_name(media_service_host_name) // Sertifikanın içindeki ismi doğrula
         .ca_certificate(server_ca_certificate)
         .identity(client_identity);
     

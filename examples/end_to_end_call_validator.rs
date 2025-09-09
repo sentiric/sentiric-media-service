@@ -95,8 +95,10 @@ async fn main() -> Result<()> {
 
     println!("\n[ADIM 4] Kayıt dosyası S3'ten indirilip doğrulanılıyor...");
     // --- DEĞİŞİKLİK BURADA ---
-    // S3'e yazma işleminin tamamlanması için bekleme süresini artıralım.
-    sleep(Duration::from_secs(3)).await; // ESKİ DEĞER: 2 saniye -> YENİ DEĞER: 3 saniye
+    // Zamanlama sorunlarını ekarte etmek için bekleme süresini önemli ölçüde artıralım.
+    // CI/CD ortamları yavaş olabilir ve S3'ün tutarlılığı zaman alabilir.
+    println!("- (S3 tutarlılığı ve dosyanın yazılması için 10 saniye bekleniyor...)");
+    sleep(Duration::from_secs(10)).await; // ESKİ DEĞER: 3 saniye -> YENİ DEĞER: 10 saniye
     // -------------------------
     let wav_data = download_from_s3(&s3_client, &s3_bucket, &s3_key).await?;
     let reader = WavReader::new(Cursor::new(wav_data))?;
