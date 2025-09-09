@@ -1,4 +1,4 @@
-# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v6.1 - Stabilite ve Modernizasyon Tamamlandı)
+# 🎙️ Sentiric Media Service - Geliştirme Yol Haritası (v7.0 - Kritik Hatalar Giderildi)
 
 Bu belge, media-service'in geliştirme yol haritasını, tamamlanan görevleri ve mevcut öncelikleri tanımlar.
 
@@ -6,22 +6,15 @@ Bu belge, media-service'in geliştirme yol haritasını, tamamlanan görevleri v
 
 *   **Görev ID:** `MEDIA-BUG-02`
     *   **Başlık:** fix(rtp): Gelen RTP (inbound) ses akışındaki bozulmayı ve cızırtıyı düzelt
-    *   **Durum:** `[ ⬜ ] Yapılacak`
+    *   **Durum:** `[ ✅ ] Tamamlandı`
     *   **Öncelik:** **KRİTİK - BLOKLAYICI**
-    *   **Gerekçe:** Şu anki en kritik hata budur. Kullanıcının sesi platforma temiz bir şekilde ulaşmadan, STT veya AI'ın çalışması imkansızdır. Ses kaydındaki cızırtı, gelen RTP paketlerinin `decode_g711_to_lpcm16` fonksiyonunda veya `inbound_samples` tamponuna yazılırken bozulduğunu gösteriyor. Bu hata, tüm diyalog akışını işlevsiz kılıyor.
-    *   **Kabul Kriterleri:**
-        1.  `end_to_end_call_validator` testi veya manuel bir test çağrısı sonucunda oluşturulan `.wav` kaydı indirildiğinde, hem kullanıcının sesi (inbound) hem de sistemin sesi (outbound) net, cızırtısız ve anlaşılır olmalıdır.
-        2.  `stt-service` logları, gelen ses akışından anlamlı ve doğru bir transkript üretebildiğini göstermelidir.
-        3.  `live_audio_client` test örneği çalıştırıldığında, alınan ses verisinin checksum'ı gönderilenle tutarlı olmalıdır.
+    *   **Çözüm:** `src/rtp/codecs.rs` içindeki PCMU/PCMA -> LPCM16 dönüştürme ve yeniden örnekleme mantığı stabilize edildi. `rtp_session_handler`, gelen paketleri artık kayıpsız bir şekilde işleyerek hem canlı akışa (STT) hem de kalıcı kayıt tamponuna temiz ses verisi iletiyor. `realistic_call_flow` testi, STT'ye giden veri miktarını ve kayıt dosyasının kalitesini doğrulayarak bu düzeltmeyi kanıtlamaktadır.
 
 *   **Görev ID:** `MEDIA-REFACTOR-02`
     *   **Başlık:** refactor(session): Anonsların kesilmesini önlemek için komut kuyruğu mekanizması ekle
-    *   **Durum:** `[ ⬜ ] Yapılacak`
+    *   **Durum:** `[ ✅ ] Tamamlandı`
     *   **Öncelik:** **YÜKSEK**
-    *   **Gerekçe:** Test çağrısında, giriş anonsu (`connecting.wav`), ilk TTS yanıtı tarafından kesilmiştir. `rtp_session_handler`, `PlayAudio` komutlarını sıraya koymak yerine bir önceki komutu iptal ediyor. Bu, kötü bir kullanıcı deneyimi yaratır. Her `rtp_session_handler` içinde, gelen `PlayAudio` komutlarını bir kuyruğa (queue) ekleyen ve bir önceki tamamlandığında sıradakini başlatan bir mekanizma olmalıdır.
-    *   **Kabul Kriterleri:**
-        1.  Bir çağrı başladığında, önce `connecting.wav` anonsu tamamen çalmalı, **bittikten sonra** ilk TTS yanıtı çalmaya başlamalıdır.
-        2.  Ses kaydında her iki ses de tam ve kesintisiz olarak duyulmalıdır.
+    *   **Çözüm:** `src/rtp/session.rs` içindeki her oturum yöneticisine bir `VecDeque` tabanlı anons kuyruğu ve `is_playing` durum bayrağı eklendi. Yeni `PlayAudio` komutları, mevcut bir anons çalarken artık kuyruğa alınıyor ve bir önceki bittiğinde otomatik olarak oynatılıyor. `realistic_call_flow` testi, sıralı anonsların kesilmediğini ve toplam kayıt süresinin doğru olduğunu doğrulayarak bu özelliği kanıtlamaktadır.
 
 ---
 
@@ -59,4 +52,3 @@ Bu belge, media-service'in geliştirme yol haritasını, tamamlanan görevleri v
 -   **Görev ID: MEDIA-FEAT-04 - Anlık Ses Analizi**
     -   **Durum:** ⬜ **Planlandı**
     -   **Açıklama:** Ses akışı üzerinden anlık olarak duygu analizi (kullanıcının ses tonundan sinirli, mutlu vb. olduğunu anlama) veya anahtar kelime tespiti ("yöneticiye bağla" gibi) yapabilen bir altyapı kurmak. Bu, diyaloğu proaktif olarak yönlendirme imkanı sağlar.
-    

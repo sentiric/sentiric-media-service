@@ -65,3 +65,12 @@ Bu komut, projenin tamamını (MinIO dahil) Docker içinde ayağa kaldırır, en
     ```
     -   `--build`: Testleri çalıştırmadan önce imajları yeniden oluşturur.
     -   `--exit-code-from test-runner`: Testler bittiğinde `test-runner` container'ının çıkış kodunu (0: başarılı, >0: başarısız) döndürür ve tüm ortamı otomatik olarak kapatır.
+
+--env-file .env.test: IP adreslerini ve diğer test ayarlarını yükler. Bu en kritik kısım.
+
+--abort-on-container-exit: Testler bittiğinde veya herhangi bir konteyner hata verip kapandığında, tüm ortamı otomatik olarak temizler. Bu, --exit-code-from'a göre daha modern bir alternatiftir.    
+
+
+    ```bash
+    docker-compose --env-file .env.test -f docker-compose.test.yml up --build --abort-on-container-exit
+    ```

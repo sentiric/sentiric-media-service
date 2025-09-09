@@ -4,11 +4,9 @@ use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
 use crate::rtp::command::{RecordingSession, RtpCommand};
 use crate::rtp::session::{rtp_session_handler, RtpSessionConfig};
 use crate::state::AppState;
-// DÜZELTME: `sentiric_contracts`'tan doğru import yolu kullanılıyor.
 use sentiric_contracts::sentiric::media::v1::{
     media_service_server::MediaService, AllocatePortRequest, AllocatePortResponse,
     PlayAudioRequest, PlayAudioResponse, RecordAudioRequest, RecordAudioResponse,
-
     ReleasePortRequest, ReleasePortResponse, StartRecordingRequest, StartRecordingResponse,
     StopRecordingRequest, StopRecordingResponse,
 };
@@ -112,9 +110,8 @@ impl MediaService for MyMediaService {
             ServiceError::InvalidTargetAddress { addr: req.rtp_target_addr, source: e }
         })?;
 
-        if tx.send(RtpCommand::StopAudio).await.is_err() {
-            return Err(ServiceError::CommandSendError("StopAudio".to_string()).into());
-        }
+        // NOT: Mevcut anonsu kesme komutu (`StopAudio`) artık anons kuyruğu tarafından yönetildiği için burada gerekli değildir.
+        // Kuyruk mekanizması bu durumu doğal olarak çözer.
 
         let cancellation_token = CancellationToken::new();
         let command = RtpCommand::PlayAudioUri {

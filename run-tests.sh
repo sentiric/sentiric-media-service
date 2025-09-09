@@ -2,27 +2,27 @@
 set -e
 
 echo "--- 🕒 Waiting for MinIO to be healthy... ---"
-while ! curl -f "http://${MINIO_HOST}:${MINIO_API_PORT}/minio/health/live"; do
-    echo "MinIO is not ready yet. Retrying in 2 seconds..."
+# MinIO'ya doğrudan IP adresi ile erişim
+while ! curl -f "http://${MINIO_IPV4_ADDRESS}:${MINIO_API_PORT}/minio/health/live"; do
+    echo "MinIO is not ready at ${MINIO_IPV4_ADDRESS}. Retrying in 2 seconds..."
     sleep 2
 done
 echo "--- ✅ MinIO is ready! ---"
 
-# YENİ: Media Service'in gRPC portunun da hazır olmasını bekle
 echo "\n--- 🕒 Waiting for Media Service to be healthy... ---"
-while ! nc -z "${MEDIA_SERVICE_HOST}" "${MEDIA_SERVICE_GRPC_PORT}"; do
-    echo "Media Service gRPC port is not ready yet. Retrying in 2 seconds..."
+# Media Service'e doğrudan IP adresi ile erişim
+while ! nc -z "${MEDIA_SERVICE_RTP_TARGET_IP}" "${MEDIA_SERVICE_GRPC_PORT}"; do
+    echo "Media Service (gRPC port) is not ready at ${MEDIA_SERVICE_RTP_TARGET_IP}. Retrying in 2 seconds..."
     sleep 2
 done
 echo "--- ✅ Media Service is ready! ---"
 
 echo "\n--- 🛠️ Configuring MinIO... ---"
-# mc'nin anonim kullanım uyarısını bastırmak için --quiet eklendi
+# mc komutu için host ismi kullanmak daha okunaklı ve genellikle sorunsuz.
 mc alias set myminio "http://${MINIO_HOST}:${MINIO_API_PORT}" "${MINIO_ROOT_USER}" "${MINIO_ROOT_PASSWORD}" --quiet
 echo "Creating bucket: ${S3_BUCKET_NAME}"
 mc mb "myminio/${S3_BUCKET_NAME}" --ignore-existing
 echo "Setting anonymous policy for bucket: ${S3_BUCKET_NAME}"
-# DÜZELTME: Doğru mc komutu `mc anonymous set public`
 mc anonymous set public "myminio/${S3_BUCKET_NAME}"
 echo "--- ✅ MinIO configuration complete. ---"
 

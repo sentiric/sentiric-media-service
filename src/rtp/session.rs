@@ -1,5 +1,4 @@
 use crate::config::AppConfig;
-// DÜZELTME: Eksik olan 'AudioCodec' import edildi.
 use crate::rtp::codecs::{self, AudioCodec};
 use crate::rtp::command::{AudioFrame, RtpCommand};
 use crate::rtp::stream::send_rtp_stream;
@@ -8,11 +7,10 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::task::spawn_blocking;
+use tokio::task::spawn_blocking; // spawn_blocking'i import et
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-// DÜZELTME: Kullanılmayan 'error' importu kaldırıldı.
-use tracing::{info, instrument};
+use tracing::{debug, info, instrument, warn};
 use super::command::RecordingSession;
 use crate::rtp::session_utils::{finalize_and_save_recording, load_and_resample_samples_from_uri};
 use crate::metrics::ACTIVE_SESSIONS;
@@ -32,6 +30,7 @@ struct PlaybackJob {
     cancellation_token: CancellationToken,
 }
 
+// --- NİHAİ DÜZELTME: Bu fonksiyon artık asenkron döngüyü tıkamayacak ---
 async fn handle_incoming_rtp_packet(
     packet_data: Vec<u8>,
     remote_addr: SocketAddr,
@@ -45,6 +44,7 @@ async fn handle_incoming_rtp_packet(
         info!(%remote_addr, "İlk RTP paketi alındı, hedef adres doğrulandı.");
     }
     
+    // CPU-yoğun işi `spawn_blocking` ile arka plan thread'ine taşı.
     let maybe_processed = spawn_blocking(move || {
         let mut packet_buf = &packet_data[..];
         let packet = rtp::packet::Packet::unmarshal(&mut packet_buf).ok()?;
@@ -73,6 +73,7 @@ async fn handle_incoming_rtp_packet(
         }
         drop(sender_guard);
 
+        // Alıcı kapandıysa, göndericiyi temizle.
         let mut sender_guard = live_stream_sender.lock().await;
         if sender_guard.as_ref().map_or(false, |s| s.is_closed()) {
             *sender_guard = None;
@@ -120,6 +121,7 @@ pub async fn rtp_session_handler(
                         }
                     },
                     RtpCommand::StopAudio => {
+                        // Kuyruktaki mevcut işi iptal et (varsa) ve kuyruğu temizle.
                         if let Some(token) = playback_queue.front().map(|j| j.cancellation_token.clone()) { token.cancel(); }
                         playback_queue.clear();
                     },
@@ -145,6 +147,7 @@ pub async fn rtp_session_handler(
             result = socket.recv_from(&mut buf) => {
                 if let Ok((len, remote_addr)) = result {
                     let packet_data = buf[..len].to_vec();
+                    // Her paketi ayrı bir yeşil thread'de işle.
                     tokio::spawn(handle_incoming_rtp_packet(
                         packet_data,
                         remote_addr,
@@ -165,6 +168,7 @@ pub async fn rtp_session_handler(
         }
     }
     
+    // Oturum kapanırken yarım kalan kayıt varsa, bunu da ayrı bir task'te tamamla.
     if let Some(session) = permanent_recording_session.lock().await.take() {
         tokio::spawn(finalize_and_save_recording(session, config.app_state.clone()));
     }
@@ -184,6 +188,7 @@ async fn start_playback(
     let samples_to_play = match load_and_resample_samples_from_uri(&job.audio_uri, &config.app_state, &config.app_config).await {
         Ok(s) => Some(s),
         Err(_e) => {
+            // Hata durumunda bile 'bitti' sinyali gönder ki kuyruk tıkanmasın.
             let _ = playback_finished_tx.send(()).await;
             return;
         }
@@ -191,13 +196,15 @@ async fn start_playback(
 
     if let Some(samples_16khz) = samples_to_play {
         if let Some(session) = &mut *permanent_recording_session.lock().await {
-            session.inbound_samples.extend_from_slice(&samples_16khz);
+            // Outbound sesi de kayıt tamponuna ekle
+            session.outbound_samples.extend_from_slice(&samples_16khz);
         }
         tokio::spawn(async move {
             let _ = send_rtp_stream(&socket, job.target_addr, &samples_16khz, job.cancellation_token, codec_to_use).await;
             let _ = playback_finished_tx.send(()).await;
         });
     } else {
+        // Hata durumunda bile 'bitti' sinyali gönder.
         let _ = playback_finished_tx.send(()).await;
     }
 }

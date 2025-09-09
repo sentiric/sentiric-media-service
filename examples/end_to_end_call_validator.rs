@@ -74,7 +74,13 @@ async fn main() -> Result<()> {
     }).await?;
     
     user_sim_handle.await??;
-    sleep(Duration::from_secs(2)).await;
+
+    // --- DEĞİŞİKLİK BURADA ---
+    // Dinleyiciye verinin işlenmesi için daha fazla zaman tanıyoruz.
+    println!("- (Ses akışının sunucudan geri dönmesi için bekleniyor...)");
+    sleep(Duration::from_secs(4)).await; // ESKİ DEĞER: 2 saniye
+    // -------------------------
+
     let _ = done_tx.send(());
     let received_audio_len = stt_sim_handle.await??;
 

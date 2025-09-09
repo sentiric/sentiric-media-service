@@ -1,53 +1,55 @@
-# File: docker-compose.test.yml (GÜNCELLENMİŞ)
+# File: docker-compose.test.yml (GÜNCELLENMİŞ - SABİT IP)
 version: '3.8'
 
 networks:
   sentiric-test-net:
     name: "${NETWORK_NAME:-sentiric-test-net}"
+    driver: bridge
+    ipam:
+      config:
+        - subnet: "${NETWORK_SUBNET:-172.25.0.0/16}"
+          gateway: "${NETWORK_GATEWAY:-172.25.0.1}"
 
 volumes:
   minio_test_data:
   rabbitmq_test_data:
 
 services:
-
   rabbitmq:
     build: { context: ../sentiric-rabbitmq }
     env_file: [".env.test"]
     ports: ["15672:15672", "5672:5672"]
     volumes: [rabbitmq_test_data:/var/lib/rabbitmq/]
     networks:
-      - sentiric-test-net
-    restart: always
+      sentiric-test-net:
+        ipv4_address: "${RABBITMQ_IPV4_ADDRESS}"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
+    restart: always
 
   minio:
     image: quay.io/minio/minio
-    # DEĞİŞİKLİK: Artık .env.test kullanıyor
     env_file: [".env.test"]
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     command: server /data --console-address ":9001"
-    volumes:
-      - minio_test_data:/data
+    ports: ["9000:9000", "9001:9001"]
+    volumes: [minio_test_data:/data]
     networks:
-      - sentiric-test-net
+      sentiric-test-net:
+        ipv4_address: "${MINIO_IPV4_ADDRESS}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: always
 
   media-service:
     build:
       context: .
       dockerfile: Dockerfile
-    # DEĞİŞİKLİK: Artık .env.test kullanıyor
     env_file: [".env.test"]
     volumes:
       - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
@@ -58,7 +60,8 @@ services:
       - "${MEDIA_SERVICE_GRPC_PORT}:${MEDIA_SERVICE_GRPC_PORT}"
       - "${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}:${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}/udp"      
     networks:
-      - sentiric-test-net
+      sentiric-test-net:
+        ipv4_address: "${MEDIA_SERVICE_IPV4_ADDRESS}"
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "50052"]
       interval: 5s
@@ -69,14 +72,13 @@ services:
       minio: { condition: service_healthy },
       rabbitmq: { condition: service_healthy },
     }             
+    restart: always
 
   test-runner:
     build:
       context: .
       dockerfile: Dockerfile.test
-    # DEĞİŞİKLİK: Artık .env.test kullanıyor
     env_file: [".env.test"]
-    # YENİ: Test runner'a hangi .env dosyasını kullanacağını söylüyoruz
     environment:
       - ENV_FILE=.env.test
     networks:
