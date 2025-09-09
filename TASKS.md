@@ -4,6 +4,27 @@ Bu belge, media-service'in geliştirme yol haritasını, tamamlanan görevleri v
 
 ---
 
+*   **Görev ID:** `MEDIA-BUG-02`
+    *   **Başlık:** fix(rtp): Gelen RTP (inbound) ses akışındaki bozulmayı ve cızırtıyı düzelt
+    *   **Durum:** `[ ⬜ ] Yapılacak`
+    *   **Öncelik:** **KRİTİK - BLOKLAYICI**
+    *   **Gerekçe:** Şu anki en kritik hata budur. Kullanıcının sesi platforma temiz bir şekilde ulaşmadan, STT veya AI'ın çalışması imkansızdır. Ses kaydındaki cızırtı, gelen RTP paketlerinin `decode_g711_to_lpcm16` fonksiyonunda veya `inbound_samples` tamponuna yazılırken bozulduğunu gösteriyor. Bu hata, tüm diyalog akışını işlevsiz kılıyor.
+    *   **Kabul Kriterleri:**
+        1.  `end_to_end_call_validator` testi veya manuel bir test çağrısı sonucunda oluşturulan `.wav` kaydı indirildiğinde, hem kullanıcının sesi (inbound) hem de sistemin sesi (outbound) net, cızırtısız ve anlaşılır olmalıdır.
+        2.  `stt-service` logları, gelen ses akışından anlamlı ve doğru bir transkript üretebildiğini göstermelidir.
+        3.  `live_audio_client` test örneği çalıştırıldığında, alınan ses verisinin checksum'ı gönderilenle tutarlı olmalıdır.
+
+*   **Görev ID:** `MEDIA-REFACTOR-02`
+    *   **Başlık:** refactor(session): Anonsların kesilmesini önlemek için komut kuyruğu mekanizması ekle
+    *   **Durum:** `[ ⬜ ] Yapılacak`
+    *   **Öncelik:** **YÜKSEK**
+    *   **Gerekçe:** Test çağrısında, giriş anonsu (`connecting.wav`), ilk TTS yanıtı tarafından kesilmiştir. `rtp_session_handler`, `PlayAudio` komutlarını sıraya koymak yerine bir önceki komutu iptal ediyor. Bu, kötü bir kullanıcı deneyimi yaratır. Her `rtp_session_handler` içinde, gelen `PlayAudio` komutlarını bir kuyruğa (queue) ekleyen ve bir önceki tamamlandığında sıradakini başlatan bir mekanizma olmalıdır.
+    *   **Kabul Kriterleri:**
+        1.  Bir çağrı başladığında, önce `connecting.wav` anonsu tamamen çalmalı, **bittikten sonra** ilk TTS yanıtı çalmaya başlamalıdır.
+        2.  Ses kaydında her iki ses de tam ve kesintisiz olarak duyulmalıdır.
+
+---
+
 ### **FAZ 1: Temel Medya Yetenekleri (Tamamlandı)**
 
 -   [x] **Görev ID: MEDIA-CORE-01 - Port Yönetimi**

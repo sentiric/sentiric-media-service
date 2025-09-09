@@ -14,25 +14,13 @@ Bu komutlar, `development.env` dosyasındaki yapılandırmaları kullanarak yere
 
 ### Temel Bağlantı ve API Testleri
 
--   **Tüm Ortam Değişkenlerini Doğrula:**
-    ```bash
-    cargo run --example test --release
-    ```
 -   **Agent Service gibi davran (Port Al/Bırak):**
     ```bash
     cargo run --example agent_client --release
     ```
--   **SIP Signaling gibi davran (Kapasite Kontrolü):**
-    ```bash
-    cargo run --example sip_signaling_client --release
-    ```
 -   **Dialplan gibi davran (Anons Çal):**
     ```bash
     cargo run --example dialplan_client --release
-    ```
--   **User Service gibi davran (Sadece Bağlantı Testi):**
-    ```bash
-    cargo run --example user_client --release
     ```
 
 ### Fonksiyonel Senaryo Testleri
@@ -50,19 +38,24 @@ Bu komutlar, `development.env` dosyasındaki yapılandırmaları kullanarak yere
     cargo run --example call_simulator --release
     ```
 
-### En Kapsamlı Manuel Test
+### En Kapsamlı Manuel ve Otomatik Testler
 
--   **Uçtan Uca Diyalog ve Ses Birleştirmeyi Doğrula:**
-    > ⚠️ **Not:** Bu test, `development.env` dosyasında doğru IP adreslerinin (`MEDIA_SERVICE_PUBLIC_IP`) ayarlanmasını gerektirir.
+-   **Uçtan Uca Temel Doğrulama (CI için de kullanılır):**
+    > ⚠️ **Not:** Bu test, `.env.development` veya `.env.test` dosyasında doğru IP adreslerinin ayarlanmasını gerektirir.
     ```bash
     cargo run --example end_to_end_call_validator --release
+    ```
+-   **✨ ALTIN STANDART: Gerçekçi Çağrı Akışı Simülasyonu:**
+    > Bu test, cızırtı ve anons kesilmesi sorunlarının çözümünü kanıtlamak için tasarlanmıştır. Gerçek bir çağrıdaki gibi sıralı anonsları, anlık TTS yanıtını ve eş zamanlı kullanıcı konuşmasını simüle eder. **Projedeki en önemli ve kapsamlı testtir.**
+    ```bash
+    cargo run --example realistic_call_flow --release
     ```
 
 ---
 
 ## 2. Tam Otomatize Entegrasyon Testleri (Docker)
 
-Bu komut, projenin tamamını (MinIO dahil) Docker içinde ayağa kaldırır, tüm kritik senaryoları (`live_audio`, `recording`, `end_to_end_validator`) otomatize bir şekilde çalıştırır ve sonucunu bildirir.
+Bu komut, projenin tamamını (MinIO dahil) Docker içinde ayağa kaldırır, en kritik senaryo olan `end_to_end_call_validator`'ı otomatize bir şekilde çalıştırır ve sonucunu bildirir.
 
 **CI/CD ve son doğrulama için kullanılması gereken yöntem budur.**
 
