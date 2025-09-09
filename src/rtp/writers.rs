@@ -65,7 +65,6 @@ pub async fn from_uri(
 
     match uri.scheme() {
         "file" => {
-            // === EKSİK OLAN KOD BURADAYDI ===
             let path = uri.to_file_path().map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
             Ok(Box::new(FileWriter { path: path.to_string_lossy().to_string() }))
         }
@@ -78,8 +77,16 @@ pub async fn from_uri(
                 anyhow!("S3 URI'si kullanıldı ancak paylaşılan S3 istemcisi başlatılamamış.")
             })?;
 
-            let bucket = s3_config.bucket_name.clone();
-            let key = format!("{}{}", uri.host_str().unwrap_or(""), uri.path()).trim_start_matches('/').to_string();
+            // --- DEĞİŞİKLİK BURADA ---
+            // ÖNCEKİ YANLIŞ HALİ:
+            // let key = format!("{}{}", uri.host_str().unwrap_or(""), uri.path()).trim_start_matches('/').to_string();
+            
+            // YENİ DOĞRU HALİ:
+            // S3 anahtarı, URI'nin sadece path kısmıdır. Host kısmı bucket'ı temsil eder.
+            // SDK'ya bucket'ı ayrı verdiğimiz için anahtara dahil etmemeliyiz.
+            let bucket = uri.host_str().unwrap_or(&s3_config.bucket_name).to_string();
+            let key = uri.path().trim_start_matches('/').to_string();
+            // --- DEĞİŞİKLİK SONU ---
 
             if key.is_empty() {
                 return Err(anyhow!("S3 URI'sinde dosya yolu (key) belirtilmelidir."));

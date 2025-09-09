@@ -1,3 +1,5 @@
+// examples/shared/rtp_utils.rs
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use rand::Rng;
@@ -10,13 +12,15 @@ use webrtc_util::marshal::Marshal;
 use super::codecs::linear_to_ulaw;
 
 pub async fn send_pcmu_rtp_stream(
-    // host parametresi yok, env'den okunacak
+    // host parametresi artık yok, fonksiyon içinden okunacak
     port: u16,
     duration: Duration,
     frequency: f32,
 ) -> Result<()> {
+    // --- DEĞİŞİKLİK BURADA ---
     let host = env::var("MEDIA_SERVICE_RTP_TARGET_IP")
         .context("MEDIA_SERVICE_RTP_TARGET_IP ortam değişkeni bulunamadı.")?;
+    // --- DEĞİŞİKLİK SONU ---
 
     let mut pcm_8k = Vec::new();
     let num_samples = (8000.0 * duration.as_secs_f32()) as usize;
@@ -30,6 +34,7 @@ pub async fn send_pcmu_rtp_stream(
     let target_addr = format!("{}:{}", host, port);
     println!("- [KULLANICI SIM] {}s boyunca {}Hz tonunda PCMU RTP akışı gönderiliyor -> {}", duration.as_secs(), frequency, target_addr);
 
+    // ... Fonksiyonun geri kalanı aynı ...
     let (sequence_number, timestamp, ssrc) = {
         let mut rng = rand::thread_rng();
         (rng.gen(), rng.gen(), rng.gen())

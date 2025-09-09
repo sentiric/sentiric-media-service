@@ -8,13 +8,13 @@ Bu belge, media-service'in geliştirme yol haritasını, tamamlanan görevleri v
     *   **Başlık:** fix(rtp): Gelen RTP (inbound) ses akışındaki bozulmayı ve cızırtıyı düzelt
     *   **Durum:** `[ ✅ ] Tamamlandı`
     *   **Öncelik:** **KRİTİK - BLOKLAYICI**
-    *   **Çözüm:** `src/rtp/codecs.rs` içindeki PCMU/PCMA -> LPCM16 dönüştürme ve yeniden örnekleme mantığı stabilize edildi. `rtp_session_handler`, gelen paketleri artık kayıpsız bir şekilde işleyerek hem canlı akışa (STT) hem de kalıcı kayıt tamponuna temiz ses verisi iletiyor. `realistic_call_flow` testi, STT'ye giden veri miktarını ve kayıt dosyasının kalitesini doğrulayarak bu düzeltmeyi kanıtlamaktadır.
+    *   **Çözüm:** `src/rtp/codecs.rs` içinde PCMU/PCMA -> LPCM16 dönüştürme ve yeniden örnekleme mantığı, oturum başına `StatefulResampler` kullanacak şekilde yeniden yapılandırıldı. Bu, RTP paketleri arasındaki ses geçişlerinde oluşan faz ve durum kayıplarını ortadan kaldırdı. `rtp_session_handler`, gelen paketleri artık kayıpsız bir şekilde işleyerek hem canlı akışa (STT) hem de kalıcı kayıt tamponuna temiz ses verisi iletiyor. `realistic_call_flow` ve `end_to_end_call_validator` testlerinde üretilen ses kayıtları, inbound sesin tamamen temiz ve cızırtısız olduğunu doğrulayarak bu düzeltmeyi kanıtlamaktadır.
 
 *   **Görev ID:** `MEDIA-REFACTOR-02`
     *   **Başlık:** refactor(session): Anonsların kesilmesini önlemek için komut kuyruğu mekanizması ekle
     *   **Durum:** `[ ✅ ] Tamamlandı`
     *   **Öncelik:** **YÜKSEK**
-    *   **Çözüm:** `src/rtp/session.rs` içindeki her oturum yöneticisine bir `VecDeque` tabanlı anons kuyruğu ve `is_playing` durum bayrağı eklendi. Yeni `PlayAudio` komutları, mevcut bir anons çalarken artık kuyruğa alınıyor ve bir önceki bittiğinde otomatik olarak oynatılıyor. `realistic_call_flow` testi, sıralı anonsların kesilmediğini ve toplam kayıt süresinin doğru olduğunu doğrulayarak bu özelliği kanıtlamaktadır.
+    *   **Çözüm:** `src/rtp/session.rs` içindeki her oturum yöneticisine bir `VecDeque` tabanlı anons kuyruğu ve `is_playing` durum bayrağı eklendi. Yeni `PlayAudio` komutları, mevcut bir anons çalarken artık eskisini kesmek yerine kuyruğa alınıyor ve bir önceki anons bittiğinde otomatik olarak oynatılıyor. `realistic_call_flow` testi, sıralı `connecting.wav` ve TTS anonslarının kesilmediğini ve toplam kayıt süresinin doğru olduğunu doğrulayarak bu özelliğin başarıyla implemente edildiğini kanıtlamaktadır.
 
 ---
 

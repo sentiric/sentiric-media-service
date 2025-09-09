@@ -76,6 +76,7 @@ async fn main() -> Result<()> {
 
     // --- DEĞİŞİKLİK BURADA (DOĞRU HALİ) ---
     // Fonksiyon artık host IP'sini argüman olarak almıyor.
+    // YENİ DOĞRU HALİ (rtp_target_ip parametresi yok):
     let user_sim_handle = tokio::spawn(
         send_pcmu_rtp_stream(rtp_port as u16, Duration::from_secs(4), 440.0)
     );
@@ -164,12 +165,13 @@ async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u3
 
 // Bu fonksiyonu her iki test dosyasında da güncelleyin:
 // end_to_end_call_validator.rs ve realistic_call_flow.rs
+// examples/end_to_end_call_validator.rs ve realistic_call_flow.rs içinde
 async fn download_from_s3(client: &S3Client, bucket: &str, key: &str) -> Result<Vec<u8>> {
-    const MAX_RETRIES: u32 = 5;
-    const RETRY_DELAY_SECONDS: u64 = 3;
+    const MAX_RETRIES: u32 = 6;
+    const RETRY_DELAY_SECONDS: u64 = 4;
 
     for attempt in 1..=MAX_RETRIES {
-        println!("- (S3'ten indirme denemesi {}/{})", attempt, MAX_RETRIES);
+        println!("- (S3'ten indirme denemesi {}/{}: bucket='{}', key='{}')", attempt, MAX_RETRIES, bucket, key);
         match client.get_object().bucket(bucket).key(key).send().await {
             Ok(resp) => {
                 let data = resp.body.collect().await?.into_bytes().to_vec();
@@ -178,10 +180,10 @@ async fn download_from_s3(client: &S3Client, bucket: &str, key: &str) -> Result<
             }
             Err(e) => {
                 if attempt == MAX_RETRIES {
-                    // Son denemede de başarısız olursa hatayı döndür
-                    return Err(e.into());
+                    // Son denemede de başarısız olursa hatayı detaylı döndür
+                    return Err(anyhow::anyhow!(e).context(format!("Dosya S3'te bulunamadı (bucket: {}, key: {})", bucket, key)));
                 }
-                println!("- Dosya bulunamadı veya bir hata oluştu, {} saniye sonra tekrar denenecek...", RETRY_DELAY_SECONDS);
+                println!("- İndirme hatası, {} saniye sonra tekrar denenecek... Hata: {}", RETRY_DELAY_SECONDS, e);
                 sleep(Duration::from_secs(RETRY_DELAY_SECONDS)).await;
             }
         }
