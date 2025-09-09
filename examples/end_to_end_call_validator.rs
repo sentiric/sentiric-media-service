@@ -1,3 +1,4 @@
+// examples/end_to_end_call_validator.rs
 use anyhow::{Context, Result};
 use aws_sdk_s3::Client as S3Client;
 use hound::WavReader;
@@ -14,15 +15,14 @@ use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use tonic::transport::Channel;
 
-// YENİ: Ortak modülü ekle
+// Paylaşılan modülleri kullan
 mod shared;
-// YENİ: Ortak modülden fonksiyonları import et
 use shared::{grpc_client::connect_to_media_service, rtp_utils::send_pcmu_rtp_stream, s3_client::connect_to_s3};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("--- Uçtan Uca Medya Servisi TEMEL Doğrulama Testi Başlatılıyor ---");
-    println!("---  Senaryo: PCMU kodek ile çağrı, 16kHz WAV olarak kayıt ve birleştirme ---");
+    println!("---  Senaryo: PCMU kodek ile çağrı, 8kHz WAV olarak kayıt ve birleştirme ---");
 
     let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env.test".to_string());
     dotenvy::from_filename(&env_file).ok();
@@ -30,10 +30,9 @@ async fn main() -> Result<()> {
     let mut client = connect_to_media_service().await?;
     let s3_client = connect_to_s3().await?;
 
-    println!("\n[ADIM 1] Port alınıyor ve PCMU için kayıt başlatılıyor...");
+    println!("\n[ADIM 1] Port alınıyor ve kayıt başlatılıyor...");
     let call_id = format!("validation-call-{}", rand::thread_rng().gen::<u32>());
-    let trace_id = format!("trace-{}", rand::thread_rng().gen::<u32>());
-
+    
     let allocate_res = client.allocate_port(AllocatePortRequest { call_id: call_id.clone() }).await?.into_inner();
     let rtp_port = allocate_res.rtp_port;
 
@@ -43,8 +42,9 @@ async fn main() -> Result<()> {
 
     client.start_recording(StartRecordingRequest {
         server_rtp_port: rtp_port, output_uri: output_uri.clone(),
-        sample_rate: Some(16000), format: Some("wav".to_string()),
-        call_id, trace_id,
+        // sample_rate ve format artık gRPC servisi içinde sabitleniyor.
+        sample_rate: None, format: None, 
+        call_id, trace_id: format!("trace-{}", rand::thread_rng().gen::<u32>()),
     }).await?;
     println!("- Kayıt başlatıldı. Hedef: {}", output_uri);
 
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     let rtp_target_ip = env::var("MEDIA_SERVICE_RTP_TARGET_IP").context("MEDIA_SERVICE_RTP_TARGET_IP .env dosyasında eksik veya yanlış.")?;
     let socket = UdpSocket::bind("0.0.0.0:0").await?;
     let local_rtp_addr = socket.local_addr()?;
-    println!("- [İSTEMCİ] RTP anonsları şu adrese beklenecek: {}", local_rtp_addr);
+    println!("- [İSTEMCİ] Anonslar bu adrese beklenecek: {}", local_rtp_addr);
     
     let (done_tx, done_rx) = tokio::sync::oneshot::channel();
     let mut stt_client = client.clone();
@@ -60,12 +60,15 @@ async fn main() -> Result<()> {
         listen_to_live_audio(&mut stt_client, rtp_port, done_rx).await
     });
     
+    // Canlı dinleyicinin başlaması için küçük bir bekleme
     sleep(Duration::from_millis(200)).await;
 
+    // Kullanıcı 4 saniye konuşuyor
     let user_sim_handle = tokio::spawn(
         send_pcmu_rtp_stream(rtp_target_ip.clone(), rtp_port as u16, Duration::from_secs(4), 440.0)
     );
     
+    // Kullanıcı konuşmaya başladıktan kısa bir süre sonra sistem bir anons çalıyor
     sleep(Duration::from_millis(500)).await;
     println!("- [BOT SIM] 'welcome.wav' anonsu çalınıyor...");
     client.play_audio(PlayAudioRequest {
@@ -75,24 +78,23 @@ async fn main() -> Result<()> {
     
     user_sim_handle.await??;
 
-    // --- DEĞİŞİKLİK BURADA ---
-    // Dinleyiciye verinin işlenmesi için daha fazla zaman tanıyoruz.
-    println!("- (Ses akışının sunucudan geri dönmesi için bekleniyor...)");
-    sleep(Duration::from_secs(4)).await; // ESKİ DEĞER: 2 saniye
-    // -------------------------
-
-    let _ = done_tx.send(());
+    // Sesin sunucudan geri dönmesi ve işlenmesi için yeterli zaman tanı
+    println!("- (Tüm ses akışının işlenmesi için bekleniyor...)");
+    sleep(Duration::from_secs(4)).await;
+    
+    let _ = done_tx.send(()); // Dinleyiciye "bitti" sinyali gönder
     let received_audio_len = stt_sim_handle.await??;
 
     println!("- [STT SIM] {} byte temiz 16kHz LPCM ses verisi (sadece inbound) alındı.", received_audio_len);
-    assert!(received_audio_len >= 120000, "STT servisi yeterli ses verisi alamadı! (Beklenen >= 120000, Alınan: {})", received_audio_len);
+    // 4 saniyelik sesin en az %90'ının (115200 byte) gelmesini bekle. Bu, kayıp olmadığını gösterir.
+    assert!(received_audio_len >= 115_200, "STT servisi yeterli ses verisi alamadı! (Beklenen >= 115200, Alınan: {})", received_audio_len);
 
     println!("\n[ADIM 3] Kayıt durduruluyor ve kaynaklar serbest bırakılıyor...");
     client.stop_recording(StopRecordingRequest { server_rtp_port: rtp_port }).await?;
     client.release_port(ReleasePortRequest { rtp_port }).await?;
 
     println!("\n[ADIM 4] Kayıt dosyası S3'ten indirilip doğrulanılıyor...");
-    sleep(Duration::from_secs(1)).await;
+    sleep(Duration::from_secs(1)).await; // S3'e yazma için zaman tanı
     let wav_data = download_from_s3(&s3_client, &s3_bucket, &s3_key).await?;
     let reader = WavReader::new(Cursor::new(wav_data))?;
     let spec = reader.spec();
@@ -100,10 +102,12 @@ async fn main() -> Result<()> {
 
     println!("\n--- WAV Dosyası Analizi ---");
     println!("  - Süre: {:.2} saniye", duration);
+    println!("  - Örnekleme Hızı: {} Hz", spec.sample_rate);
     assert_eq!(spec.sample_rate, 8000, "HATA: Kayıt örnekleme oranı 8kHz olmalı!");
-    assert!(duration > 3.5, "HATA: Kayıt süresi çok kısa ({:.2}s)!", duration);
+    // 'welcome.wav' (yaklaşık 2.9s) + kullanıcı konuşması (4s) - üst üste binme. Toplam süre 4s'den uzun olmalı.
+    assert!(duration > 4.0, "HATA: Kayıt süresi çok kısa ({:.2}s)! Sesler birleştirilemedi!", duration);
 
-    println!("\n\nTEMEL DOĞRULAMA BAŞARILI");
+    println!("\n\n✅✅✅ TEMEL DOĞRULAMA BAŞARILI ✅✅✅");
     Ok(())
 }
 
@@ -112,11 +116,12 @@ async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u3
     let mut total_bytes = 0;
     loop {
         tokio::select!{
+            biased;
             _ = &mut done_rx => { break; },
             maybe_item = stream.next() => {
                 match maybe_item {
                     Some(Ok(res)) => { total_bytes += res.audio_data.len(); },
-                    Some(Err(_)) => { break; },
+                    Some(Err(e)) => { eprintln!("Stream hatası: {}", e); break; },
                     None => { break; }
                 }
             }

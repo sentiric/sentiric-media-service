@@ -1,4 +1,4 @@
-// File: src/grpc/error.rs (YENİ DOSYA)
+// src/grpc/error.rs
 use std::fmt::{Display, Formatter};
 use tonic::Status;
 

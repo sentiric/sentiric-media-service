@@ -194,21 +194,21 @@ mod tests {
     ];
 
     #[test]
-    fn test_pcmu_to_lpcm16_conversion() {
+    fn test_pcmu_to_lpcm16_conversion_produces_correct_length() {
         let result = decode_g711_to_lpcm16(&TEST_PCMU_PAYLOAD, AudioCodec::Pcmu);
-        assert!(result.is_ok(), "Dönüşüm başarısız olmamalıydı.");
+        assert!(result.is_ok(), "Dönüşüm başarısız olmamalıydı: {:?}", result.err());
         
         let samples_16khz = result.unwrap();
         
-        // 8kHz'den 16kHz'e yeniden örnekleme yapıldığı için, örnek sayısı yaklaşık iki katına çıkmalı.
-        // Resampler'ın çalışma şekline bağlı olarak tam olarak 2 katı olmayabilir.
-        let expected_min_len = (TEST_PCMU_PAYLOAD.len() * 2) - 10; // Küçük bir tolerans
-        let expected_max_len = (TEST_PCMU_PAYLOAD.len() * 2) + 10;
+        // 8kHz'den 16kHz'e yeniden örnekleme yapıldığı için, örnek sayısı tam olarak iki katına çıkmalı.
+        // Resampler'ın çalışma şekli precise'dir.
+        let expected_len = TEST_PCMU_PAYLOAD.len() * 2;
         
-        assert!(
-            samples_16khz.len() >= expected_min_len && samples_16khz.len() <= expected_max_len,
-            "Çıktı örnek sayısı beklenenden farklı. Beklenen aralık: {}-{}, Gelen: {}",
-            expected_min_len, expected_max_len, samples_16khz.len()
+        assert_eq!(
+            samples_16khz.len(),
+            expected_len,
+            "Çıktı örnek sayısı beklenenden farklı. Beklenen: {}, Gelen: {}",
+            expected_len, samples_16khz.len()
         );
 
         // Değerlerin i16 aralığında olduğundan emin olalım.
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lpcm16_to_g711_roundtrip() {
+    fn test_lpcm16_to_g711_roundtrip_preserves_signal_shape() {
         // 1. Adım: Başlangıç 16kHz LPCM verisi oluşturalım.
         let original_lpcm16: Vec<i16> = (0..320).map(|i| ((i as f32 * 0.1).sin() * 10000.0) as i16).collect();
         
@@ -225,8 +225,8 @@ mod tests {
         assert!(pcma_result.is_ok());
         let pcma_payload = pcma_result.unwrap();
 
-        // Çıktı boyutu yaklaşık yarısı olmalı.
-        assert!(pcma_payload.len() > 150 && pcma_payload.len() < 170);
+        // Çıktı boyutu tam olarak yarısı olmalı.
+        assert_eq!(pcma_payload.len(), 160);
 
         // 3. Adım: Oluşturulan PCMA'yı tekrar 16kHz LPCM'e decode edelim.
         let roundtrip_lpcm16_result = decode_g711_to_lpcm16(&pcma_payload, AudioCodec::Pcma);
@@ -235,19 +235,18 @@ mod tests {
 
         // 4. Adım: Sonuçları karşılaştıralım.
         // G.711 kayıplı bir sıkıştırma olduğu için birebir aynı olmayacaklar.
-        // Ancak boyutları çok yakın olmalı.
-        assert!((original_lpcm16.len() as i32 - roundtrip_lpcm16.len() as i32).abs() < 10);
+        // Ancak boyutları tam olarak aynı olmalı.
+        assert_eq!(original_lpcm16.len(), roundtrip_lpcm16.len());
         
         // Örneklerin ortalama farkının küçük olduğunu doğrulayalım.
-        let min_len = original_lpcm16.len().min(roundtrip_lpcm16.len());
         let total_diff: i64 = original_lpcm16.iter().zip(roundtrip_lpcm16.iter())
-            .take(min_len)
             .map(|(&a, &b)| (a as i64 - b as i64).abs())
             .sum();
         
-        let avg_diff = total_diff / min_len as i64;
+        let avg_diff = total_diff / original_lpcm16.len() as i64;
 
         // Ortalama farkın makul bir değerden (örn: 500) küçük olduğunu varsayalım.
+        // Bu değer, G.711'in beklenen kuantizasyon hatasını temsil eder.
         assert!(avg_diff < 500, "Roundtrip sonrası ortalama fark çok yüksek: {}", avg_diff);
     }
 }

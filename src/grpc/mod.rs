@@ -1,3 +1,3 @@
-// src/grpc/mod.rs (GÜNCELLENMİŞ)
+// src/grpc/mod.rs
 pub mod service;
-pub mod error; // YENİ
+pub mod error;

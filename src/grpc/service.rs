@@ -1,5 +1,6 @@
+// src/grpc/service.rs
 use crate::config::AppConfig;
-use crate::grpc::error::ServiceError;
+use crate::grpc::error::ServiceError; // YENİ
 use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
 use crate::rtp::command::{RecordingSession, RtpCommand};
 use crate::rtp::session::{rtp_session_handler, RtpSessionConfig};
@@ -44,6 +45,7 @@ impl MediaService for MyMediaService {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
         let call_id = request.get_ref().call_id.clone();
         info!(call_id = %call_id, "Port tahsis isteği alındı.");
+        
         const MAX_RETRIES: u8 = 5;
         for i in 0..MAX_RETRIES {
             let port_to_try = match self.app_state.port_manager.get_available_port().await {
@@ -54,6 +56,7 @@ impl MediaService for MyMediaService {
                     return Err(ServiceError::PortPoolExhausted.into());
                 }
             };
+            
             match UdpSocket::bind(format!("{}:{}", self.config.rtp_host, port_to_try)).await {
                 Ok(socket) => {
                     info!(port = port_to_try, "Port başarıyla bağlandı ve oturum başlatılıyor.");
@@ -88,8 +91,8 @@ impl MediaService for MyMediaService {
         if let Some(tx) = self.app_state.port_manager.get_session_sender(port).await {
             info!(port, "Oturum sonlandırma sinyali gönderiliyor.");
             if tx.send(RtpCommand::Shutdown).await.is_err() { 
-                warn!(port, "Shutdown komutu gönderilemedi (kanal zaten kapalı olabilir).");
-                gauge!(ACTIVE_SESSIONS).decrement(1.0);
+                warn!(port, "Shutdown komutu gönderilemedi (kanal zaten kapalı olabilir). Oturum muhtemelen daha önce kapatıldı.");
+                // Zaten kapalıysa metrik daha önce düşürülmüştür, tekrar düşürmeye gerek yok.
             }
         } else { 
             warn!(port, "Serbest bırakılacak oturum bulunamadı veya çoktan kapatılmış."); 
@@ -110,9 +113,6 @@ impl MediaService for MyMediaService {
             ServiceError::InvalidTargetAddress { addr: req.rtp_target_addr, source: e }
         })?;
 
-        // NOT: Mevcut anonsu kesme komutu (`StopAudio`) artık anons kuyruğu tarafından yönetildiği için burada gerekli değildir.
-        // Kuyruk mekanizması bu durumu doğal olarak çözer.
-
         let cancellation_token = CancellationToken::new();
         let command = RtpCommand::PlayAudioUri {
             audio_uri: req.audio_uri,
@@ -120,9 +120,7 @@ impl MediaService for MyMediaService {
             cancellation_token,
         };
 
-        if tx.send(command).await.is_err() {
-            return Err(ServiceError::CommandSendError("PlayAudioUri".to_string()).into());
-        }
+        tx.send(command).await.map_err(|_| ServiceError::CommandSendError("PlayAudioUri".to_string()))?;
 
         info!(port = rtp_port, "PlayAudio komutu başarıyla sıraya alındı.");
 
@@ -134,10 +132,7 @@ impl MediaService for MyMediaService {
 
     type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
     #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
-    async fn record_audio(
-        &self,
-        request: Request<RecordAudioRequest>,
-    ) -> Result<Response<Self::RecordAudioStream>, Status> {
+    async fn record_audio(&self, request: Request<RecordAudioRequest>) -> Result<Response<Self::RecordAudioStream>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "record_audio").increment(1);
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
@@ -155,9 +150,7 @@ impl MediaService for MyMediaService {
             target_sample_rate: req.target_sample_rate,
         };
 
-        if session_tx.send(command).await.is_err() {
-            return Err(ServiceError::CommandSendError("StartLiveAudioStream".to_string()).into());
-        }
+        session_tx.send(command).await.map_err(|_| ServiceError::CommandSendError("StartLiveAudioStream".to_string()))?;
 
         info!("RTP oturumuna canlı ses akışını başlatma komutu gönderildi.");
 
@@ -180,28 +173,20 @@ impl MediaService for MyMediaService {
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| ServiceError::SessionNotFound { port: rtp_port })?;
         
-        let call_id = req_ref.call_id.clone();
-        let trace_id = req_ref.trace_id.clone();
-
         let spec = WavSpec {
-            channels: 1,
-            sample_rate: req_ref.sample_rate.unwrap_or(16000),
-            bits_per_sample: 16,
-            sample_format: SampleFormat::Int,
+            channels: 1, sample_rate: 8000, // Kayıtlar her zaman 8kHz mono olacak
+            bits_per_sample: 16, sample_format: SampleFormat::Int,
         };
         
         let recording_session = RecordingSession {
-            output_uri: req_ref.output_uri.clone(),
-            spec,
-            inbound_samples: Vec::new(),
-            outbound_samples: Vec::new(),
-            call_id,
-            trace_id,
+            output_uri: req_ref.output_uri.clone(), spec,
+            inbound_samples: Vec::new(), outbound_samples: Vec::new(),
+            call_id: req_ref.call_id.clone(), trace_id: req_ref.trace_id.clone(),
         };
         
         let command = RtpCommand::StartPermanentRecording(recording_session);
-        session_tx.send(command).await
-            .map_err(|_| ServiceError::CommandSendError("StartPermanentRecording".to_string()))?;
+        session_tx.send(command).await.map_err(|_| ServiceError::CommandSendError("StartPermanentRecording".to_string()))?;
+        
         info!("Kalıcı kayıt komutu başarıyla gönderildi.");
         Ok(Response::new(StartRecordingResponse { success: true }))
     }
@@ -217,21 +202,15 @@ impl MediaService for MyMediaService {
         let (tx, rx) = oneshot::channel();
 
         let command = RtpCommand::StopPermanentRecording { responder: tx };
-        if session_tx.send(command).await.is_err() {
-            return Err(ServiceError::CommandSendError("StopPermanentRecording".to_string()).into());
-        }
+        session_tx.send(command).await.map_err(|_| ServiceError::CommandSendError("StopPermanentRecording".to_string()))?;
 
         match rx.await {
             Ok(Ok(final_uri)) => {
                 info!(uri = %final_uri, "Kayıt başarıyla tamamlandı ve kaydedildi.");
                 Ok(Response::new(StopRecordingResponse { success: true }))
             }
-            Ok(Err(e)) => {
-                Err(ServiceError::RecordingSaveFailed { source: e }.into())
-            }
-            Err(e) => {
-                Err(ServiceError::InternalError(anyhow::anyhow!(e)).into())
-            }
+            Ok(Err(e)) => Err(ServiceError::RecordingSaveFailed { source: e }.into()),
+            Err(e) => Err(ServiceError::InternalError(anyhow::anyhow!(e)).into()),
         }
     }
 }
