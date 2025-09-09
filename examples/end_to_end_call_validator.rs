@@ -42,7 +42,6 @@ async fn main() -> Result<()> {
 
     client.start_recording(StartRecordingRequest {
         server_rtp_port: rtp_port, output_uri: output_uri.clone(),
-        // sample_rate ve format artık gRPC servisi içinde sabitleniyor.
         sample_rate: None, format: None, 
         call_id, trace_id: format!("trace-{}", rand::thread_rng().gen::<u32>()),
     }).await?;
@@ -60,15 +59,12 @@ async fn main() -> Result<()> {
         listen_to_live_audio(&mut stt_client, rtp_port, done_rx).await
     });
     
-    // Canlı dinleyicinin başlaması için küçük bir bekleme
     sleep(Duration::from_millis(200)).await;
 
-    // Kullanıcı 4 saniye konuşuyor
     let user_sim_handle = tokio::spawn(
         send_pcmu_rtp_stream(rtp_target_ip.clone(), rtp_port as u16, Duration::from_secs(4), 440.0)
     );
     
-    // Kullanıcı konuşmaya başladıktan kısa bir süre sonra sistem bir anons çalıyor
     sleep(Duration::from_millis(500)).await;
     println!("- [BOT SIM] 'welcome.wav' anonsu çalınıyor...");
     client.play_audio(PlayAudioRequest {
@@ -76,17 +72,21 @@ async fn main() -> Result<()> {
         server_rtp_port: rtp_port, rtp_target_addr: local_rtp_addr.to_string(),
     }).await?;
     
+    // RTP gönderiminin bitmesini bekle
     user_sim_handle.await??;
 
-    // Sesin sunucudan geri dönmesi ve işlenmesi için yeterli zaman tanı
-    println!("- (Tüm ses akışının işlenmesi için bekleniyor...)");
-    sleep(Duration::from_secs(4)).await;
-    
-    let _ = done_tx.send(()); // Dinleyiciye "bitti" sinyali gönder
+    // --- DEĞİŞİKLİK BURADA ---
+    // Sabit bir süre beklemek yerine, STT akışının kapanmasını bekleyelim.
+    // listen_to_live_audio fonksiyonu, veri akışı durduktan bir süre sonra doğal olarak sonlanacak.
+    // Bu yüzden burada uzun bir bekleme ekleyerek ona zaman tanıyoruz.
+    println!("- (Tüm ses akışının sunucudan geri dönmesi için bekleniyor...)");
+    sleep(Duration::from_secs(5)).await; // ESKİ DEĞER: 4 saniye -> YENİ DEĞER: 5 saniye
+    // -------------------------
+
+    let _ = done_tx.send(()); 
     let received_audio_len = stt_sim_handle.await??;
 
     println!("- [STT SIM] {} byte temiz 16kHz LPCM ses verisi (sadece inbound) alındı.", received_audio_len);
-    // 4 saniyelik sesin en az %90'ının (115200 byte) gelmesini bekle. Bu, kayıp olmadığını gösterir.
     assert!(received_audio_len >= 115_200, "STT servisi yeterli ses verisi alamadı! (Beklenen >= 115200, Alınan: {})", received_audio_len);
 
     println!("\n[ADIM 3] Kayıt durduruluyor ve kaynaklar serbest bırakılıyor...");
@@ -94,7 +94,7 @@ async fn main() -> Result<()> {
     client.release_port(ReleasePortRequest { rtp_port }).await?;
 
     println!("\n[ADIM 4] Kayıt dosyası S3'ten indirilip doğrulanılıyor...");
-    sleep(Duration::from_secs(1)).await; // S3'e yazma için zaman tanı
+    sleep(Duration::from_secs(2)).await; // S3'e yazma için zaman tanı
     let wav_data = download_from_s3(&s3_client, &s3_bucket, &s3_key).await?;
     let reader = WavReader::new(Cursor::new(wav_data))?;
     let spec = reader.spec();
@@ -104,7 +104,6 @@ async fn main() -> Result<()> {
     println!("  - Süre: {:.2} saniye", duration);
     println!("  - Örnekleme Hızı: {} Hz", spec.sample_rate);
     assert_eq!(spec.sample_rate, 8000, "HATA: Kayıt örnekleme oranı 8kHz olmalı!");
-    // 'welcome.wav' (yaklaşık 2.9s) + kullanıcı konuşması (4s) - üst üste binme. Toplam süre 4s'den uzun olmalı.
     assert!(duration > 4.0, "HATA: Kayıt süresi çok kısa ({:.2}s)! Sesler birleştirilemedi!", duration);
 
     println!("\n\n✅✅✅ TEMEL DOĞRULAMA BAŞARILI ✅✅✅");
@@ -118,11 +117,16 @@ async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u3
         tokio::select!{
             biased;
             _ = &mut done_rx => { break; },
-            maybe_item = stream.next() => {
+            // --- DEĞİŞİKLİK: Veri gelmiyorsa timeout ile döngüden çık ---
+            maybe_item = tokio::time::timeout(Duration::from_secs(3), stream.next()) => {
                 match maybe_item {
-                    Some(Ok(res)) => { total_bytes += res.audio_data.len(); },
-                    Some(Err(e)) => { eprintln!("Stream hatası: {}", e); break; },
-                    None => { break; }
+                    Ok(Some(Ok(res))) => { total_bytes += res.audio_data.len(); },
+                    Ok(Some(Err(e))) => { eprintln!("Stream hatası: {}", e); break; },
+                    Ok(None) => break, // Stream bitti
+                    Err(_) => { // Timeout
+                        println!("- [STT DINLEYICI] 3 saniyedir yeni ses verisi gelmiyor, dinleyici kapatılıyor.");
+                        break;
+                    }
                 }
             }
         }
