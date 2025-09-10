@@ -71,8 +71,18 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         
         info!(bytes = wav_data.len(), "WAV verisi başarıyla oluşturuldu, hedefe yazılıyor.");
         
-        let writer = writers::from_uri(&output_uri_for_event, &app_state, &app_state.port_manager.config).await.context("Kayıt yazıcısı oluşturulamadı")?;
-        writer.write(wav_data).await.context("Veri yazılamadı")?;
+        let writer = writers::from_uri(&output_uri_for_event, &app_state, &app_state.port_manager.config)
+            .await
+            .context("Kayıt yazıcısı oluşturulamadı")?;
+
+        // --- DEĞİŞİKLİK BURADA ---
+        writer.write(wav_data).await.map_err(|e| {
+            // Asıl hatayı ve kaynağını logla
+            error!(source_error = ?e, "Kayıt verisi hedefe yazılamadı.");
+            // anyhow::Error'a dönüştürerek zinciri koru
+            anyhow::anyhow!(e).context("Veri yazılamadı")
+        })?;
+        // --- DEĞİŞİKLİK SONU ---
         
         Ok(())
     }.await;
