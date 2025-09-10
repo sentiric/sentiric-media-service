@@ -1,90 +1,94 @@
 # docker-compose.test.yml (SABİT IP ADRESLERİ İLE)
-version: '3.8'
 
 networks:
-  sentiric-test-net:
-    name: "${NETWORK_NAME:-sentiric-test-net}"
+  sentiric-net:
+    name: "${NETWORK_NAME:-sentiric-net}"
     driver: bridge
     ipam:
       config:
-        - subnet: "${NETWORK_SUBNET:-172.25.0.0/16}"
-          gateway: "${NETWORK_GATEWAY:-172.25.0.1}"
+        - subnet: ${NETWORK_SUBNET}
+          gateway: ${NETWORK_GATEWAY}
 
 volumes:
-  minio_test_data:
-  rabbitmq_test_data:
+  rabbitmq_data:
+  minio_data:
 
 services:
   rabbitmq:
     build: { context: ../sentiric-rabbitmq }
-    env_file: [".env.test"]
-    ports: ["15672:15672", "5672:5672"]
-    volumes: [rabbitmq_test_data:/var/lib/rabbitmq/]
+    env_file: ["${ENV_FILE_PATH}"]
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"      
+      - "${RABBITMQ_UI_PORT:-15672}:15672"   
+    volumes: [rabbitmq_data:/var/lib/rabbitmq/]
     networks:
-      sentiric-test-net:
-        ipv4_address: "${RABBITMQ_IPV4_ADDRESS}" # SABİT IP
+      sentiric-net:
+        ipv4_address: ${RABBITMQ_IPV4_ADDRESS}
+    restart: always
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "ping"]
       interval: 30s
       timeout: 10s
       retries: 3
-    restart: always
 
   minio:
     image: quay.io/minio/minio
-    env_file: [".env.test"]
+    env_file: ["${ENV_FILE_PATH}"]
     command: server /data --console-address ":9001"
-    ports: ["9000:9000", "9001:9001"]
-    volumes: [minio_test_data:/data]
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
     networks:
-      sentiric-test-net:
-        ipv4_address: "${MINIO_IPV4_ADDRESS}" # SABİT IP
+      sentiric-net:
+        ipv4_address: ${MINIO_IPV4_ADDRESS}
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      interval: 30s
+      timeout: 20s
+      retries: 3
     restart: always
 
   media-service:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    env_file: [".env.test"]
+    build: { context: ../sentiric-media-service }
+    env_file: ["${ENV_FILE_PATH}"]
     volumes:
-      - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
+      - "../sentiric-media-record:${MEDIA_SERVICE_RECORD_BASE_PATH}:rw"
       - "../sentiric-assets:/app/assets:ro"
-    ports: 
-      - "${MEDIA_SERVICE_PORT}:${MEDIA_SERVICE_PORT}"
-      - "${MEDIA_SERVICE_METRICS_PORT}:${MEDIA_SERVICE_METRICS_PORT}"      
-      - "${MEDIA_SERVICE_GRPC_PORT}:${MEDIA_SERVICE_GRPC_PORT}"
-      - "${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}:${RTP_SERVICE_PORT_MIN}-${RTP_SERVICE_PORT_MAX}/udp"      
+      - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
+    ports:
+      - "${MEDIA_SERVICE_PORT:-5002}:5002}"
+      #- "${MEDIA_SERVICE_METRICS_PORT:-9091}:9091"      
+      - "${MEDIA_SERVICE_GRPC_PORT:-50052}:50052"
+      - "${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}:${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}/udp"
     networks:
-      sentiric-test-net:
-        ipv4_address: "${MEDIA_SERVICE_IPV4_ADDRESS}" # SABİT IP
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "50052"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-      start_period: 5s
+      sentiric-net:
+        ipv4_address: ${MEDIA_SERVICE_IPV4_ADDRESS}
+    restart: always
     depends_on: {
       minio: { condition: service_healthy },
       rabbitmq: { condition: service_healthy },
-    }             
-    restart: always
+    } 
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "50052"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s    
 
   test-runner:
     build:
       context: .
       dockerfile: Dockerfile.test
-    env_file: [".env.test"]
-    environment:
-      - ENV_FILE=.env.test
+    env_file: ["${ENV_FILE_PATH}"]
     networks:
-      - sentiric-test-net # IP'ye ihtiyacı yok, diğerlerine IP'leri üzerinden erişecek
+      sentiric-net:
+        ipv4_address: ${TEST_RUNNER_IPV4_ADDRESS}
     volumes:
       - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
-    depends_on:
-      media-service:
-        condition: service_healthy
+    depends_on: {
+      minio: { condition: service_healthy },
+      rabbitmq: { condition: service_healthy },
+      media-service: { condition: service_healthy },
+    } 

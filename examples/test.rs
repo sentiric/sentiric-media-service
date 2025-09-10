@@ -22,10 +22,10 @@ macro_rules! assert_env {
 #[tokio::main]
 async fn main() {
     // .env dosyasını yükle
-    match dotenvy::from_filename("development.env") {
-        Ok(_) => println!("'development.env' dosyası başarıyla yüklendi."),
+    match dotenvy::from_filename(".env.development") {
+        Ok(_) => println!("'.env.development' dosyası başarıyla yüklendi."),
         Err(e) => {
-            panic!("'development.env' dosyası yüklenemedi: {}", e);
+            panic!("'.env.development' dosyası yüklenemedi: {}", e);
         }
     };
 

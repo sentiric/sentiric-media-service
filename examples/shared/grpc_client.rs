@@ -13,8 +13,8 @@ pub async fn connect_to_media_service() -> Result<MediaServiceClient<Channel>> {
     let server_addr = format!("https://{}", media_service_grpc_url);
 
     // Sertifika doğrulaması için host adını (CN/SAN) kullan
-    let media_service_host_name = env::var("MEDIA_SERVICE_HOST_NAME")
-        .expect("Sertifika doğrulaması için MEDIA_SERVICE_HOST_NAME gereklidir.");
+    let media_service_host_name = env::var("MEDIA_SERVICE_HOST")
+        .expect("Sertifika doğrulaması için MEDIA_SERVICE_HOST gereklidir.");
 
     let client_identity = Identity::from_pem(tokio::fs::read(&client_cert_path).await?, tokio::fs::read(&client_key_path).await?);
     let server_ca_certificate = Certificate::from_pem(tokio::fs::read(&ca_path).await?);

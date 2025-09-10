@@ -91,7 +91,7 @@ fn process_audio_chunk_for_test(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::from_filename("development.env").ok();
+    dotenvy::from_filename(".env.development").ok();
     println!("--- Canlı Ses Akışı Test İstemcisi Başlatılıyor ---");
 
     let mut client = connect_to_media_service().await?;
