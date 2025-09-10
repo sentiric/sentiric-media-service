@@ -58,7 +58,7 @@ services:
       - "../sentiric-assets:/app/assets:ro"
       - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
     ports:
-      - "${MEDIA_SERVICE_PORT:-5002}:5002}"
+      - "${MEDIA_SERVICE_PORT:-5002}:5002"
       #- "${MEDIA_SERVICE_METRICS_PORT:-9091}:9091"      
       - "${MEDIA_SERVICE_GRPC_PORT:-50052}:50052"
       - "${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}:${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}/udp"
