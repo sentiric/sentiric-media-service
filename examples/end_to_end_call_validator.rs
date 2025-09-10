@@ -35,9 +35,18 @@ async fn main() -> Result<()> {
     
     let allocate_res = client.allocate_port(AllocatePortRequest { call_id: call_id.clone() }).await?.into_inner();
     let rtp_port = allocate_res.rtp_port;
+    
+    // MEDIA_SERVICE_RECORD_BASE_PATH, .env'den "/sentiric-media-record" olarak gelir.
+    let base_path = env::var("MEDIA_SERVICE_RECORD_BASE_PATH")?;
 
     let s3_bucket = env::var("S3_BUCKET_NAME")?;
-    let s3_key = format!("test/test_validation_{}.wav", rtp_port);
+
+    // S3 key'ini oluştururken baştaki '/' karakterini kaldırıyoruz.
+    // Bu, sunucudaki writers.rs mantığıyla %100 uyumlu olmasını sağlar.
+    let s3_key_prefix = base_path.trim_start_matches('/');
+
+    let s3_key = format!("{}/validation_{}.wav", s3_key_prefix, rtp_port);
+
     let output_uri = format!("s3://{}/{}", s3_bucket, s3_key);
 
     client.start_recording(StartRecordingRequest {
@@ -105,6 +114,7 @@ async fn main() -> Result<()> {
     // println!("- (S3 tutarlılığı ve dosyanın yazılması için 10 saniye bekleniyor...)");
     // sleep(Duration::from_secs(10)).await; // ESKİ DEĞER: 3 saniye -> YENİ DEĞER: 10 saniye
     // -------------------------
+    // Dosyayı indirirken de aynı s3_key'i kullanırız.
     let wav_data = download_from_s3(&s3_client, &s3_bucket, &s3_key).await?;
     let reader = WavReader::new(Cursor::new(wav_data))?;
     let spec = reader.spec();

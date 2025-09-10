@@ -55,7 +55,9 @@ services:
     build: { context: ../sentiric-media-service }
     env_file: ["${ENV_FILE_PATH}"]
     volumes:
-      - "../sentiric-media-record:${MEDIA_SERVICE_RECORD_BASE_PATH}:rw"
+      # Host tarafı -> Container tarafı
+      # Container'daki yolu /sentiric-media-record olarak sabitliyoruz.
+      - "..${MEDIA_SERVICE_RECORD_BASE_PATH:-/sentiric-media-record}:${MEDIA_SERVICE_RECORD_BASE_PATH:-/sentiric-media-record}:rw"
       - "../sentiric-assets:/app/assets:ro"
       - "${CONFIG_REPO_PATH}/tls/certs:/etc/sentiric/tls:ro"
     ports:

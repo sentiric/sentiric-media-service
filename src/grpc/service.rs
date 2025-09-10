@@ -22,7 +22,8 @@ use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{info, instrument, warn};
-
+use tracing::field; // En üste ekleyin
+use url::Url; // Gerekirse en üste ekleyin
 pub struct MyMediaService {
     app_state: AppState,
     config: Arc<AppConfig>,
@@ -100,10 +101,29 @@ impl MediaService for MyMediaService {
         Ok(Response::new(ReleasePortResponse { success: true }))
     }
     
-    #[instrument(skip(self, request), fields(port = request.get_ref().server_rtp_port, uri_scheme = extract_uri_scheme(&request.get_ref().audio_uri)))]
+    #[instrument(skip(self, request), fields(
+        port = %request.get_ref().server_rtp_port,
+        // --- DEĞİŞİKLİK BURADA ---
+        audio_uri.scheme = %extract_uri_scheme(&request.get_ref().audio_uri),
+        audio_uri.len = field::Empty, // Başta boş bırak
+    ))]
     async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "play_audio").increment(1);
+
         let req = request.into_inner();
+        let span = tracing::Span::current(); // Mevcut span'ı al
+
+        // URI'nin uzunluğunu logla, kendisini değil.
+        span.record("audio_uri.len", &req.audio_uri.len());
+        if req.audio_uri.starts_with("data:") {
+            // Eğer data URI ise, sadece ilk 50 karakteri logla
+            let truncated_uri = &req.audio_uri[..std::cmp::min(50, req.audio_uri.len())];
+            info!(audio_uri.preview = %truncated_uri, "PlayAudio komutu (data URI) alındı.");
+        } else {
+            info!(audio_uri = %req.audio_uri, "PlayAudio komutu (file URI) alındı.");
+        }
+
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "play_audio").increment(1);
         let rtp_port = req.server_rtp_port as u16;
 
         let tx = self.app_state.port_manager.get_session_sender(rtp_port).await
@@ -164,10 +184,30 @@ impl MediaService for MyMediaService {
         Ok(Response::new(Box::pin(output_stream)))
     }
 
-    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port, uri = %request.get_ref().output_uri))]
+    #[instrument(skip(self, request), fields(
+        port = %request.get_ref().server_rtp_port,
+        // --- DEĞİŞİKLİK BURADA ---
+        output.scheme = field::Empty,
+        output.bucket = field::Empty,
+        output.key = field::Empty,
+        call_id = %request.get_ref().call_id,
+        trace_id = %request.get_ref().trace_id,
+    ))]
     async fn start_recording(&self, request: Request<StartRecordingRequest>) -> Result<Response<StartRecordingResponse>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "start_recording").increment(1);
+
         let req_ref = request.get_ref();
+        if let Ok(url) = Url::parse(&req_ref.output_uri) {
+            let span = tracing::Span::current();
+            span.record("output.scheme", url.scheme());
+            if let Some(host) = url.host_str() {
+                span.record("output.bucket", host);
+            }
+            span.record("output.key", url.path());
+        }
+        
+        info!("Kalıcı kayıt başlatma isteği alındı.");
+        
         let rtp_port = req_ref.server_rtp_port as u16;
         
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await

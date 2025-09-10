@@ -28,8 +28,8 @@ async fn main() -> Result<()> {
         call_id: call_id.clone(),
     }).await?;
     let rtp_port = allocate_res.into_inner().rtp_port;
-
-    let output_uri = format!("s3:///test/test_recording_client_{}.wav", rtp_port);
+    // MEDIA_SERVICE_RECORD_BASE_PATH="/sentiric-media-record"
+    let output_uri = format!("s3:///sentiric-media-record/recording_client_{}.wav", rtp_port);
 
     
     println!("\nAdim 1: Kayit baslatiliyor. Hedef: {}", output_uri);
