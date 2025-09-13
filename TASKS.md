@@ -43,7 +43,18 @@ Bu belge, media-service'in geliştirme yol haritasını, tamamlanan görevleri v
 
 ---
 
-### **FAZ 4: Gelişmiş Medya Özellikleri (Gelecek Vizyonu)**
+### **FAZ 4: Gelişmiş Hata Yönetimi ve Dayanıklılık (Sıradaki Öncelik)**
+
+**Amaç:** Servisin, bağımlı olduğu altyapılardaki (özellikle S3) hataları daha anlamlı bir şekilde yakalayıp, kendisini çağıran servislere (agent-service) daha net bilgi vermesini sağlamak.
+
+-   **Görev ID: MEDIA-IMPRV-03 - feat(error-handling): S3 Hatalarını Daha Detaylı gRPC Durumlarına Eşle**
+    -   **Durum:** ⬜ **Yapılacak (Öncelik 1 - YÜKSEK)**
+    -   **Açıklama:** Şu anda `StopRecording` başarısız olduğunda, `agent-service`'e genel bir "Internal Error" dönülüyor. Bu durum, `agent-service`'in hatanın nedenini anlamasını engelliyor. `NoSuchBucket` gibi spesifik S3 hataları, daha anlamlı gRPC durum kodlarına (örn: `FailedPrecondition`) ve mesajlarına dönüştürülmelidir.
+    -   **Kabul Kriterleri:**
+        -   [ ] `rtp/session_utils.rs` içindeki `finalize_and_save_recording` fonksiyonunda, `writers::from_uri` veya `writer.write`'tan dönen hatalar detaylı olarak incelenmelidir.
+        -   [ ] Eğer hata metni "NoSuchBucket" içeriyorsa, `tonic::Status::failed_precondition("Kayıt hedefi (S3 Bucket) bulunamadı veya yapılandırılmamış.")` gibi bir hata döndürülmelidir.
+        -   [ ] Eğer hata "Access Denied" içeriyorsa, `tonic::Status::permission_denied("S3 Bucket'ına yazma izni yok.")` gibi bir hata döndürülmelidir.
+        -   [ ] Bu değişiklik sonrası, altyapıdaki `INFRA-FIX-01` görevi yapılmadan test edildiğinde, `agent-service` loglarında artık "Internal Error" yerine "FailedPrecondition: Kayıt hedefi bulunamadı..." gibi anlamlı bir hata görülmelidir.
 
 -   **Görev ID: MEDIA-FEAT-01 - Codec Müzakeresi**
     -   **Durum:** ⬜ **Planlandı**
