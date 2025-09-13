@@ -1,0 +1,45 @@
+# docker-compose.dev.yml
+# Service Geliştirme ortamı
+
+networks:
+  sentiric-net:
+    name: "${NETWORK_NAME:-sentiric-net}"
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${NETWORK_SUBNET}
+          gateway: ${NETWORK_GATEWAY}
+  
+# volumes:
+  # [infra]: Temel Altyapı (Infrastructure Layer)
+  # --------------------------------------------------
+
+services:
+  # [core-service]: Çekirdek Servisler ve Kütüphaneler (Core Layer)
+  # -------------------------------------------------- 
+  media-service:
+    image: ghcr.io/sentiric/sentiric-media-service:${TAG:-latest}
+    env_file: ["${ENV_FILE_PATH}"]
+    volumes: 
+      - "${CONFIG_REPO_PATH}:/sentiric-config:ro"
+      - "${CERTIFICATES_REPO_PATH}:/sentiric-certificates:ro"
+      - "${ASSETS_REPO_PATH}:/sentiric-assets:ro"
+    ports: 
+      - "13030:${MEDIA_SERVICE_HTTP_PORT:-13030}"
+      - "13031:${MEDIA_SERVICE_GRPC_PORT:-13031}"
+      - "13032:${MEDIA_SERVICE_METRICS_PORT:-13032}"   
+      - "${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}:${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}/udp"
+    networks:
+      sentiric-net:
+        ipv4_address: ${MEDIA_SERVICE_IPV4_ADDRESS}    
+    restart: always
+    # depends_on: {
+    #   minio: { condition: service_healthy },
+    #   rabbitmq: { condition: service_healthy },
+    # } 
+    # healthcheck:
+    #   test: ["CMD", "nc", "-z", "localhost", "13030"]
+    #   interval: 10s
+    #   timeout: 5s
+    #   retries: 5
+    #   start_period: 10s

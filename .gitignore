@@ -20,8 +20,13 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Ortam değişkenleri
+# Ortam dosyaları
 .env
+!.env.example          # örnek config dosyasını tut
+
+# Çalışma zamanı veya geçici dosyalar
+.env.generated
+.profile.state
 
 # Loglar
 *.log

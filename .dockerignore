@@ -29,6 +29,6 @@ Thumbs.db
 .env
 .env.*
 
-# Docker-compose vs.
+# Docker compose 
 docker-compose.yml
-docker-compose.override.yml
+docker-compose.*.yml

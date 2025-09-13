@@ -34,6 +34,8 @@ pub struct AppConfig {
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
         let grpc_port: u16 = env::var("MEDIA_SERVICE_GRPC_PORT").context("MEDIA_SERVICE_GRPC_PORT eksik")?.parse()?;
+        let metrics_port: u16 = env::var("MEDIA_SERVICE_METRICS_PORT").unwrap_or_else(|_| "13032".to_string()).parse().context("MEDIA_SERVICE_METRICS_PORT geçerli bir sayı olmalı")?;
+        
         let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN").context("RTP_SERVICE_PORT_MIN eksik")?.parse()?;
         let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX").context("RTP_SERVICE_PORT_MAX eksik")?.parse()?;
             
@@ -42,18 +44,18 @@ impl AppConfig {
         }
 
         let quarantine_seconds: u64 = env::var("RTP_SERVICE_PORT_QUARANTINE_SECONDS").unwrap_or_else(|_| "5".to_string()).parse().context("RTP_SERVICE_PORT_QUARANTINE_SECONDS geçerli bir sayı olmalı")?;
-        let metrics_port: u16 = env::var("MEDIA_SERVICE_METRICS_PORT").unwrap_or_else(|_| "9091".to_string()).parse().context("MEDIA_SERVICE_METRICS_PORT geçerli bir sayı olmalı")?;
+
         let inactivity_seconds: u64 = env::var("RTP_SESSION_INACTIVITY_TIMEOUT_SECONDS").unwrap_or_else(|_| "30".to_string()).parse()?;
         let command_buffer: usize = env::var("RTP_COMMAND_CHANNEL_BUFFER").unwrap_or_else(|_| "32".to_string()).parse()?;
         let stream_buffer: usize = env::var("LIVE_AUDIO_STREAM_BUFFER").unwrap_or_else(|_| "64".to_string()).parse()?;
 
-        let s3_config = if env::var("S3_ENDPOINT_URL").is_ok() {
+        let s3_config = if env::var("BUCKET_ENDPOINT_URL").is_ok() {
             Some(S3Config {
-                endpoint_url: env::var("S3_ENDPOINT_URL").context("S3_ENDPOINT_URL eksik")?,
-                region: env::var("S3_REGION").context("S3_REGION eksik")?,
-                access_key_id: env::var("S3_ACCESS_KEY_ID").context("S3_ACCESS_KEY_ID eksik")?,
-                secret_access_key: env::var("S3_SECRET_ACCESS_KEY").context("S3_SECRET_ACCESS_KEY eksik")?,
-                bucket_name: env::var("S3_BUCKET_NAME").context("S3_BUCKET_NAME eksik")?,
+                endpoint_url: env::var("BUCKET_ENDPOINT_URL").context("BUCKET_ENDPOINT_URL eksik")?,
+                region: env::var("BUCKET_REGION").context("BUCKET_REGION eksik")?,
+                access_key_id: env::var("BUCKET_ACCESS_KEY_ID").context("BUCKET_ACCESS_KEY_ID eksik")?,
+                secret_access_key: env::var("BUCKET_SECRET_ACCESS_KEY").context("BUCKET_SECRET_ACCESS_KEY eksik")?,
+                bucket_name: env::var("BUCKET_NAME").context("BUCKET_NAME eksik")?,
             })
         } else {
             None

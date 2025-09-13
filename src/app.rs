@@ -29,7 +29,7 @@ pub struct App {
 impl App {
     // bootstrap, uygulamayı yapılandırır ve başlatılmaya hazır hale getirir.
     pub async fn bootstrap() -> Result<Self> {
-        let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env.docker".to_string());
+        let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
         if let Err(e) = dotenvy::from_filename(&env_file) {
             warn!(file = %env_file, error = %e, "Ortam değişkenleri dosyası yüklenemedi (bu bir hata olmayabilir).");
         }
