@@ -4,10 +4,10 @@ use aws_sdk_s3::Client as S3Client;
 use std::env;
 
 pub async fn connect_to_s3() -> Result<S3Client> {
-    let access_key_id = env::var("S3_ACCESS_KEY_ID")?;
-    let secret_access_key = env::var("S3_SECRET_ACCESS_KEY")?;
-    let endpoint_url = env::var("S3_ENDPOINT_URL")?;
-    let region = env::var("S3_REGION")?;
+    let access_key_id = env::var("BUCKET_ACCESS_KEY_ID")?;
+    let secret_access_key = env::var("BUCKET_SECRET_ACCESS_KEY")?;
+    let endpoint_url = env::var("BUCKET_ENDPOINT_URL")?;
+    let region = env::var("BUCKET_REGION")?;
     
     let credentials_provider = aws_credential_types::Credentials::new(
         access_key_id, secret_access_key, None, None, "Static"

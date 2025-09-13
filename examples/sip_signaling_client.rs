@@ -14,11 +14,11 @@ use sentiric_contracts::sentiric::media::v1::{
 #[tokio::main]
 async fn main() -> Result<()> {
     // DEĞİŞİKLİK: .ok() yerine, sonucu kontrol edip hata varsa panic'e zorluyoruz.
-    match dotenvy::from_filename(".env.development") {
-        Ok(_) => println!("'.env.development' dosyası istemci için başarıyla yüklendi."),
+    match dotenvy::from_filename(".env.example") {
+        Ok(_) => println!("'.env.example' dosyası istemci için başarıyla yüklendi."),
         Err(e) => {
             // Test istemcisi için panic! daha uygundur, çünkü loglama altyapısı kurulmamış olabilir.
-            panic!("'.env.development' dosyası yüklenemedi: {}", e);
+            panic!("'.env.example' dosyası yüklenemedi: {}", e);
         }
     };
     
@@ -26,8 +26,8 @@ async fn main() -> Result<()> {
     println!("--- SENARYO: Media Service'in kapasitesi kontrol edilecek. ---");
 
     // 1. Sertifika yollarını sip-signaling-service için güncelle
-    let client_cert_path = env::var("SIP_SIGNALING_SERVICE_CERT_PATH")?;
-    let client_key_path = env::var("SIP_SIGNALING_SERVICE_KEY_PATH")?;
+    let client_cert_path = env::var("SIP_SIGNALING_CERT_PATH")?;
+    let client_key_path = env::var("SIP_SIGNALING_KEY_PATH")?;
     let ca_path = env::var("GRPC_TLS_CA_PATH")?;
     
     // Bağlanılacak Media Service adresi

@@ -91,7 +91,7 @@ fn process_audio_chunk_for_test(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::from_filename(".env.development").ok();
+    dotenvy::from_filename(".env.example").ok();
     println!("--- Canlı Ses Akışı Test İstemcisi Başlatılıyor ---");
 
     let mut client = connect_to_media_service().await?;
@@ -116,7 +116,7 @@ async fn main() -> Result<()> {
 
     // --- RTP Gönderici Task'ını Başlat ---
     println!("\nAdım 3: {} saniye boyunca RTP paketleri gönderiliyor...", TEST_DURATION_SECONDS);
-    let rtp_target_ip = env::var("MEDIA_SERVICE_RTP_TARGET_IP").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let rtp_target_ip = env::var("RTP_SERVICE_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let original_payload = send_rtp_packets(&rtp_target_ip, rtp_port as u16, TEST_DURATION_SECONDS).await?;
     println!("✅ RTP gönderimi tamamlandı.");
 

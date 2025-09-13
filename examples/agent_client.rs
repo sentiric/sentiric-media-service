@@ -14,7 +14,7 @@ use sentiric_contracts::sentiric::media::v1::{
 #[tokio::main]
 async fn main() -> Result<()> {
     // --- DEĞİŞİKLİK: ESNEK .ENV YÜKLEME ---
-    let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env.development".to_string());
+    let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env.example".to_string());
     match dotenvy::from_filename(&env_file) {
         Ok(_) => println!("'{}' dosyası istemci için başarıyla yüklendi.", env_file),
         Err(e) => {

@@ -186,11 +186,11 @@ async fn run_worker(worker_id: usize, config: SimulatorConfig, stats: Arc<SimSta
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    match dotenvy::from_filename("development.env") {
-        Ok(_) => println!("'development.env' dosyası istemci için başarıyla yüklendi."),
+    match dotenvy::from_filename(".env.example") {
+        Ok(_) => println!("'.env.example' dosyası istemci için başarıyla yüklendi."),
         Err(e) => {
             // Test istemcisi için panic! daha uygundur, çünkü loglama altyapısı kurulmamış olabilir.
-            panic!("'development.env' dosyası yüklenemedi: {}", e);
+            panic!("'.env.example' dosyası yüklenemedi: {}", e);
         }
     };
     // rand ve chrono'nun Cargo.toml'da olduğundan emin olun

@@ -22,10 +22,10 @@ macro_rules! assert_env {
 #[tokio::main]
 async fn main() {
     // .env dosyasını yükle
-    match dotenvy::from_filename(".env.development") {
-        Ok(_) => println!("'.env.development' dosyası başarıyla yüklendi."),
+    match dotenvy::from_filename(".env.example") {
+        Ok(_) => println!("'.env.example' dosyası başarıyla yüklendi."),
         Err(e) => {
-            panic!("'.env.development' dosyası yüklenemedi: {}", e);
+            panic!("'.env.example' dosyası yüklenemedi: {}", e);
         }
     };
 
@@ -52,7 +52,7 @@ fn test_environment_variables() {
     assert_env!("COMPOSE_HTTP_TIMEOUT");
 
     // --- 12-Factor App Prensipleri ---
-    assert_env!("SENTIRIC_DATA_PATH");
+    assert_env!("KNOWLEDGE_SERVICE_DATA_PATH");
 
     // --- Sertifika Yolları ---
     assert_env!("GRPC_TLS_CA_PATH");
@@ -71,8 +71,11 @@ fn test_environment_variables() {
     assert_env!("MEDIA_SERVICE_GRPC_PORT");
     assert_env!("MEDIA_SERVICE_GRPC_URL");
     assert_env!("MEDIA_SERVICE_METRICS_PORT");
-    assert_env!("MEDIA_SERVICE_PUBLIC_IP");
-    assert_env!("MEDIA_SERVICE_RTP_TARGET_IP");
+
+    assert_env!("SIP_GATEWAY_IPV4_EXTERNAL_ADDRESS");
+    assert_env!("SIP_SIGNALING_IPV4_EXTERNAL_ADDRESS");    
+    assert_env!("RTP_SERVICE_HOST");    
+    assert_env!("DETECTED_IP");
     assert_env!("MEDIA_SERVICE_RECORD_BASE_PATH");
 
     // --- RTP Ayarları ---
@@ -85,13 +88,13 @@ fn test_environment_variables() {
     assert_env!("ASSETS_BASE_PATH");
 
     // --- S3 Ayarları ---
-    assert_env!("S3_PUBLIC_BASE_URL");
-    assert_env!("S3_ENDPOINT_URL");
-    assert_env!("S3_REGION");
-    assert_env!("S3_BUCKET_NAME");
-    assert_env!("S3_ACCESS_KEY_ID");
-    assert_env!("S3_SECRET_ACCESS_KEY");
-    assert_env!("S3_TOKEN");
+    assert_env!("BUCKET_PUBLIC_BASE_URL");
+    assert_env!("BUCKET_ENDPOINT_URL");
+    assert_env!("BUCKET_REGION");
+    assert_env!("BUCKET_NAME");
+    assert_env!("BUCKET_ACCESS_KEY_ID");
+    assert_env!("BUCKET_SECRET_ACCESS_KEY");
+    assert_env!("BUCKET_TOKEN");
 
     // --- Sertifika Yolları (Detaylı) ---
     assert_env!("GRPC_TLS_CA_PATH");
@@ -103,8 +106,8 @@ fn test_environment_variables() {
     assert_env!("USER_SERVICE_KEY_PATH");
     assert_env!("DIALPLAN_SERVICE_CERT_PATH");
     assert_env!("DIALPLAN_SERVICE_KEY_PATH");
-    assert_env!("SIP_SIGNALING_SERVICE_CERT_PATH");
-    assert_env!("SIP_SIGNALING_SERVICE_KEY_PATH");
+    assert_env!("SIP_SIGNALING_CERT_PATH");
+    assert_env!("SIP_SIGNALING_KEY_PATH");
 
     // Değerleri kontrol et (opsiyonel)
     check_certificate_paths();
@@ -125,8 +128,8 @@ fn check_certificate_paths() {
         "USER_SERVICE_KEY_PATH",
         "DIALPLAN_SERVICE_CERT_PATH",
         "DIALPLAN_SERVICE_KEY_PATH",
-        "SIP_SIGNALING_SERVICE_CERT_PATH",
-        "SIP_SIGNALING_SERVICE_KEY_PATH",
+        "SIP_SIGNALING_CERT_PATH",
+        "SIP_SIGNALING_KEY_PATH",
     ];
 
     for path_var in cert_paths.iter() {
@@ -147,19 +150,19 @@ fn check_certificate_paths() {
 
 fn check_minio_settings() {
     println!("MinIO Ayarları:");
-    println!("  Endpoint: {}", env::var("S3_ENDPOINT_URL").unwrap_or_default());
-    println!("  Bucket: {}", env::var("S3_BUCKET_NAME").unwrap_or_default());
-    println!("  Access Key: {}", env::var("S3_ACCESS_KEY_ID").unwrap_or_default());
+    println!("  Endpoint: {}", env::var("BUCKET_ENDPOINT_URL").unwrap_or_default());
+    println!("  Bucket: {}", env::var("BUCKET_NAME").unwrap_or_default());
+    println!("  Access Key: {}", env::var("BUCKET_ACCESS_KEY_ID").unwrap_or_default());
     
-    let secret = env::var("S3_SECRET_ACCESS_KEY").unwrap_or_default();
+    let secret = env::var("BUCKET_SECRET_ACCESS_KEY").unwrap_or_default();
     println!("  Secret Key: {}", if secret.is_empty() { "AYARLANMAMIŞ" } else { "AYARLANDI" });
 }
 
 fn check_media_service_settings() {
     println!("Media Service Ayarları:");
     println!("  Host: {}", env::var("MEDIA_SERVICE_HOST").unwrap_or_default());
-    println!("  Port: {}", env::var("MEDIA_SERVICE_PORT").unwrap_or_default());
+    println!("  Port: {}", env::var("MEDIA_SERVICE_HTTP_PORT").unwrap_or_default());
     println!("  GRPC Port: {}", env::var("MEDIA_SERVICE_GRPC_PORT").unwrap_or_default());
-    println!("  Public IP: {}", env::var("MEDIA_SERVICE_PUBLIC_IP").unwrap_or_default());
+    println!("  Public IP: {}", env::var("DETECTED_IP").unwrap_or_default());
 }
 

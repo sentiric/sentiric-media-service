@@ -15,11 +15,11 @@ use sentiric_contracts::sentiric::media::v1::{
 #[tokio::main]
 async fn main() -> Result<()> {
     // DEĞİŞİKLİK: .ok() yerine, sonucu kontrol edip hata varsa panic'e zorluyoruz.
-    match dotenvy::from_filename(".env.development") {
-        Ok(_) => println!("'.env.development' dosyası istemci için başarıyla yüklendi."),
+    match dotenvy::from_filename(".env.example") {
+        Ok(_) => println!("'.env.example' dosyası istemci için başarıyla yüklendi."),
         Err(e) => {
             // Test istemcisi için panic! daha uygundur, çünkü loglama altyapısı kurulmamış olabilir.
-            panic!("'development.env' dosyası yüklenemedi: {}", e);
+            panic!("'.env.example' dosyası yüklenemedi: {}", e);
         }
     };
 

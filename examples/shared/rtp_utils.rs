@@ -18,8 +18,8 @@ pub async fn send_pcmu_rtp_stream(
     frequency: f32,
 ) -> Result<()> {
     // --- DEĞİŞİKLİK BURADA ---
-    let host = env::var("MEDIA_SERVICE_RTP_TARGET_IP")
-        .context("MEDIA_SERVICE_RTP_TARGET_IP ortam değişkeni bulunamadı.")?;
+    let host = env::var("RTP_SERVICE_HOST")
+        .context("RTP_SERVICE_HOST ortam değişkeni bulunamadı.")?;
     // --- DEĞİŞİKLİK SONU ---
 
     let mut pcm_8k = Vec::new();

@@ -15,7 +15,7 @@ use rand::Rng;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    dotenvy::from_filename(".env.test").ok();
+    dotenvy::from_filename(".env.example").ok();
     println!("--- Gercek Kayit Simulasyonu (Programatik RTP Akisi ile) ---");
 
     let mut client = connect_to_media_service().await?;
@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
 
     println!("\nAdim 2: Ayri bir task uzerinden RTP ses akisi baslatiliyor...");
 
-    let rtp_target_ip = env::var("MEDIA_SERVICE_RTP_TARGET_IP")
+    let rtp_target_ip = env::var("RTP_SERVICE_HOST")
     .unwrap_or_else(|_| "127.0.0.1".to_string());
 
     let rtp_stream_handle = tokio::spawn(async move {

@@ -24,7 +24,7 @@ async fn main() -> Result<()> {
     println!("--- Uçtan Uca Medya Servisi TEMEL Doğrulama Testi Başlatılıyor ---");
     println!("---  Senaryo: PCMU kodek ile çağrı, 8kHz WAV olarak kayıt ve birleştirme ---");
 
-    let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env.test".to_string());
+    let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env.example".to_string());
     dotenvy::from_filename(&env_file).ok();
 
     let mut client = connect_to_media_service().await?;
@@ -39,7 +39,7 @@ async fn main() -> Result<()> {
     // MEDIA_SERVICE_RECORD_BASE_PATH, .env'den "/sentiric-media-record" olarak gelir.
     let base_path = env::var("MEDIA_SERVICE_RECORD_BASE_PATH")?;
 
-    let s3_bucket = env::var("S3_BUCKET_NAME")?;
+    let s3_bucket = env::var("BUCKET_NAME")?;
 
     // S3 key'ini oluştururken baştaki '/' karakterini kaldırıyoruz.
     // Bu, sunucudaki writers.rs mantığıyla %100 uyumlu olmasını sağlar.
