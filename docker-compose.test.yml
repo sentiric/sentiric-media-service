@@ -32,11 +32,11 @@ services:
         ipv4_address: ${MINIO_IPV4_ADDRESS}          
     command: server /data --console-address ":9001"
     restart: always  
-    # healthcheck:
-    #   test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-    #   interval: 30s
-    #   timeout: 20s
-    #   retries: 3
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
 
   rabbitmq:
     image: ghcr.io/sentiric/sentiric-rabbitmq:${TAG:-latest}
@@ -50,11 +50,11 @@ services:
       sentiric-net:
         ipv4_address: ${RABBITMQ_IPV4_ADDRESS}
     restart: always
-    # healthcheck:
-    #   test: ["CMD", "rabbitmq-diagnostics", "ping"]
-    #   interval: 30s
-    #   timeout: 10s
-    #   retries: 3    
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3    
 
   # [capability-telephony]: Yetenek Servisleri (Capability Layer)
   # --------------------------------------------------  
@@ -78,12 +78,12 @@ services:
       minio: { condition: service_healthy },
       rabbitmq: { condition: service_healthy },
     } 
-    # healthcheck:
-    #   test: ["CMD", "nc", "-z", "localhost", "50052"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 5
-    #   start_period: 10s 
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "13031"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s 
 
   media-service-test:
     build:

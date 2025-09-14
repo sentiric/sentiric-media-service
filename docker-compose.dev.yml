@@ -37,9 +37,9 @@ services:
     #   minio: { condition: service_healthy },
     #   rabbitmq: { condition: service_healthy },
     # } 
-    # healthcheck:
-    #   test: ["CMD", "nc", "-z", "localhost", "50052"]
-    #   interval: 10s
-    #   timeout: 5s
-    #   retries: 5
-    #   start_period: 10s
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "13031"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
