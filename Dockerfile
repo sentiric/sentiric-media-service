@@ -34,8 +34,12 @@ RUN cargo build --release
 # --- STAGE 2: Final (Minimal) Image ---
 FROM debian:bookworm-slim
 
-# Sadece healthcheck için netcat ve SSL için ca-certificates gerekli.
-RUN apt-get update && apt-get install -y netcat-openbsd ca-certificates && rm -rf /var/lib/apt/lists/*
+# --- Çalışma zamanı sistem bağımlılıkları ---
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    netcat-openbsd \
+    curl \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* 
 
 # GÜVENLİK: Root olmayan bir kullanıcı oluştur
 RUN addgroup --system --gid 1001 appgroup && \
