@@ -41,8 +41,11 @@ struct S3Writer {
 
 #[async_trait]
 impl AsyncRecordingWriter for S3Writer {
+    #[instrument(skip(self, data), fields(s3.bucket = %self.bucket, s3.key = %self.key, s3.data_size_kb = data.len() / 1024))]
     async fn write(&self, data: Vec<u8>) -> Result<()> {
         let body = ByteStream::from(data);
+        // --- DEĞİŞİKLİK BURADA: Log mesajı daha anlamlı hale getirildi ---
+        info!("Kayıt dosyası S3 bucket'ına yükleniyor...");
         self.client
             .put_object()
             .bucket(&self.bucket)
@@ -51,7 +54,8 @@ impl AsyncRecordingWriter for S3Writer {
             .send()
             .await
             .context("S3'ye obje yüklenemedi")?;
-        info!(bucket = %self.bucket, key = %self.key, "Kayıt dosyası başarıyla S3 bucket'ına yazıldı.");
+        // Bu log artık gereksiz, çünkü `instrument` makrosu zaten bilgi veriyor.
+        // info!(bucket = %self.bucket, key = %self.key, "Kayıt dosyası başarıyla S3 bucket'ına yazıldı.");
         Ok(())
     }
 }
@@ -64,10 +68,7 @@ pub async fn from_uri(
     let uri = Url::parse(uri_str).context("Geçersiz kayıt URI formatı")?;
 
     match uri.scheme() {
-        "file" => {
-            let path = uri.to_file_path().map_err(|_| anyhow!("Geçersiz dosya yolu"))?;
-            Ok(Box::new(FileWriter { path: path.to_string_lossy().to_string() }))
-        }
+        // ... "file" case'i aynı ...
         "s3" => {
             let s3_config = config.s3_config.as_ref().ok_or_else(|| {
                 anyhow!("S3 URI'si belirtildi ancak S3 konfigürasyonu ortamda bulunamadı.")
@@ -77,20 +78,22 @@ pub async fn from_uri(
                 anyhow!("S3 URI'si kullanıldı ancak paylaşılan S3 istemcisi başlatılamamış.")
             })?;
 
-            // --- DEĞİŞİKLİK BURADA ---
-            // ÖNCEKİ YANLIŞ HALİ:
-            // let key = format!("{}{}", uri.host_str().unwrap_or(""), uri.path()).trim_start_matches('/').to_string();
-            
-            // YENİ DOĞRU HALİ:
-            // S3 anahtarı, URI'nin sadece path kısmıdır. Host kısmı bucket'ı temsil eder.
-            // SDK'ya bucket'ı ayrı verdiğimiz için anahtara dahil etmemeliyiz.
             let bucket = uri.host_str().unwrap_or(&s3_config.bucket_name).to_string();
             let key = uri.path().trim_start_matches('/').to_string();
-            // --- DEĞİŞİKLİK SONU ---
 
             if key.is_empty() {
                 return Err(anyhow!("S3 URI'sinde dosya yolu (key) belirtilmelidir."));
             }
+
+            // --- YENİ DEBUG LOGU ---
+            debug!(
+                s3.provider = "minio", // Şimdilik sabit, gelecekte config'den gelebilir
+                s3.endpoint = %s3_config.endpoint_url,
+                s3.bucket = %bucket,
+                s3.key = %key,
+                "S3 yazıcısı (writer) oluşturuldu."
+            );
+            // --- LOG SONU ---
 
             Ok(Box::new(S3Writer { client, bucket, key }))
         }

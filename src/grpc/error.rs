@@ -39,11 +39,26 @@ impl From<ServiceError> for Status {
             ServiceError::InvalidUri { .. } | ServiceError::InvalidTargetAddress { .. } => {
                 Status::invalid_argument(message)
             }
-            ServiceError::CommandSendError(_) | ServiceError::RecordingSaveFailed { .. } | ServiceError::InternalError(_) => {
-                // Bu hataları loglayıp istemciye genel bir hata dönmek en iyisidir.
-                tracing::error!(error = %message, "Internal service error occurred");
-                Status::internal("An internal error occurred. Please check server logs.")
+            
+            // --- DÜZELTİLMİŞ SIRALAMA ---
+            // 1. En spesifik hata olan RecordingSaveFailed'i ÖNCE ele alıyoruz.
+            ServiceError::RecordingSaveFailed { source } => {
+                let lower_source = source.to_lowercase();
+                if lower_source.contains("nosuchbucket") {
+                    Status::failed_precondition(message)
+                } else if lower_source.contains("accessdenied") {
+                    Status::permission_denied(message)
+                } else {
+                    tracing::error!(error = %message, "Dahili kayıt hatası oluştu");
+                    Status::internal("Kayıt kaydedilirken bir iç hata oluştu.")
+                }
             }
+
+            // 2. Geriye kalan diğer genel hataları SONRA ele alıyoruz.
+            ServiceError::CommandSendError(_) | ServiceError::InternalError(_) => {
+                tracing::error!(error = %message, "Dahili servis hatası oluştu");
+                Status::internal("Bir iç hata oluştu. Lütfen sunucu loglarını kontrol edin.")
+            }            
         }
     }
 }

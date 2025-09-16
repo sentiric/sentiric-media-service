@@ -92,24 +92,27 @@ pub async fn rtp_session_handler(
         tokio::select! {
             Some(command) = command_rx.recv() => {
                 match command {
+                    
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token } => {
                         let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
                         
+                        // --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
                         if audio_uri.starts_with("data:") {
                             let truncated_uri = &audio_uri[..std::cmp::min(60, audio_uri.len())];
                             info!(uri.preview = %truncated_uri, uri.len = audio_uri.len(), "PlayAudio (data URI) komutu alındı.");
                         } else {
                             info!(uri = %audio_uri, "PlayAudio (file URI) komutu alındı.");
                         }
+                        // --- DEĞİŞİKLİK SONU ---
 
                         let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token };
                         
                         if !is_playing {
                             is_playing = true;
-                            debug!("Mevcut anons yok, yeni anonsu hemen başlat."); // Artık derlenecek
+                            debug!("Mevcut anons yok, yeni anonsu hemen başlat.");
                             start_playback(job, &config, socket.clone(), playback_finished_tx.clone(), permanent_recording_session.clone(), outbound_codec.clone()).await;
                         } else {
-                            debug!("Mevcut anons çalıyor, yeni anonsu kuyruğa ekle."); // Artık derlenecek
+                            debug!("Mevcut anons çalıyor, yeni anonsu kuyruğa ekle.");
                             playback_queue.push_back(job);
                         }
                     },
