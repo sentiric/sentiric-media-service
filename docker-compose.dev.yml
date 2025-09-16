@@ -33,13 +33,12 @@ services:
       sentiric-net:
         ipv4_address: ${MEDIA_SERVICE_IPV4_ADDRESS}    
     restart: always
-    # depends_on: {
-    #   minio: { condition: service_healthy },
-    #   rabbitmq: { condition: service_healthy },
-    # } 
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "13031"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 10s
+      start_period: 10s    
+    # depends_on:
+    #   minio: { condition: service_healthy }
+    #   rabbitmq: { condition: service_healthy }
