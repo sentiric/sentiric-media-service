@@ -40,25 +40,32 @@ impl From<ServiceError> for Status {
                 Status::invalid_argument(message)
             }
             
-            // --- DÜZELTİLMİŞ SIRALAMA ---
-            // 1. En spesifik hata olan RecordingSaveFailed'i ÖNCE ele alıyoruz.
             ServiceError::RecordingSaveFailed { source } => {
                 let lower_source = source.to_lowercase();
                 if lower_source.contains("nosuchbucket") {
-                    Status::failed_precondition(message)
+                    // --- DEĞİŞİKLİK BURADA: Mesajı zenginleştiriyoruz ---
+                    let richer_message = format!(
+                        "Kayıt hedefi (S3 Bucket) bulunamadı veya yapılandırılmamış. Lütfen altyapıyı kontrol edin. Detay: {}",
+                        source
+                    );
+                    Status::failed_precondition(richer_message)
+                    // --- DEĞİŞİKLİK SONU ---
                 } else if lower_source.contains("accessdenied") {
-                    Status::permission_denied(message)
+                    let richer_message = format!(
+                        "S3 Bucket'ına yazma izni yok (Access Denied). Detay: {}",
+                        source
+                    );
+                    Status::permission_denied(richer_message)
                 } else {
                     tracing::error!(error = %message, "Dahili kayıt hatası oluştu");
                     Status::internal("Kayıt kaydedilirken bir iç hata oluştu.")
                 }
             }
 
-            // 2. Geriye kalan diğer genel hataları SONRA ele alıyoruz.
             ServiceError::CommandSendError(_) | ServiceError::InternalError(_) => {
                 tracing::error!(error = %message, "Dahili servis hatası oluştu");
                 Status::internal("Bir iç hata oluştu. Lütfen sunucu loglarını kontrol edin.")
-            }            
+            }              
         }
     }
 }

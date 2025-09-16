@@ -1,6 +1,4 @@
-// Bu dosya, `sentiric_media_service` library crate'inin ana giriş noktasıdır.
-// Diğer tüm modülleri public olarak tanımlayarak, `main.rs` gibi diğer crate'lerin
-// bu modüllere `sentiric_media_service::app::App` gibi yollarla erişmesini sağlar.
+// sentiric-media-service/src/lib.rs
 
 pub mod app;
 pub mod config;
@@ -11,3 +9,4 @@ pub mod audio;
 pub mod tls;
 pub mod metrics;
 pub mod rabbitmq;
+pub mod utils; // YENİ SATIR

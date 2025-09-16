@@ -1,11 +1,14 @@
-// File: src/rtp/writers.rs (TAM VE HATASIZ NİHAİ HALİ)
+// sentiric-media-service/src/rtp/writers.rs
+
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use std::path::Path;
 use std::sync::Arc;
-use tracing::info;
+// --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
+use tracing::{info, debug, instrument}; // Gerekli tüm makroları import ediyoruz.
+// --- DEĞİŞİKLİK SONU ---
 use url::Url;
 
 use crate::config::AppConfig;

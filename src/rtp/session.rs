@@ -11,12 +11,15 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::{self, spawn_blocking};
 use tokio_util::sync::CancellationToken;
 // tonic::Status'ü sildik, debug'ı ekledik
-use tracing::{debug, error, info, instrument, warn}; 
+
 use super::command::RecordingSession;
 use crate::rtp::session_utils::{finalize_and_save_recording, load_and_resample_samples_from_uri};
 use crate::metrics::ACTIVE_SESSIONS;
 use metrics::gauge;
 use webrtc_util::marshal::Unmarshal;
+
+use crate::utils::extract_uri_scheme; // YENİ: Fonksiyonu yeni modülden import et
+use tracing::{debug, error, info, instrument, warn, field}; // 'field' de ekleyelim
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -45,7 +48,10 @@ fn process_rtp_payload(
 }
 
 
-#[instrument(skip_all, fields(rtp_port = config.port))]
+#[instrument(
+    skip_all, // Tüm argümanları otomatik loglamayı kapat
+    fields(rtp_port = config.port) // Sadece portu manuel olarak ekle
+)]
 pub async fn rtp_session_handler(
     socket: Arc<tokio::net::UdpSocket>,
     mut command_rx: mpsc::Receiver<RtpCommand>,
@@ -189,8 +195,17 @@ pub async fn rtp_session_handler(
                 info!("Bir anonsun çalınması tamamlandı.");
                 if let Some(next_job) = playback_queue.pop_front() {
                     is_playing = true;
-                    // Bu logu da info'dan debug'a alabiliriz, çünkü bu bir iç akış detayı
-                    debug!(uri = %next_job.audio_uri, "Kuyruktaki bir sonraki anons başlatılıyor.");
+                    
+                    // --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
+                    // Logu, URI tipine göre akıllı hale getiriyoruz.
+                    if next_job.audio_uri.starts_with("data:") {
+                        let truncated_uri = &next_job.audio_uri[..std::cmp::min(60, next_job.audio_uri.len())];
+                        debug!(uri.preview = %truncated_uri, uri.len = next_job.audio_uri.len(), "Kuyruktaki bir sonraki anons (data URI) başlatılıyor.");
+                    } else {
+                        debug!(uri = %next_job.audio_uri, "Kuyruktaki bir sonraki anons (file URI) başlatılıyor.");
+                    }
+                    // --- DEĞİŞİKLİK SONU ---
+
                     start_playback(next_job, &config, socket.clone(), playback_finished_tx.clone(), permanent_recording_session.clone(), outbound_codec.clone()).await;
                 } else {
                     debug!("Anons kuyruğu boş.");
@@ -215,6 +230,13 @@ pub async fn rtp_session_handler(
     info!("RTP oturumu başarıyla temizlendi ve kapatıldı.");
 }
 
+#[instrument(
+    skip_all,
+    fields(
+        target = %job.target_addr,
+        uri.scheme = %extract_uri_scheme(&job.audio_uri) // Artık hata vermeyecek
+    )
+)]
 async fn start_playback(
     job: PlaybackJob, config: &RtpSessionConfig, socket: Arc<tokio::net::UdpSocket>,
     playback_finished_tx: mpsc::Sender<()>,

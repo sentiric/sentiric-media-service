@@ -25,6 +25,8 @@ use tracing::{info, instrument, warn};
 use tracing::field;
 use url::Url; 
 
+use crate::utils::extract_uri_scheme; // YENİ: Fonksiyonu yeni modülden import et
+
 pub struct MyMediaService {
     app_state: AppState,
     config: Arc<AppConfig>,
@@ -36,13 +38,6 @@ impl MyMediaService {
     }
 }
 
-fn extract_uri_scheme(uri: &str) -> &str {
-    if let Some(scheme_end) = uri.find(':') {
-        &uri[..scheme_end]
-    } else {
-        "unknown"
-    }
-}
 
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
