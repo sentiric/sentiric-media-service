@@ -1,4 +1,3 @@
-// src/rtp/session.rs
 use crate::config::AppConfig;
 use crate::rtp::codecs::{self, AudioCodec, StatefulResampler};
 use crate::rtp::command::{AudioFrame, RtpCommand};
@@ -10,16 +9,14 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::task::{self, spawn_blocking};
 use tokio_util::sync::CancellationToken;
-// tonic::Status'ü sildik, debug'ı ekledik
 
 use super::command::RecordingSession;
 use crate::rtp::session_utils::{finalize_and_save_recording, load_and_resample_samples_from_uri};
 use crate::metrics::ACTIVE_SESSIONS;
+use crate::utils::extract_uri_scheme;
 use metrics::gauge;
+use tracing::{debug, error, field, info, instrument, warn};
 use webrtc_util::marshal::Unmarshal;
-
-use crate::utils::extract_uri_scheme; // YENİ: Fonksiyonu yeni modülden import et
-use tracing::{debug, error, info, instrument, warn, field}; // 'field' de ekleyelim
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -36,35 +33,31 @@ struct PlaybackJob {
 
 fn process_rtp_payload(
     packet_data: &[u8],
-    resampler: &mut StatefulResampler, // Resampler'ı parametre olarak alır
+    resampler: &mut StatefulResampler,
 ) -> Option<(Vec<i16>, AudioCodec)> {
     let mut packet_buf = &packet_data[..];
     let packet = rtp::packet::Packet::unmarshal(&mut packet_buf).ok()?;
     let codec = codecs::AudioCodec::from_rtp_payload_type(packet.header.payload_type).ok()?;
     
-    // Artık stateful resampler'ı kullanıyoruz
     let samples = codecs::decode_g711_to_lpcm16(&packet.payload, codec, resampler).ok()?;
     Some((samples, codec))
 }
 
-
 #[instrument(
-    skip_all, // Tüm argümanları otomatik loglamayı kapat
-    fields(rtp_port = config.port) // Sadece portu manuel olarak ekle
+    skip_all,
+    fields(rtp_port = config.port)
 )]
 pub async fn rtp_session_handler(
     socket: Arc<tokio::net::UdpSocket>,
     mut command_rx: mpsc::Receiver<RtpCommand>,
     config: RtpSessionConfig,
 ) {
-
     info!("Yeni RTP oturumu dinleyicisi başlatıldı.");
     
     let live_stream_sender = Arc::new(Mutex::new(None));
     let permanent_recording_session = Arc::new(Mutex::new(None));
     let actual_remote_addr = Arc::new(Mutex::new(None));
     let outbound_codec = Arc::new(Mutex::new(None));
-
     let inbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(8000, 16000).expect("Resampler oluşturulamadı")
     ));
@@ -74,7 +67,6 @@ pub async fn rtp_session_handler(
     let (playback_finished_tx, mut playback_finished_rx) = mpsc::channel::<()>(1);
     
     let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
-
 
     let socket_reader_handle = {
         let socket = socket.clone();
@@ -98,19 +90,15 @@ pub async fn rtp_session_handler(
         tokio::select! {
             Some(command) = command_rx.recv() => {
                 match command {
-                    
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token } => {
                         let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
-                        
-                        // --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
                         if audio_uri.starts_with("data:") {
                             let truncated_uri = &audio_uri[..std::cmp::min(60, audio_uri.len())];
-                            info!(uri.preview = %truncated_uri, uri.len = audio_uri.len(), "PlayAudio (data URI) komutu alındı.");
+                            debug!(uri.preview = %truncated_uri, uri.len = audio_uri.len(), "PlayAudio (data URI) komutu alındı.");
                         } else {
-                            info!(uri = %audio_uri, "PlayAudio (file URI) komutu alındı.");
+                            debug!(uri = %audio_uri, "PlayAudio (file URI) komutu alındı.");
                         }
-                        // --- DEĞİŞİKLİK SONU ---
-
+                        
                         let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token };
                         
                         if !is_playing {
@@ -122,9 +110,8 @@ pub async fn rtp_session_handler(
                             playback_queue.push_back(job);
                         }
                     },
-
                     RtpCommand::StartLiveAudioStream { stream_sender, .. } => {
-                        info!("Canlı ses akışı (STT) başlatılıyor.");
+                        debug!("Canlı ses akışı (STT) başlatılıyor.");
                         *live_stream_sender.lock().await = Some(stream_sender);
                     },
                     RtpCommand::StartPermanentRecording(session) => {
@@ -146,8 +133,14 @@ pub async fn rtp_session_handler(
                         info!("Shutdown komutu alındı, oturum sonlandırılıyor.");
                         break;
                     },
-                    RtpCommand::StopAudio => { info!("StopAudio komutu alındı, anons kuyruğu temizleniyor."); playback_queue.clear(); },
-                    RtpCommand::StopLiveAudioStream => { info!("Canlı ses akışı (STT) durduruluyor."); *live_stream_sender.lock().await = None },
+                    RtpCommand::StopAudio => { 
+                        debug!("StopAudio komutu alındı, anons kuyruğu temizleniyor."); 
+                        playback_queue.clear();
+                    },
+                    RtpCommand::StopLiveAudioStream => { 
+                        debug!("Canlı ses akışı (STT) durduruluyor."); 
+                        *live_stream_sender.lock().await = None;
+                    },
                 }
             },
             
@@ -164,25 +157,16 @@ pub async fn rtp_session_handler(
                 }).await;
 
                 if let Ok(Some((samples_16khz, codec))) = processing_result {
-                    if outbound_codec.lock().await.is_none() {
-                        *outbound_codec.lock().await = Some(codec);
-                    }
-
-                    if let Some(session) = &mut *permanent_recording_session.lock().await {
-                        session.inbound_samples.extend_from_slice(&samples_16khz);
-                    }
+                    if outbound_codec.lock().await.is_none() { *outbound_codec.lock().await = Some(codec); }
+                    if let Some(session) = &mut *permanent_recording_session.lock().await { session.inbound_samples.extend_from_slice(&samples_16khz); }
                     
                     let mut sender_guard = live_stream_sender.lock().await;
                     if let Some(sender) = &*sender_guard {
                         if !sender.is_closed() {
                             let mut bytes = Vec::with_capacity(samples_16khz.len() * 2);
-                            for &sample in &samples_16khz {
-                                bytes.extend_from_slice(&sample.to_le_bytes());
-                            }
+                            for &sample in &samples_16khz { bytes.extend_from_slice(&sample.to_le_bytes()); }
                             let frame = AudioFrame { data: bytes.into(), media_type: "audio/L16;rate=16000".to_string() };
-                            if sender.try_send(Ok(frame)).is_err() {
-                                // Kanal dolu, sorun değil.
-                            }
+                            if sender.try_send(Ok(frame)).is_err() { /* Kanal dolu, sorun değil. */ }
                         } else {
                             *sender_guard = None;
                         }
@@ -192,33 +176,25 @@ pub async fn rtp_session_handler(
             
             Some(_) = playback_finished_rx.recv() => {
                 is_playing = false;
-                info!("Bir anonsun çalınması tamamlandı.");
+                debug!("Bir anonsun çalınması tamamlandı.");
                 if let Some(next_job) = playback_queue.pop_front() {
                     is_playing = true;
-                    
-                    // --- DEĞİŞİKLİK BURADA BAŞLIYOR ---
-                    // Logu, URI tipine göre akıllı hale getiriyoruz.
                     if next_job.audio_uri.starts_with("data:") {
                         let truncated_uri = &next_job.audio_uri[..std::cmp::min(60, next_job.audio_uri.len())];
                         debug!(uri.preview = %truncated_uri, uri.len = next_job.audio_uri.len(), "Kuyruktaki bir sonraki anons (data URI) başlatılıyor.");
                     } else {
                         debug!(uri = %next_job.audio_uri, "Kuyruktaki bir sonraki anons (file URI) başlatılıyor.");
                     }
-                    // --- DEĞİŞİKLİK SONU ---
-
                     start_playback(next_job, &config, socket.clone(), playback_finished_tx.clone(), permanent_recording_session.clone(), outbound_codec.clone()).await;
                 } else {
                     debug!("Anons kuyruğu boş.");
                 }
             },
 
-            else => {
-                break;
-            }
+            else => { break; }
         }
     }
     
-    // Graceful shutdown
     socket_reader_handle.abort();
     if let Some(session) = permanent_recording_session.lock().await.take() {
         warn!(uri = %session.output_uri, "Oturum kapanırken tamamlanmamış bir kayıt bulundu, sonlandırılıyor.");
@@ -234,7 +210,7 @@ pub async fn rtp_session_handler(
     skip_all,
     fields(
         target = %job.target_addr,
-        uri.scheme = %extract_uri_scheme(&job.audio_uri) // Artık hata vermeyecek
+        uri.scheme = %extract_uri_scheme(&job.audio_uri)
     )
 )]
 async fn start_playback(
@@ -250,11 +226,8 @@ async fn start_playback(
             if let Some(session) = &mut *permanent_recording_session.lock().await {
                 session.outbound_samples.extend_from_slice(&samples_16khz);
             }
-
             task::spawn(async move {
                 let _ = send_rtp_stream(&socket, job.target_addr, &samples_16khz, job.cancellation_token, codec_to_use).await;
-                
-                // HATA DÜZELTMESİ BURADA
                 use tokio::sync::mpsc::error::TrySendError;
                 if let Err(e) = playback_finished_tx.try_send(()) {
                     match e {
@@ -270,8 +243,6 @@ async fn start_playback(
         },
         Err(e) => {
             error!(uri = %job.audio_uri, error = ?e, "Anons dosyası yüklenemedi veya işlenemedi.");
-            
-            // HATA DÜZELTMESİ BURADA DA
             use tokio::sync::mpsc::error::TrySendError;
             if let Err(e) = playback_finished_tx.try_send(()) {
                  match e {
