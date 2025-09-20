@@ -23,7 +23,9 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
-use tracing::{debug, field, info, instrument, warn};
+// --- DEĞİŞİKLİK BURADA: Eksik olan `error` makrosu eklendi ---
+use tracing::{debug, error, field, info, instrument, warn};
+// --- DEĞİŞİKLİK SONU ---
 use url::Url;
 
 pub struct MyMediaService {
