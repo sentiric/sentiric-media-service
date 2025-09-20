@@ -1,3 +1,5 @@
+// sentiric-media-service/src/grpc/service.rs
+
 use crate::config::AppConfig;
 use crate::grpc::error::ServiceError;
 use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
@@ -16,7 +18,6 @@ use sentiric_contracts::sentiric::media::v1::{
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
@@ -254,14 +255,17 @@ impl MediaService for MyMediaService {
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
+        
+        // --- DEĞİŞİKLİK BURADA: `RecordingSession` yeni yapıya göre oluşturuluyor ---
         let recording_session = RecordingSession {
             output_uri: req_ref.output_uri.clone(),
             spec,
-            inbound_samples: Vec::new(),
-            outbound_samples: Vec::new(),
+            mixed_samples_16khz: Vec::new(),
             call_id: req_ref.call_id.clone(),
             trace_id: req_ref.trace_id.clone(),
         };
+        // --- DEĞİŞİKLİK SONU ---
+
         let command = RtpCommand::StartPermanentRecording(recording_session);
         session_tx
             .send(command)
