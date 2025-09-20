@@ -7,16 +7,17 @@ use crate::state::AppState;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
 use tokio_util::sync::CancellationToken;
+use anyhow::Result;
 
 use super::command::RecordingSession;
 use crate::rtp::session_utils::{finalize_and_save_recording, load_and_resample_samples_from_uri};
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::utils::extract_uri_scheme;
 use metrics::gauge;
-use tracing::{debug, error, info, instrument, warn}; // 'field' kaldırıldı
+use tracing::{debug, error, info, instrument, warn};
 use webrtc_util::marshal::Unmarshal;
 
 pub struct RtpSessionConfig {
@@ -30,6 +31,7 @@ struct PlaybackJob {
     audio_uri: String,
     target_addr: SocketAddr,
     cancellation_token: CancellationToken,
+    responder: Option<oneshot::Sender<Result<()>>>,
 }
 
 fn process_rtp_payload(
@@ -91,7 +93,7 @@ pub async fn rtp_session_handler(
         tokio::select! {
             Some(command) = command_rx.recv() => {
                 match command {
-                    RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token } => {
+                    RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
                         let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
                         if audio_uri.starts_with("data:") {
                             let truncated_uri = &audio_uri[..std::cmp::min(60, audio_uri.len())];
@@ -100,7 +102,7 @@ pub async fn rtp_session_handler(
                             debug!(uri = %audio_uri, "PlayAudio (file URI) komutu alındı.");
                         }
                         
-                        let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token };
+                        let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token, responder };
                         
                         if !is_playing {
                             is_playing = true;
@@ -233,6 +235,8 @@ async fn start_playback(
 ) {
     let codec_to_use = outbound_codec.lock().await.unwrap_or(AudioCodec::Pcmu);
     
+    let responder = job.responder;
+
     match load_and_resample_samples_from_uri(&job.audio_uri, &config.app_state, &config.app_config).await {
         Ok(samples_16khz) => {
             if let Some(session) = &mut *permanent_recording_session.lock().await {
@@ -246,7 +250,12 @@ async fn start_playback(
                 }
             }
             task::spawn(async move {
-                let _ = send_rtp_stream(&socket, job.target_addr, &samples_16khz, job.cancellation_token, codec_to_use).await;
+                let stream_result = send_rtp_stream(&socket, job.target_addr, &samples_16khz, job.cancellation_token, codec_to_use).await;
+                
+                if let Some(tx) = responder {
+                    let _ = tx.send(stream_result.map_err(anyhow::Error::from));
+                }
+
                 use tokio::sync::mpsc::error::TrySendError;
                 if let Err(e) = playback_finished_tx.try_send(()) {
                     match e {
@@ -261,7 +270,11 @@ async fn start_playback(
             });
         },
         Err(e) => {
-            error!(uri = %job.audio_uri, error = ?e, "Anons dosyası yüklenemedi veya işlenemedi.");
+            let err_msg = e.to_string();
+            error!(uri = %job.audio_uri, error = %err_msg, "Anons dosyası yüklenemedi veya işlenemedi.");
+            if let Some(tx) = responder {
+                let _ = tx.send(Err(anyhow::anyhow!(err_msg)));
+            }
             use tokio::sync::mpsc::error::TrySendError;
             if let Err(e) = playback_finished_tx.try_send(()) {
                  match e {

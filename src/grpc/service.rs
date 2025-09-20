@@ -6,6 +6,7 @@ use crate::rtp::command::{RecordingSession, RtpCommand};
 use crate::rtp::session::{rtp_session_handler, RtpSessionConfig};
 use crate::state::AppState;
 use crate::utils::extract_uri_scheme;
+use anyhow::Result;
 use hound::{SampleFormat, WavSpec};
 use metrics::{counter, gauge};
 use sentiric_contracts::sentiric::media::v1::{
@@ -17,15 +18,13 @@ use sentiric_contracts::sentiric::media::v1::{
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{debug, field, info, instrument, warn};
 use url::Url;
-// --- DEĞİŞİKLİK BURADA: Eksik import eklendi ---
-use tokio::net::UdpSocket;
-// --- DEĞİŞİKLİK SONU ---
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -170,20 +169,40 @@ impl MediaService for MyMediaService {
                 source: e,
             }
         })?;
+
+        let (responder_tx, responder_rx) = oneshot::channel();
+
         let cancellation_token = CancellationToken::new();
         let command = RtpCommand::PlayAudioUri {
             audio_uri: req.audio_uri,
             candidate_target_addr: target_addr,
             cancellation_token,
+            responder: Some(responder_tx),
         };
+
         tx.send(command)
             .await
             .map_err(|_| ServiceError::CommandSendError("PlayAudioUri".to_string()))?;
-        debug!(port = rtp_port, "PlayAudio komutu başarıyla sıraya alındı.");
-        Ok(Response::new(PlayAudioResponse {
-            success: true,
-            message: "Playback command successfully queued.".to_string(),
-        }))
+
+        debug!(port = rtp_port, "PlayAudio komutu sıraya alındı, tamamlanması bekleniyor...");
+        
+        match responder_rx.await {
+            Ok(Ok(_)) => {
+                info!("PlayAudio işlemi başarıyla tamamlandı.");
+                Ok(Response::new(PlayAudioResponse {
+                    success: true,
+                    message: "Playback completed successfully.".to_string(),
+                }))
+            }
+            Ok(Err(e)) => {
+                error!(error = %e, "PlayAudio işlemi hatayla tamamlandı.");
+                Err(Status::internal(format!("Playback failed: {}", e)))
+            }
+            Err(_) => {
+                error!("PlayAudio işlemi için yanıt alınamadı (responder kanalı kapandı).");
+                Err(Status::internal("Playback response channel closed unexpectedly."))
+            }
+        }
     }
 
     type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
@@ -257,6 +276,7 @@ impl MediaService for MyMediaService {
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
+        
         let recording_session = RecordingSession {
             output_uri: req_ref.output_uri.clone(),
             spec,
@@ -264,6 +284,7 @@ impl MediaService for MyMediaService {
             call_id: req_ref.call_id.clone(),
             trace_id: req_ref.trace_id.clone(),
         };
+
         let command = RtpCommand::StartPermanentRecording(recording_session);
         session_tx
             .send(command)

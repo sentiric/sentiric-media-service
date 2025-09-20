@@ -1,10 +1,11 @@
 // sentiric-media-service/src/rtp/command.rs
+use anyhow::Result;
+use bytes::Bytes;
+use hound::WavSpec;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
-use bytes::Bytes;
-use hound::WavSpec;
 
 #[derive(Debug)]
 pub struct AudioFrame {
@@ -16,11 +17,7 @@ pub struct AudioFrame {
 pub struct RecordingSession {
     pub output_uri: String,
     pub spec: WavSpec,
-    // --- DEĞİŞİKLİK BURADA ---
-    // Ayrı tamponlar yerine, anlık olarak birleştirilmiş ses örneklerini tutacağız.
-    // Bu, 16kHz LPCM formatında olacak.
     pub mixed_samples_16khz: Vec<i16>,
-    // --- DEĞİŞİKLİK SONU ---
     pub call_id: String,
     pub trace_id: String,
 }
@@ -31,6 +28,8 @@ pub enum RtpCommand {
         audio_uri: String,
         candidate_target_addr: SocketAddr,
         cancellation_token: CancellationToken,
+        // Bu kanal, ses çalma işlemi bittiğinde veya hata verdiğinde sinyal gönderecek.
+        responder: Option<oneshot::Sender<Result<()>>>,
     },
     StopAudio,
     StartLiveAudioStream {
