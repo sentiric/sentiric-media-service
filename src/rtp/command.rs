@@ -1,3 +1,4 @@
+// sentiric-media-service/src/rtp/command.rs
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -15,9 +16,11 @@ pub struct AudioFrame {
 pub struct RecordingSession {
     pub output_uri: String,
     pub spec: WavSpec,
-    // DEĞİŞİKLİK: Gelen ve giden ses örneklerini ayrı ayrı tutmak için iki ayrı vektör.
-    pub inbound_samples: Vec<i16>,
-    pub outbound_samples: Vec<i16>,
+    // --- DEĞİŞİKLİK BURADA ---
+    // Ayrı tamponlar yerine, anlık olarak birleştirilmiş ses örneklerini tutacağız.
+    // Bu, 16kHz LPCM formatında olacak.
+    pub mixed_samples_16khz: Vec<i16>,
+    // --- DEĞİŞİKLİK SONU ---
     pub call_id: String,
     pub trace_id: String,
 }

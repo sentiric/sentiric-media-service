@@ -1,3 +1,4 @@
+// sentiric-media-service/src/rtp/session.rs
 use crate::config::AppConfig;
 use crate::rtp::codecs::{self, AudioCodec, StatefulResampler};
 use crate::rtp::command::{AudioFrame, RtpCommand};
@@ -42,6 +43,7 @@ fn process_rtp_payload(
     let samples = codecs::decode_g711_to_lpcm16(&packet.payload, codec, resampler).ok()?;
     Some((samples, codec))
 }
+
 
 #[instrument(
     skip_all,
@@ -114,8 +116,10 @@ pub async fn rtp_session_handler(
                         debug!("Canlı ses akışı (STT) başlatılıyor.");
                         *live_stream_sender.lock().await = Some(stream_sender);
                     },
-                    RtpCommand::StartPermanentRecording(session) => {
+                    RtpCommand::StartPermanentRecording(mut session) => {
                         info!(uri = %session.output_uri, "Kalıcı kayıt oturumu başlatılıyor.");
+                        // --- DEĞİŞİKLİK: mixed_samples_16khz artık önceden boyutlandırılıyor. ---
+                        session.mixed_samples_16khz.reserve(16000 * 60 * 5); // 5 dakikalık ses için yer ayır
                         *permanent_recording_session.lock().await = Some(session);
                     },
                     RtpCommand::StopPermanentRecording { responder } => {
@@ -158,7 +162,18 @@ pub async fn rtp_session_handler(
 
                 if let Ok(Some((samples_16khz, codec))) = processing_result {
                     if outbound_codec.lock().await.is_none() { *outbound_codec.lock().await = Some(codec); }
-                    if let Some(session) = &mut *permanent_recording_session.lock().await { session.inbound_samples.extend_from_slice(&samples_16khz); }
+                    
+                    // --- DEĞİŞİKLİK: Artık inbound_samples yerine mixed_samples_16khz'e yazıyoruz ---
+                    if let Some(session) = &mut *permanent_recording_session.lock().await {
+                        let len = session.mixed_samples_16khz.len();
+                        for (i, sample) in samples_16khz.iter().enumerate() {
+                            if len + i < session.mixed_samples_16khz.len() {
+                                session.mixed_samples_16khz[len + i] = session.mixed_samples_16khz[len + i].saturating_add(*sample);
+                            } else {
+                                session.mixed_samples_16khz.push(*sample);
+                            }
+                        }
+                    }
                     
                     let mut sender_guard = live_stream_sender.lock().await;
                     if let Some(sender) = &*sender_guard {
@@ -206,6 +221,7 @@ pub async fn rtp_session_handler(
     info!("RTP oturumu başarıyla temizlendi ve kapatıldı.");
 }
 
+
 #[instrument(
     skip_all,
     fields(
@@ -223,9 +239,19 @@ async fn start_playback(
     
     match load_and_resample_samples_from_uri(&job.audio_uri, &config.app_state, &config.app_config).await {
         Ok(samples_16khz) => {
+            // --- DEĞİŞİKLİK: Giden sesi de anlık olarak birleşik tampona ekliyoruz ---
             if let Some(session) = &mut *permanent_recording_session.lock().await {
-                session.outbound_samples.extend_from_slice(&samples_16khz);
+                let len = session.mixed_samples_16khz.len();
+                for (i, sample) in samples_16khz.iter().enumerate() {
+                    if len + i < session.mixed_samples_16khz.len() {
+                        session.mixed_samples_16khz[len + i] = session.mixed_samples_16khz[len + i].saturating_add(*sample);
+                    } else {
+                        session.mixed_samples_16khz.push(*sample);
+                    }
+                }
             }
+            // --- DEĞİŞİKLİK SONU ---
+
             task::spawn(async move {
                 let _ = send_rtp_stream(&socket, job.target_addr, &samples_16khz, job.cancellation_token, codec_to_use).await;
                 use tokio::sync::mpsc::error::TrySendError;

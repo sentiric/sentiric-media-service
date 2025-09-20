@@ -9,9 +9,7 @@ use crate::state::AppState;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine};
 use hound::WavWriter;
-use lapin::{options::BasicPublishOptions, BasicProperties};
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
-use std::cmp;
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,36 +18,26 @@ use tracing::{error, info, instrument, warn};
 
 #[instrument(skip_all, fields(uri = %session.output_uri, call_id = %session.call_id, trace_id = %session.trace_id))]
 pub async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
-    if session.inbound_samples.is_empty() && session.outbound_samples.is_empty() { 
+    // --- DEĞİŞİKLİK: Artık mixed_samples_16khz'i kontrol ediyoruz ---
+    if session.mixed_samples_16khz.is_empty() { 
         warn!("Kaydedilecek ses verisi yok, boş dosya oluşturulmayacak.");
         return Ok(()); 
     }
     
-    info!(inbound_samples = session.inbound_samples.len(), outbound_samples = session.outbound_samples.len(), "Kayıt sonlandırılıyor.");
+    info!(mixed_samples = session.mixed_samples_16khz.len(), "Kayıt sonlandırılıyor.");
     
     let call_id_for_event = session.call_id.clone();
     let trace_id_for_event = session.trace_id.clone();
     let output_uri_for_event = session.output_uri.clone();
     
     let result: Result<()> = async {
-        // CPU-yoğun birleştirme işlemini `spawn_blocking`'e taşı
-        let mixed_samples_16k = spawn_blocking(move || {
-            let len = cmp::max(session.inbound_samples.len(), session.outbound_samples.len());
-            let mut mixed = Vec::with_capacity(len);
-            for i in 0..len {
-                let inbound_sample = session.inbound_samples.get(i).cloned().unwrap_or(0) as i32;
-                let outbound_sample = session.outbound_samples.get(i).cloned().unwrap_or(0) as i32;
-                let mixed_sample = (inbound_sample + outbound_sample).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                mixed.push(mixed_sample);
-            }
-            (mixed, session.spec) // spec'i de bu task'e taşıyoruz
-        }).await.context("Ses kanallarını birleştirme task'i başarısız oldu")?;
-        
-        let (mixed_samples_16k, spec) = mixed_samples_16k;
+        // --- DEĞİŞİKLİK: Birleştirme adımı kaldırıldı, çünkü ses zaten birleşik. ---
+        let mixed_samples_16khz = session.mixed_samples_16khz;
+        let spec = session.spec;
 
         // CPU-yoğun yeniden örnekleme işlemini `spawn_blocking`'e taşı
         let downsampled_samples_8k = spawn_blocking(move || -> Result<Vec<i16>> {
-            let pcm_f32: Vec<f32> = mixed_samples_16k.iter().map(|s| *s as f32 / 32768.0).collect();
+            let pcm_f32: Vec<f32> = mixed_samples_16khz.iter().map(|s| *s as f32 / 32768.0).collect();
             let params = SincInterpolationParameters { sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear, oversampling_factor: 256, window: WindowFunction::BlackmanHarris2 };
             let mut resampler = SincFixedIn::<f32>::new(8000.0 / 16000.0, 2.0, params, pcm_f32.len(), 1)?;
             let mut resampled_channels = resampler.process(&[pcm_f32], None)?;
@@ -74,19 +62,16 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         let writer = writers::from_uri(&output_uri_for_event, &app_state, &app_state.port_manager.config)
             .await
             .context("Kayıt yazıcısı oluşturulamadı")?;
-
-        // --- DEĞİŞİKLİK BURADA ---
+            
         writer.write(wav_data).await.map_err(|e| {
-            // Asıl hatayı ve kaynağını logla
             error!(source_error = ?e, "Kayıt verisi hedefe yazılamadı.");
-            // anyhow::Error'a dönüştürerek zinciri koru
             anyhow::anyhow!(e).context("Veri yazılamadı")
         })?;
-        // --- DEĞİŞİKLİK SONU ---
         
         Ok(())
     }.await;
 
+    // Olay yayınlama
     if result.is_ok() {
         if let Some(publisher) = &app_state.rabbitmq_publisher {
             let event_payload = serde_json::json!({"eventType": "call.recording.available", "traceId": trace_id_for_event, "callId": call_id_for_event, "recordingUri": output_uri_for_event, "timestamp": chrono::Utc::now().to_rfc3339()});
@@ -100,6 +85,7 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
     result
 }
 
+// load_and_resample_samples_from_uri
 pub async fn load_and_resample_samples_from_uri(
     uri: &str, app_state: &AppState, config: &Arc<AppConfig>,
 ) -> Result<Arc<Vec<i16>>> {
