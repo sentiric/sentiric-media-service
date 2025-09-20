@@ -1,5 +1,4 @@
 // sentiric-media-service/src/grpc/service.rs
-
 use crate::config::AppConfig;
 use crate::grpc::error::ServiceError;
 use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
@@ -24,6 +23,9 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status};
 use tracing::{debug, field, info, instrument, warn};
 use url::Url;
+// --- DEĞİŞİKLİK BURADA: Eksik import eklendi ---
+use tokio::net::UdpSocket;
+// --- DEĞİŞİKLİK SONU ---
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -255,8 +257,6 @@ impl MediaService for MyMediaService {
             bits_per_sample: 16,
             sample_format: SampleFormat::Int,
         };
-        
-        // --- DEĞİŞİKLİK BURADA: `RecordingSession` yeni yapıya göre oluşturuluyor ---
         let recording_session = RecordingSession {
             output_uri: req_ref.output_uri.clone(),
             spec,
@@ -264,8 +264,6 @@ impl MediaService for MyMediaService {
             call_id: req_ref.call_id.clone(),
             trace_id: req_ref.trace_id.clone(),
         };
-        // --- DEĞİŞİKLİK SONU ---
-
         let command = RtpCommand::StartPermanentRecording(recording_session);
         session_tx
             .send(command)
