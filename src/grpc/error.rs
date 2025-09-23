@@ -29,7 +29,6 @@ impl Display for ServiceError {
 
 impl std::error::Error for ServiceError {}
 
-// Bu `From` implementasyonu, hatalarımızı `tonic::Status`'e dönüştürür.
 impl From<ServiceError> for Status {
     fn from(err: ServiceError) -> Self {
         let message = err.to_string();
@@ -40,16 +39,15 @@ impl From<ServiceError> for Status {
                 Status::invalid_argument(message)
             }
             
+            // --- GÜÇLENDİRİLMİŞ HATA YÖNETİMİ ---
             ServiceError::RecordingSaveFailed { source } => {
                 let lower_source = source.to_lowercase();
                 if lower_source.contains("nosuchbucket") {
-                    // --- DEĞİŞİKLİK BURADA: Mesajı zenginleştiriyoruz ---
                     let richer_message = format!(
                         "Kayıt hedefi (S3 Bucket) bulunamadı veya yapılandırılmamış. Lütfen altyapıyı kontrol edin. Detay: {}",
                         source
                     );
                     Status::failed_precondition(richer_message)
-                    // --- DEĞİŞİKLİK SONU ---
                 } else if lower_source.contains("accessdenied") {
                     let richer_message = format!(
                         "S3 Bucket'ına yazma izni yok (Access Denied). Detay: {}",
@@ -61,6 +59,7 @@ impl From<ServiceError> for Status {
                     Status::internal("Kayıt kaydedilirken bir iç hata oluştu.")
                 }
             }
+            // --- HATA YÖNETİMİ SONU ---
 
             ServiceError::CommandSendError(_) | ServiceError::InternalError(_) => {
                 tracing::error!(error = %message, "Dahili servis hatası oluştu");

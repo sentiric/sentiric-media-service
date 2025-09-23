@@ -1,3 +1,4 @@
+// sentiric-media-service/src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyMediaService;
 use crate::metrics::start_metrics_server;
@@ -17,7 +18,8 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
-use tracing_subscriber::{prelude::*, EnvFilter, fmt::{self, format::FmtSpan}, Registry};
+// DÜZELTME: Gerekli tüm `tracing_subscriber` bileşenleri import ediliyor.
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
 pub struct App {
     config: Arc<AppConfig>,
@@ -31,14 +33,19 @@ impl App {
         }
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
-        let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&config.rust_log))?;
+        // --- STANDARTLAŞTIRILMIŞ LOGLAMA KURULUMU ---
+        let rust_log_env = env::var("RUST_LOG")
+            .unwrap_or_else(|_| "info,h2=warn,hyper=warn,tower=warn,rustls=warn,lapin=warn,aws_config=warn,aws_smithy_http_tower=warn".to_string());
+        
+        let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
         if config.env == "development" {
-            subscriber.with(fmt::layer().with_target(true).with_line_number(true).with_span_events(FmtSpan::NONE)).init();
+            subscriber.with(fmt::layer().with_target(true).with_line_number(true)).init();
         } else {
-            subscriber.with(fmt::layer().json().with_current_span(true).with_span_list(true).with_span_events(FmtSpan::NONE)).init();
+            subscriber.with(fmt::layer().json().with_current_span(true).with_span_list(true)).init();
         }
+        // --- LOGLAMA KURULUMU SONU ---
         
         let service_version = env::var("SERVICE_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
         let git_commit = env::var("GIT_COMMIT").unwrap_or_else(|_| "unknown".to_string());
@@ -68,7 +75,7 @@ impl App {
                 reclamation_manager.run_reclamation_task(quarantine_duration).await;
             });
             
-            let tls_config = load_server_tls_config().await.context("TLS konfigürasyonu yüklenemedi")?;
+            let tls_config = load_server_tls_config(&app_config).await.context("TLS konfigürasyonu yüklenemedi")?; // config'i referans olarak ver
             let media_service = MyMediaService::new(app_config.clone(), app_state);
             let server_addr = app_config.grpc_listen_addr;
             info!(address = %server_addr, "Güvenli gRPC sunucusu dinlemeye başlıyor...");
@@ -108,6 +115,7 @@ impl App {
         info!("Servis başarıyla durduruldu.");
         Ok(())
     }
+
 
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client_handle = tokio::spawn(Self::create_s3_client(config.clone()));
