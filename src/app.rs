@@ -18,7 +18,6 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
 use tracing::{error, info, warn};
-// DÜZELTME: Gerekli tüm `tracing_subscriber` bileşenleri import ediliyor.
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
 pub struct App {
@@ -75,7 +74,9 @@ impl App {
                 reclamation_manager.run_reclamation_task(quarantine_duration).await;
             });
             
-            let tls_config = load_server_tls_config(&app_config).await.context("TLS konfigürasyonu yüklenemedi")?; // config'i referans olarak ver
+            // Düzeltilmiş fonksiyon çağrısı
+            let tls_config = load_server_tls_config(&app_config).await.context("TLS konfigürasyonu yüklenemedi")?;
+            
             let media_service = MyMediaService::new(app_config.clone(), app_state);
             let server_addr = app_config.grpc_listen_addr;
             info!(address = %server_addr, "Güvenli gRPC sunucusu dinlemeye başlıyor...");
@@ -115,7 +116,6 @@ impl App {
         info!("Servis başarıyla durduruldu.");
         Ok(())
     }
-
 
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client_handle = tokio::spawn(Self::create_s3_client(config.clone()));

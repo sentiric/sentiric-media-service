@@ -1,4 +1,4 @@
-// src/config.rs
+// sentiric-media-service/src/config.rs
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -29,6 +29,10 @@ pub struct AppConfig {
     pub rtp_command_channel_buffer: usize,
     pub live_audio_stream_buffer: usize,
     pub rabbitmq_url: Option<String>,
+    // --- YENİ EKLENEN ALANLAR ---
+    pub cert_path: String,
+    pub key_path: String,
+    pub ca_path: String,
 }
 
 impl AppConfig {
@@ -78,6 +82,10 @@ impl AppConfig {
             rtp_session_inactivity_timeout: Duration::from_secs(inactivity_seconds),
             rtp_command_channel_buffer: command_buffer,
             live_audio_stream_buffer: stream_buffer,
+            // --- YENİ ALANLARIN DOLDURULMASI ---
+            cert_path: env::var("MEDIA_SERVICE_CERT_PATH").context("ZORUNLU: MEDIA_SERVICE_CERT_PATH eksik")?,
+            key_path: env::var("MEDIA_SERVICE_KEY_PATH").context("ZORUNLU: MEDIA_SERVICE_KEY_PATH eksik")?,
+            ca_path: env::var("GRPC_TLS_CA_PATH").context("ZORUNLU: GRPC_TLS_CA_PATH eksik")?,
         })
     }
 }
