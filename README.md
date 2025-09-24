@@ -37,9 +37,9 @@
 
 ## 🚀 Yerel Geliştirme
 
-1.  **Bağımlılıkları Yükleyin:** `cargo build`
-2.  **`.env` Dosyasını Oluşturun:** `development.env` dosyasını `.env` olarak kopyalayıp kendi sisteminize göre sertifika yollarını düzenleyin.
-3.  **Servisi Çalıştırın:** `cargo run --release`
+1.  **Bağımlılıkları Yükleyin:**
+2.  **Ortam Değişkenlerini Ayarlayın:** `.env.example` dosyasını `.env` olarak kopyalayın ve gerekli değişkenleri doldurun.
+3.  **Servisi Çalıştırın:**
 
 ## 🤝 Katkıda Bulunma
 
