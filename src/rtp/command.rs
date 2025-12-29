@@ -24,22 +24,35 @@ pub struct RecordingSession {
 
 #[derive(Debug)]
 pub enum RtpCommand {
+    // Mevcut dosya/URI oynatma komutu
     PlayAudioUri {
         audio_uri: String,
         candidate_target_addr: SocketAddr,
         cancellation_token: CancellationToken,
-        // Bu kanal, ses çalma işlemi bittiğinde veya hata verdiğinde sinyal gönderecek.
         responder: Option<oneshot::Sender<Result<()>>>,
     },
     StopAudio,
+    
+    // Canlı ses dinleme (Inbound -> gRPC)
     StartLiveAudioStream {
         stream_sender: mpsc::Sender<Result<AudioFrame, Status>>,
         target_sample_rate: Option<u32>,
     },
     StopLiveAudioStream,
+    
+    // --- YENİ EKLENEN: Canlı ses gönderme (gRPC -> Outbound) ---
+    StartOutboundStream {
+        // gRPC servisinden gelen ham ses verisi (genellikle 16kHz PCM veya Opus)
+        // Her bir Vec<u8> bir ses parçasını temsil eder.
+        audio_rx: mpsc::Receiver<Vec<u8>>,
+    },
+    StopOutboundStream,
+
+    // Kalıcı kayıt işlemleri
     StartPermanentRecording(RecordingSession),
     StopPermanentRecording {
         responder: oneshot::Sender<Result<String, String>>,
     },
+    
     Shutdown,
 }

@@ -1,15 +1,15 @@
 [package]
 name = "sentiric-media-service"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
-# Temel Asenkron ve gRPC (Bilinen stabil versiyonlar)
+# Temel Asenkron ve gRPC
 tokio = { version = "1.37.0", features = ["full"] }
 tonic = { version = "0.11.0", features = ["tls"] }
 prost = "0.12.3"
 futures = "0.3.30"
-tokio-stream = { version = "0.1.15", features = ["sync"] }
+tokio-stream = { version = "0.1.15", features = ["sync", "net"] }
 tokio-util = { version = "0.7.10", features = ["full"] }
 
 # Loglama ve Gözlemlenebilirlik
@@ -17,9 +17,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "registry"] }
 metrics = "0.22.0"
 metrics-exporter-prometheus = "0.13.1"
-# --- KRİTİK EKLEME ---
 hyper = { version = "0.14.28", features = ["full"] }
-# --- EKLEME SONU ---
 
 # Konfigürasyon ve Hata Yönetimi
 dotenvy = "0.15.7"
@@ -33,7 +31,7 @@ rubato = "0.14.1"
 symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
 webrtc-util = { version = "0.7.0", features = ["marshal"] }
 
-# --- NİHAİ TLS VE KRİPTO ÇÖZÜMÜ (Versiyonlar Doğrulandı) ---
+# TLS ve Kripto
 rustls = { version = "0.23.31", features = ["ring"] }
 rustls-pemfile = "2.1.2"
 ring = "0.17.8"
@@ -45,7 +43,7 @@ base64 = "0.22.1"
 backtrace = "0.3.73"
 uuid = { version = "1.8.0", features = ["v4"] }
 
-# Kayıt ve S3 & RabbitMQ Bağımlılıkları
+# Kayıt ve S3 & RabbitMQ
 async-trait = "0.1.80"
 url = "2.5.0"
 aws-config = "1.1.8"
@@ -55,10 +53,10 @@ aws-credential-types = "1.1.8"
 lapin = "2.3.1"
 serde_json = "1.0.117"
 
-# Kontratların en son, protoc sorunu çözülmüş versiyonu
+# --- GÜNCELLENEN KONTRAT ---
 [dependencies.sentiric-contracts]
 git = "https://github.com/sentiric/sentiric-contracts.git"
-tag = "v1.8.12"
+tag = "v1.13.1"
 
 [dev-dependencies]
 test-log = "0.2.14"

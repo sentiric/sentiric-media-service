@@ -3586,8 +3586,8 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "sentiric-contracts"
-version = "1.8.12"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.8.12#da2925d76ce0145542879f21a09ca3c7ffb7af86"
+version = "1.13.1"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.13.1#2d3cfe0f8448c55cf1251e533c3c6555adbf3c87"
 dependencies = [
  "prost",
  "prost-types",
@@ -3598,7 +3598,7 @@ dependencies = [
 
 [[package]]
 name = "sentiric-media-service"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
