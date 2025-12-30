@@ -14,7 +14,7 @@ use sentiric_contracts::sentiric::media::v1::{
     PlayAudioRequest, PlayAudioResponse, RecordAudioRequest, RecordAudioResponse,
     ReleasePortRequest, ReleasePortResponse, StartRecordingRequest, StartRecordingResponse,
     StopRecordingRequest, StopRecordingResponse,
-    StreamAudioToCallRequest, StreamAudioToCallResponse, // YENİ
+    StreamAudioToCallRequest, StreamAudioToCallResponse,
 };
 use std::pin::Pin;
 use std::sync::Arc;
@@ -41,7 +41,6 @@ impl MyMediaService {
 #[tonic::async_trait]
 impl MediaService for MyMediaService {
     
-    // --- YENİ EKLENEN STREAMING METODU ---
     type StreamAudioToCallStream = Pin<Box<dyn Stream<Item = Result<StreamAudioToCallResponse, Status>> + Send>>;
 
     #[instrument(skip(self, request))]
@@ -66,27 +65,7 @@ impl MediaService for MyMediaService {
             return Err(Status::invalid_argument("Call ID boş olamaz"));
         }
 
-        // Call ID üzerinden RTP portunu bulmak için state'i taramamız gerekebilir
-        // Ancak current PortManager implementation port -> sender map'i tutuyor.
-        // Call ID -> Port eşleşmesi PortManager'da yok. 
-        // BU YÜZDEN: Protokolde bir eksiklik var veya Client önce AllocatePort yaptı ve bize PORT vermeliydi.
-        // FAKAT: Contracts'a baktığımızda Request'te sadece `call_id` var.
-        // PortManager'a `call_id` -> `port` mapping eklenmeli veya...
-        // OMNISCIENT KARAR: PortManager, allocate edildiğinde call_id'yi de saklamalı.
-        // FAKAT şimdilik, basitlik adına: AllocatePort request'indeki call_id ile eşleşen bir mekanizma yoksa, 
-        // bu metodun çalışması zor. 
-        // DÜZELTME: Mevcut kodda AllocatePort call_id alıyor ama saklamıyor.
-        // HIZLI ÇÖZÜM: PortManager'ı değiştirmeden önce, Contracts'ta `StreamAudioToCallRequest` içinde `port` var mı? YOK.
-        // O zaman PortManager'da session'ları arayacağız (Verimsiz ama şu an için tek yol)
-        // VEYA: AllocatePort'da call_id -> port mapping'i kaydedeceğiz.
-        
-        // PortManager update edilmediği için, şimdilik tüm sessionları gezip call_id eşleştiremeyiz (session struct private).
-        // KRİTİK MÜDAHALE: Bu özellik şu anki PortManager yapısıyla `call_id` üzerinden çalışamaz.
-        // Ancak, `StreamAudioToCallRequest` kontratı `call_id` istiyor.
-        // Tek çözüm: PortManager'a `HashMap<String, u16>` (CallID -> Port) eklemek.
-        // Bunu FAZ 2 kapsamında `src/state.rs` dosyasında da güncelleyeceğiz.
-        
-        // ... (PortManager güncellemesi aşağıda yapıldı varsayalım) ...
+        // Call ID üzerinden portu bul
         let rtp_port = self.app_state.port_manager.get_port_by_call_id(&call_id).await
             .ok_or_else(|| Status::not_found(format!("Call ID {} için aktif RTP oturumu bulunamadı", call_id)))?;
 
@@ -94,7 +73,7 @@ impl MediaService for MyMediaService {
             .ok_or_else(|| Status::not_found("RTP oturum kanalı bulunamadı"))?;
 
         // RTP Session'a stream başlatma komutu gönder
-        let (audio_tx, audio_rx) = mpsc::channel(128); // Buffer size
+        let (audio_tx, audio_rx) = mpsc::channel(128);
         
         session_tx.send(RtpCommand::StartOutboundStream { audio_rx }).await
             .map_err(|_| Status::internal("RTP oturumuna komut gönderilemedi"))?;
@@ -106,7 +85,7 @@ impl MediaService for MyMediaService {
             // İlk mesajdaki veriyi gönder
             if !first_msg.audio_chunk.is_empty() {
                 if audio_tx.send(first_msg.audio_chunk).await.is_err() {
-                    return; // Oturum kapanmış
+                    return; 
                 }
             }
 
@@ -118,10 +97,6 @@ impl MediaService for MyMediaService {
                 }
             }
             
-            // Stream bitti, RTP session'a durdurma komutu gönderilmesine gerek yok, 
-            // channel drop edildiğinde `recv` None dönecek ve session otomatik anlayacak.
-            // Ama biz yine de explicit olalım mı? Gerek yok, rx.recv() None döner.
-            
             // Başarılı yanıt gönder
             let _ = response_tx.send(Ok(StreamAudioToCallResponse {
                 success: true,
@@ -132,7 +107,6 @@ impl MediaService for MyMediaService {
         Ok(Response::new(Box::pin(ReceiverStream::new(response_rx))))
     }
 
-    // --- MEVCUT METOTLAR (Aynen korunuyor) ---
     #[instrument(skip_all, fields(service = "media-service", call_id = %request.get_ref().call_id))]
     async fn allocate_port(
         &self,
@@ -140,13 +114,14 @@ impl MediaService for MyMediaService {
     ) -> Result<Response<AllocatePortResponse>, Status> {
         counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
         let call_id = request.get_ref().call_id.clone();
-        
-        // ... (Retry loop ve socket bind aynı) ...
+        info!(call_id = %call_id, "Port tahsis isteği alındı.");
+
         const MAX_RETRIES: u8 = 5;
         for i in 0..MAX_RETRIES {
             let port_to_try = match self.app_state.port_manager.get_available_port().await {
                 Some(p) => p,
                 None => {
+                    warn!(attempt = i + 1, max_attempts = MAX_RETRIES, "Port havuzu tükendi.");
                     if i < MAX_RETRIES - 1 {
                         tokio::time::sleep(Duration::from_millis(100)).await;
                         continue;
@@ -157,9 +132,11 @@ impl MediaService for MyMediaService {
 
             match UdpSocket::bind(format!("{}:{}", self.config.rtp_host, port_to_try)).await {
                 Ok(socket) => {
+                    info!(port = port_to_try, "Port başarıyla bağlandı ve oturum başlatılıyor.");
+                    gauge!(ACTIVE_SESSIONS).increment(1.0);
                     let (tx, rx) = mpsc::channel(self.config.rtp_command_channel_buffer);
                     
-                    // GÜNCELLEME: add_session artık call_id de almalı (State güncellemesi gerektirir)
+                    // Call ID'yi kaydet
                     self.app_state.port_manager.add_session(port_to_try, tx, Some(call_id.clone())).await;
 
                     let session_config = RtpSessionConfig {
@@ -174,6 +151,7 @@ impl MediaService for MyMediaService {
                     }));
                 }
                 Err(e) => {
+                    warn!(port = port_to_try, error = %e, "Porta bağlanılamadı, karantinaya alınıp başka port denenecek.");
                     self.app_state.port_manager.quarantine_port(port_to_try).await;
                     continue;
                 }
@@ -182,25 +160,48 @@ impl MediaService for MyMediaService {
         Err(ServiceError::PortPoolExhausted.into())
     }
 
-    // ... (Diğer metotlar: release_port, play_audio, record_audio, start/stop_recording) ...
-    // ... Bu metotlar önceki versiyonla birebir aynı kalabilir, sadece importlar güncellendi ...
-    
     #[instrument(skip(self, request), fields(port = %request.get_ref().rtp_port))]
-    async fn release_port(&self, request: Request<ReleasePortRequest>) -> Result<Response<ReleasePortResponse>, Status> {
+    async fn release_port(
+        &self,
+        request: Request<ReleasePortRequest>,
+    ) -> Result<Response<ReleasePortResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "release_port").increment(1);
+
         let port = request.into_inner().rtp_port as u16;
         if let Some(tx) = self.app_state.port_manager.get_session_sender(port).await {
-            let _ = tx.send(RtpCommand::Shutdown).await;
+            info!(port, "Oturum sonlandırma sinyali gönderiliyor.");
+            if tx.send(RtpCommand::Shutdown).await.is_err() {
+                warn!(port, "Shutdown komutu gönderilemedi (kanal kapalı).");
+            }
+        } else {
+            warn!(port, "Serbest bırakılacak oturum bulunamadı.");
         }
         Ok(Response::new(ReleasePortResponse { success: true }))
     }
 
-    #[instrument(skip(self, request))]
-    async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
+    #[instrument(skip(self, request), fields(
+        port = %request.get_ref().server_rtp_port,
+        audio_uri.scheme = %extract_uri_scheme(&request.get_ref().audio_uri),
+        audio_uri.len = field::Empty,
+    ))]
+    async fn play_audio(
+        &self,
+        request: Request<PlayAudioRequest>,
+    ) -> Result<Response<PlayAudioResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "play_audio").increment(1);
+
         let req = request.into_inner();
+        let span = tracing::Span::current();
+        span.record("audio_uri.len", &req.audio_uri.len());
+
         let rtp_port = req.server_rtp_port as u16;
         let tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| ServiceError::SessionNotFound { port: rtp_port })?;
-        let target_addr = req.rtp_target_addr.parse().map_err(|e| ServiceError::InvalidTargetAddress { addr: req.rtp_target_addr, source: e })?;
+        
+        let target_addr = req.rtp_target_addr.parse().map_err(|e| {
+            ServiceError::InvalidTargetAddress { addr: req.rtp_target_addr, source: e }
+        })?;
+
         let (responder_tx, responder_rx) = oneshot::channel();
         let command = RtpCommand::PlayAudioUri {
             audio_uri: req.audio_uri,
@@ -208,7 +209,9 @@ impl MediaService for MyMediaService {
             cancellation_token: CancellationToken::new(),
             responder: Some(responder_tx),
         };
+
         tx.send(command).await.map_err(|_| ServiceError::CommandSendError("PlayAudioUri".to_string()))?;
+
         match responder_rx.await {
             Ok(Ok(_)) => Ok(Response::new(PlayAudioResponse { success: true, message: "OK".to_string() })),
             Ok(Err(e)) => Err(Status::internal(e.to_string())),
@@ -217,36 +220,83 @@ impl MediaService for MyMediaService {
     }
 
     type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
-    async fn record_audio(&self, request: Request<RecordAudioRequest>) -> Result<Response<Self::RecordAudioStream>, Status> {
+
+    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
+    async fn record_audio(
+        &self,
+        request: Request<RecordAudioRequest>,
+    ) -> Result<Response<Self::RecordAudioStream>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "record_audio").increment(1);
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
-        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await.ok_or(ServiceError::SessionNotFound { port: rtp_port })?;
-        let (stream_tx, stream_rx) = mpsc::channel(64);
-        session_tx.send(RtpCommand::StartLiveAudioStream { stream_sender: stream_tx, target_sample_rate: req.target_sample_rate }).await.map_err(|_| ServiceError::CommandSendError("StartLive".into()))?;
-        let output = ReceiverStream::new(stream_rx).map(|res| res.map(|f| RecordAudioResponse { audio_data: f.data.into(), media_type: f.media_type }));
-        Ok(Response::new(Box::pin(output)))
+        
+        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
+            .ok_or_else(|| ServiceError::SessionNotFound { port: rtp_port })?;
+            
+        let (stream_tx, stream_rx) = mpsc::channel(self.config.live_audio_stream_buffer);
+        let command = RtpCommand::StartLiveAudioStream {
+            stream_sender: stream_tx,
+            target_sample_rate: req.target_sample_rate,
+        };
+        session_tx.send(command).await.map_err(|_| ServiceError::CommandSendError("StartLive".into()))?;
+        
+        let output_stream = ReceiverStream::new(stream_rx).map(|res| {
+            res.map(|frame| RecordAudioResponse {
+                audio_data: frame.data.into(),
+                media_type: frame.media_type,
+            })
+        });
+        Ok(Response::new(Box::pin(output_stream)))
     }
 
-    async fn start_recording(&self, request: Request<StartRecordingRequest>) -> Result<Response<StartRecordingResponse>, Status> {
-        let req = request.get_ref();
-        let rtp_port = req.server_rtp_port as u16;
-        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await.ok_or(ServiceError::SessionNotFound { port: rtp_port })?;
+    #[instrument(skip(self, request), fields(
+        port = %request.get_ref().server_rtp_port,
+        output.scheme = field::Empty,
+        call_id = %request.get_ref().call_id,
+    ))]
+    async fn start_recording(
+        &self,
+        request: Request<StartRecordingRequest>,
+    ) -> Result<Response<StartRecordingResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "start_recording").increment(1);
+        let req_ref = request.get_ref();
+        
+        if let Ok(url) = Url::parse(&req_ref.output_uri) {
+            tracing::Span::current().record("output.scheme", url.scheme());
+        }
+        
+        let rtp_port = req_ref.server_rtp_port as u16;
+        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
+            .ok_or_else(|| ServiceError::SessionNotFound { port: rtp_port })?;
+            
         let session = RecordingSession {
-            output_uri: req.output_uri.clone(),
+            output_uri: req_ref.output_uri.clone(),
             spec: WavSpec { channels: 1, sample_rate: 8000, bits_per_sample: 16, sample_format: SampleFormat::Int },
             mixed_samples_16khz: Vec::new(),
-            call_id: req.call_id.clone(),
-            trace_id: req.trace_id.clone(),
+            call_id: req_ref.call_id.clone(),
+            trace_id: req_ref.trace_id.clone(),
         };
-        session_tx.send(RtpCommand::StartPermanentRecording(session)).await.map_err(|_| ServiceError::CommandSendError("StartRec".into()))?;
+
+        session_tx.send(RtpCommand::StartPermanentRecording(session)).await
+            .map_err(|_| ServiceError::CommandSendError("StartPermanentRecording".to_string()))?;
+            
         Ok(Response::new(StartRecordingResponse { success: true }))
     }
 
-    async fn stop_recording(&self, request: Request<StopRecordingRequest>) -> Result<Response<StopRecordingResponse>, Status> {
+    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
+    async fn stop_recording(
+        &self,
+        request: Request<StopRecordingRequest>,
+    ) -> Result<Response<StopRecordingResponse>, Status> {
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "stop_recording").increment(1);
         let rtp_port = request.get_ref().server_rtp_port as u16;
-        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await.ok_or(ServiceError::SessionNotFound { port: rtp_port })?;
+        let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
+            .ok_or_else(|| ServiceError::SessionNotFound { port: rtp_port })?;
+            
         let (tx, rx) = oneshot::channel();
-        session_tx.send(RtpCommand::StopPermanentRecording { responder: tx }).await.map_err(|_| ServiceError::CommandSendError("StopRec".into()))?;
+        session_tx.send(RtpCommand::StopPermanentRecording { responder: tx }).await
+            .map_err(|_| ServiceError::CommandSendError("StopPermanentRecording".to_string()))?;
+            
         match rx.await {
             Ok(Ok(_)) => Ok(Response::new(StopRecordingResponse { success: true })),
             Ok(Err(e)) => Err(ServiceError::RecordingSaveFailed { source: e }.into()),

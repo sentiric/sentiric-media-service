@@ -72,7 +72,7 @@ pub async fn rtp_session_handler(
     // --- Outbound Streaming State ---
     let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
     // Outbound RTP state (SSRC, SeqNum, Timestamp)
-    let mut rtp_ssrc: u32 = rand::thread_rng().gen();
+    let rtp_ssrc: u32 = rand::thread_rng().gen(); 
     let mut rtp_seq: u16 = rand::thread_rng().gen();
     let mut rtp_ts: u32 = rand::thread_rng().gen();
 

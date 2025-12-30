@@ -44,10 +44,44 @@ fi
 
 echo "\n\n--- 🧪 Starting All Tests ---"
 
-echo "\n\n--- 🧪 TEST 1: Uçtan Uca Temel Diyalog Doğrulama"
+# NOT: .env.test .env.example .env gibi dev ortamları yada docker ortamında karmaşıklık var!!!
+# test ortamında yada genelinde environment tanımları düzensiz
+
+# docker-compose.test sırasında hata
+# thread 'main' panicked at examples/agent_client.rs:21:13:
+# '.env.example' dosyası yüklenemedi: path not found
+# note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+# cargo run --example agent_client ile local çalışıyor?
+
+echo "\n\n--- 🧪 TEST : Agent Client Doğrulama"
+./agent_client
+
+echo "\n\n--- 🧪 TEST : Dialplan Client Doğrulama"
+./dialplan_client
+
+echo "\n\n--- 🧪 TEST : Uçtan Uca Temel Diyalog Doğrulama"
 ./end_to_end_call_validator
 
-echo "\n\n--- 🧪 TEST 2: Gerçekçi Çağrı Akışı (Anons Kuyruğu ve Cızırtı) Doğrulama"
+echo "\n\n--- 🧪 TEST : Live Audio Client Doğrulama"
+./live_audio_client
+
+echo "\n\n--- 🧪 TEST : Gerçekçi Çağrı Akışı (Anons Kuyruğu ve Cızırtı) Doğrulama"
 ./realistic_call_flow
+
+echo "\n\n--- 🧪 TEST : Record Client Doğrulama"
+./recording_client
+
+echo "\n\n--- 🧪 TEST : Sip Signaling Client Doğrulama"
+./sip_signaling_client
+
+echo "\n\n--- 🧪 TEST : TTS Stream Doğrulama"
+./tts_stream_client
+
+echo "\n\n--- 🧪 TEST : User Client Doğrulama"
+./user_client
+
+echo "\n\n--- 🧪 TEST : CAll Simulator Doğrulama"
+./call_simulator
 
 echo "\n--- ✅✅✅ ALL TESTS PASSED SUCCESSFULLY --- ✅✅✅"
