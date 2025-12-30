@@ -35,7 +35,7 @@ services:
     environment:
       # --- Service Identity ---
       - ENV=development
-      - RUST_LOG=info,sentiric_media_service=debug
+      - RUST_LOG=info,sentiric_media_service=info
 
       # --- Network & Ports ---
       - MEDIA_SERVICE_GRPC_PORT=13031

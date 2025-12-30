@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{debug, error, field, info, instrument, warn};
+use tracing::{debug, field, info, instrument, warn};
 use url::Url;
 use crate::metrics::ACTIVE_SESSIONS; // Gauge için gerekli
 
