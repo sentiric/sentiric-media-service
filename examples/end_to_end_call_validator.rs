@@ -1,5 +1,5 @@
 // examples/end_to_end_call_validator.rs
-use anyhow::{Context, Result};
+use anyhow::Result; // DÜZELTME: Context kaldırıldı
 use aws_sdk_s3::Client as S3Client;
 use hound::WavReader;
 use rand::Rng;
@@ -21,6 +21,7 @@ use shared::{grpc_client::connect_to_media_service, rtp_utils::send_pcmu_rtp_str
 
 #[tokio::main]
 async fn main() -> Result<()> {
+
     println!("--- Uçtan Uca Medya Servisi TEMEL Doğrulama Testi Başlatılıyor ---");
     println!("---  Senaryo: PCMU kodek ile çağrı, 8kHz WAV olarak kayıt ve birleştirme ---");
 
@@ -137,13 +138,12 @@ async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u3
         tokio::select!{
             biased;
             _ = &mut done_rx => { break; },
-            // --- DEĞİŞİKLİK: Veri gelmiyorsa timeout ile döngüden çık ---
             maybe_item = tokio::time::timeout(Duration::from_secs(3), stream.next()) => {
                 match maybe_item {
                     Ok(Some(Ok(res))) => { total_bytes += res.audio_data.len(); },
                     Ok(Some(Err(e))) => { eprintln!("Stream hatası: {}", e); break; },
-                    Ok(None) => break, // Stream bitti
-                    Err(_) => { // Timeout
+                    Ok(None) => break, 
+                    Err(_) => { 
                         println!("- [STT DINLEYICI] 3 saniyedir yeni ses verisi gelmiyor, dinleyici kapatılıyor.");
                         break;
                     }
@@ -154,9 +154,6 @@ async fn listen_to_live_audio(client: &mut MediaServiceClient<Channel>, port: u3
     Ok(total_bytes)
 }
 
-// Bu fonksiyonu her iki test dosyasında da güncelleyin:
-// end_to_end_call_validator.rs ve realistic_call_flow.rs
-// examples/end_to_end_call_validator.rs ve realistic_call_flow.rs içinde
 async fn download_from_s3(client: &S3Client, bucket: &str, key: &str) -> Result<Vec<u8>> {
     const MAX_RETRIES: u32 = 6;
     const RETRY_DELAY_SECONDS: u64 = 4;
@@ -171,7 +168,6 @@ async fn download_from_s3(client: &S3Client, bucket: &str, key: &str) -> Result<
             }
             Err(e) => {
                 if attempt == MAX_RETRIES {
-                    // Son denemede de başarısız olursa hatayı detaylı döndür
                     return Err(anyhow::anyhow!(e).context(format!("Dosya S3'te bulunamadı (bucket: {}, key: {})", bucket, key)));
                 }
                 println!("- İndirme hatası, {} saniye sonra tekrar denenecek... Hata: {}", RETRY_DELAY_SECONDS, e);
@@ -179,5 +175,5 @@ async fn download_from_s3(client: &S3Client, bucket: &str, key: &str) -> Result<
             }
         }
     }
-    unreachable!(); // Bu satıra asla ulaşılmamalı
+    unreachable!();
 }

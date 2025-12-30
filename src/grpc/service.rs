@@ -1,7 +1,7 @@
 // sentiric-media-service/src/grpc/service.rs
 use crate::config::AppConfig;
 use crate::grpc::error::ServiceError;
-use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
+use crate::metrics::GRPC_REQUESTS_TOTAL;
 use crate::rtp::command::{RecordingSession, RtpCommand};
 use crate::rtp::session::{rtp_session_handler, RtpSessionConfig};
 use crate::state::AppState;
@@ -26,6 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, field, info, instrument, warn};
 use url::Url;
+use crate::metrics::ACTIVE_SESSIONS; // Gauge için gerekli
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -65,24 +66,20 @@ impl MediaService for MyMediaService {
             return Err(Status::invalid_argument("Call ID boş olamaz"));
         }
 
-        // Call ID üzerinden portu bul
         let rtp_port = self.app_state.port_manager.get_port_by_call_id(&call_id).await
             .ok_or_else(|| Status::not_found(format!("Call ID {} için aktif RTP oturumu bulunamadı", call_id)))?;
 
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| Status::not_found("RTP oturum kanalı bulunamadı"))?;
 
-        // RTP Session'a stream başlatma komutu gönder
         let (audio_tx, audio_rx) = mpsc::channel(128);
         
         session_tx.send(RtpCommand::StartOutboundStream { audio_rx }).await
             .map_err(|_| Status::internal("RTP oturumuna komut gönderilemedi"))?;
 
-        // Arka planda stream'i okuyup kanala basan bir task başlat
         let (response_tx, response_rx) = mpsc::channel(1);
         
         tokio::spawn(async move {
-            // İlk mesajdaki veriyi gönder
             if !first_msg.audio_chunk.is_empty() {
                 if audio_tx.send(first_msg.audio_chunk).await.is_err() {
                     return; 
@@ -97,7 +94,6 @@ impl MediaService for MyMediaService {
                 }
             }
             
-            // Başarılı yanıt gönder
             let _ = response_tx.send(Ok(StreamAudioToCallResponse {
                 success: true,
                 error_message: "".to_string(),
@@ -136,7 +132,6 @@ impl MediaService for MyMediaService {
                     gauge!(ACTIVE_SESSIONS).increment(1.0);
                     let (tx, rx) = mpsc::channel(self.config.rtp_command_channel_buffer);
                     
-                    // Call ID'yi kaydet
                     self.app_state.port_manager.add_session(port_to_try, tx, Some(call_id.clone())).await;
 
                     let session_config = RtpSessionConfig {
@@ -193,6 +188,13 @@ impl MediaService for MyMediaService {
         let req = request.into_inner();
         let span = tracing::Span::current();
         span.record("audio_uri.len", &req.audio_uri.len());
+
+        if req.audio_uri.starts_with("data:") {
+            let truncated_uri = &req.audio_uri[..std::cmp::min(50, req.audio_uri.len())];
+            debug!(audio_uri.preview = %truncated_uri, "PlayAudio komutu (data URI) alındı.");
+        } else {
+            debug!(audio_uri = %req.audio_uri, "PlayAudio komutu (file URI) alındı.");
+        }
 
         let rtp_port = req.server_rtp_port as u16;
         let tx = self.app_state.port_manager.get_session_sender(rtp_port).await
@@ -262,7 +264,8 @@ impl MediaService for MyMediaService {
         let req_ref = request.get_ref();
         
         if let Ok(url) = Url::parse(&req_ref.output_uri) {
-            tracing::Span::current().record("output.scheme", url.scheme());
+            let span = tracing::Span::current();
+            span.record("output.scheme", url.scheme());
         }
         
         let rtp_port = req_ref.server_rtp_port as u16;
@@ -297,10 +300,11 @@ impl MediaService for MyMediaService {
         session_tx.send(RtpCommand::StopPermanentRecording { responder: tx }).await
             .map_err(|_| ServiceError::CommandSendError("StopPermanentRecording".to_string()))?;
             
+        // Hata yakalama değişkeni düzeltildi: _e kullanıldı
         match rx.await {
             Ok(Ok(_)) => Ok(Response::new(StopRecordingResponse { success: true })),
             Ok(Err(e)) => Err(ServiceError::RecordingSaveFailed { source: e }.into()),
-            Err(e) => Err(ServiceError::InternalError(anyhow::anyhow!(e)).into()),
+            Err(_e) => Err(ServiceError::InternalError(anyhow::anyhow!("Kanal hatası")).into()),
         }
     }
 }
