@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument, warn};
 
 // CORE Libraries (Sentiric RTP Core)
-use sentiric_rtp_core::{CodecFactory, CodecType, Encoder, RtpHeader, RtpPacket};
+use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -250,11 +250,11 @@ pub async fn rtp_session_handler(
                         }
                     }
                     
-                    // a) Kayıt için biriktir
-                    if let Some(_session) = &mut *permanent_recording_session.lock().await {
-                        // TODO: Mix logic here. Şimdilik sadece gelen sesi ekliyoruz.
-                        // _session.mixed_samples_16khz.extend_from_slice(&samples_16khz);
-                    }
+                    // // a) Kayıt için biriktir
+                    // if let Some(_session) = &mut *permanent_recording_session.lock().await {
+                    //     // TODO: Mix logic here. Şimdilik sadece gelen sesi ekliyoruz.
+                    //     // _session.mixed_samples_16khz.extend_from_slice(&samples_16khz);
+                    // }
                     
                     // b) Canlı dinleyiciye (STT) gönder
                     let mut sender_guard = live_stream_sender.lock().await;
