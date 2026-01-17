@@ -3,9 +3,9 @@ use super::command::RecordingSession;
 use crate::audio::load_or_get_from_cache;
 use crate::config::AppConfig;
 use crate::rabbitmq;
-use crate::rtp::stream::decode_audio_with_symphonia;
 use crate::rtp::writers;
 use crate::state::AppState;
+use crate::rtp::stream::decode_audio_with_symphonia;
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine};
 use hound::WavWriter;
@@ -134,19 +134,71 @@ pub async fn load_and_resample_samples_from_uri(
     config: &Arc<AppConfig>,
 ) -> Result<Arc<Vec<i16>>> {
     if uri.starts_with("data:") {
-        info!("Data URI'sinden ses çözümleniyor.");
-        let (_media_type, base64_data) = uri
-            .strip_prefix("data:")
-            .and_then(|s| s.split_once(";base64,"))
-            .context("Geçersiz data URI formatı")?;
+        info!("Data URI'sinden ses verisi alınıyor (Raw PCM Fallback Modu).");
+        
+        // Base64 verisini ayıkla
+        let base64_data = uri
+            .split(";base64,")
+            .nth(1)
+            .ok_or_else(|| anyhow!("Geçersiz data URI formatı"))?;
+            
         let audio_bytes = general_purpose::STANDARD
             .decode(base64_data)
             .context("Base64 verisi çözümlenemedi")?;
 
-        let samples = spawn_blocking(move || decode_audio_with_symphonia(audio_bytes))
-            .await
-            .context("Symphonia decode task'i başarısız oldu")??;
-        return Ok(Arc::new(samples));
+        // RAW PCM (8kHz, 16-bit, Mono) varsayımı ile işlem yapıyoruz.
+        // Eğer WAV header varsa (44 byte), atlıyoruz.
+        let raw_samples_bytes = if audio_bytes.len() > 44 && &audio_bytes[0..4] == b"RIFF" {
+            info!("WAV Header tespit edildi, header atlanarak raw data okunuyor.");
+            &audio_bytes[44..]
+        } else {
+            &audio_bytes[..]
+        };
+        
+        // Byte array -> i16 array
+        let samples_8k: Vec<i16> = raw_samples_bytes
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+            
+        if samples_8k.is_empty() {
+             // Eğer decode edilemediyse Symphonia'yı son çare olarak dene
+             warn!("Raw PCM dönüşümü boş veri üretti, Symphonia decoder deneniyor...");
+             let samples = spawn_blocking(move || decode_audio_with_symphonia(audio_bytes))
+                .await
+                .context("Symphonia decode task'i başarısız oldu")??;
+             return Ok(Arc::new(samples));
+        }
+
+        // 8kHz -> 16kHz Resampling
+        let resampled_samples_16khz = spawn_blocking(move || -> Result<Vec<i16>> {
+            info!(samples = samples_8k.len(), "Data URI sesi (Raw PCM) 16kHz'e yükseltiliyor.");
+            
+            let pcm_f32: Vec<f32> = samples_8k.iter().map(|s| *s as f32 / 32768.0).collect();
+            
+            let params = SincInterpolationParameters {
+                sinc_len: 64, // Hız için optimize (Sessizlik paketi için kalite kritik değil)
+                f_cutoff: 0.95,
+                interpolation: SincInterpolationType::Linear,
+                oversampling_factor: 128,
+                window: WindowFunction::BlackmanHarris2,
+            };
+            
+            // 8000 -> 16000 (Ratio 2.0)
+            let mut resampler = SincFixedIn::<f32>::new(2.0, 2.0, params, pcm_f32.len(), 1)?;
+            
+            let mut resampled_channels = resampler.process(&[pcm_f32], None)?;
+            
+            if resampled_channels.is_empty() {
+                return Err(anyhow!("Resampler ses kanalı döndürmedi."));
+            }
+            
+            Ok(resampled_channels.remove(0).into_iter()
+                .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                .collect())
+        }).await??;
+
+        return Ok(Arc::new(resampled_samples_16khz));
     }
 
     if let Some(path_part) = uri.strip_prefix("file://") {
