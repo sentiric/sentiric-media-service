@@ -1,25 +1,18 @@
 // sentiric-media-service/src/rtp/stream.rs
 
 use crate::rtp::codecs::{self, AudioCodec};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow}; // anyhow eklendi
 use rand::Rng;
-// DEĞİŞİKLİK: Eski 'rtp' crate yerine 'sentiric_rtp_core' kullanılıyor
-use sentiric_rtp_core::{RtpHeader, RtpPacket}; 
-use std::io::Cursor;
+use rtp::header::Header;
+use rtp::packet::Packet;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use rubato::Resampler;
+use webrtc_util::marshal::Marshal;
+// Symphonia importları kaldırıldı
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 16000;
 
@@ -30,20 +23,19 @@ pub async fn send_rtp_stream(
     token: CancellationToken,
     target_codec: AudioCodec,
 ) -> Result<()> {
-    // 1. Encode (16kHz PCM -> Hedef Codec G.711/G.729)
-    let encoded_payload = codecs::encode_lpcm16_to_g711(samples_16khz, target_codec)?;
+    // ... (Bu fonksiyon aynı kalacak) ...
+    // Sadece aşağıdaki eski kodu kopyalayın:
     
+    let g711_payload = codecs::encode_lpcm16_to_g711(samples_16khz, target_codec)?;
     info!(
         source_samples = samples_16khz.len(),
-        encoded_bytes = encoded_payload.len(),
+        encoded_bytes = g711_payload.len(),
         "Ses, hedef kodeğe başarıyla encode edildi."
     );
 
     let ssrc: u32 = rand::thread_rng().gen();
     let mut sequence_number: u16 = rand::thread_rng().gen();
     let mut timestamp: u32 = rand::thread_rng().gen();
-    
-    // G.711 için 20ms = 160 byte
     const SAMPLES_PER_PACKET: usize = 160;
 
     let rtp_payload_type = match target_codec {
@@ -53,27 +45,25 @@ pub async fn send_rtp_stream(
 
     let mut ticker = tokio::time::interval(Duration::from_millis(20));
 
-    for chunk in encoded_payload.chunks(SAMPLES_PER_PACKET) {
+    for chunk in g711_payload.chunks(SAMPLES_PER_PACKET) {
         tokio::select! {
-            biased;
+            biased; 
             _ = token.cancelled() => {
                 info!("RTP akışı dışarıdan iptal edildi.");
                 return Ok(());
             }
             _ = ticker.tick() => {
-                // DEĞİŞİKLİK: rtp-core yapısı kullanılıyor
-                let header = RtpHeader::new(rtp_payload_type, sequence_number, timestamp, ssrc);
-                let packet = RtpPacket {
-                    header,
-                    payload: chunk.to_vec(),
+                let packet = Packet {
+                    header: Header {
+                        version: 2, payload_type: rtp_payload_type, sequence_number,
+                        timestamp, ssrc, ..Default::default()
+                    },
+                    payload: chunk.to_vec().into(),
                 };
-                
-                // DEĞİŞİKLİK: .marshal() yerine .to_bytes() kullanılıyor
-                if let Err(e) = sock.send_to(&packet.to_bytes(), target_addr).await {
+                if let Err(e) = sock.send_to(&packet.marshal()?, target_addr).await {
                     warn!(error = %e, "RTP paketi gönderilemedi.");
                     break;
                 }
-                
                 sequence_number = sequence_number.wrapping_add(1);
                 timestamp = timestamp.wrapping_add(SAMPLES_PER_PACKET as u32);
             }
@@ -84,58 +74,59 @@ pub async fn send_rtp_stream(
     Ok(())
 }
 
+// --- YENİ VE BASİT DECODER ---
+// Bu fonksiyon `sip-uas` içindeki `WavAudio` mantığının aynısıdır.
 pub fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
-    let mss = MediaSourceStream::new(Box::new(Cursor::new(audio_bytes)), Default::default());
-    let hint = Hint::new();
-    let meta_opts: MetadataOptions = Default::default();
-    let fmt_opts: FormatOptions = Default::default();
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &fmt_opts, &meta_opts)?;
-    let mut format = probed.format;
-    let track = format.tracks().iter()
-        .find(|t| t.codec_params.codec != CODEC_TYPE_NULL)
-        .context("Uyumlu ses kanalı bulunamadı")?;
-    let source_sample_rate = track.codec_params.sample_rate.context("Örnekleme oranı bulunamadı")?;
-    let decoder_opts: DecoderOptions = Default::default();
-    let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &decoder_opts)?;
-    let mut all_samples_f32: Vec<f32> = Vec::new();
-    loop {
-        match format.next_packet() {
-            Ok(packet) => {
-                let decoded = decoder.decode(&packet)?;
-                let mut sample_buf =
-                    SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
-                sample_buf.copy_interleaved_ref(decoded);
-                all_samples_f32.extend_from_slice(sample_buf.samples());
-            }
-            Err(SymphoniaError::IoError(ref err))
-                if err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                break
-            }
-            Err(e) => return Err(e.into()),
-        }
+    // WAV Header Kontrolü (RIFF....WAVE)
+    if audio_bytes.len() < 44 || &audio_bytes[0..4] != b"RIFF" || &audio_bytes[8..12] != b"WAVE" {
+         return Err(anyhow!("Geçersiz WAV formatı (Header eksik)"));
     }
+
+    // Basit bir parser: 44 byte header'ı atla ve gerisini oku.
+    // Base64 stringimiz standart bir 8kHz 16-bit Mono WAV olduğu için bu güvenlidir.
+    // Daha karmaşık dosyalar için `hound` kullanılabilir ama `data:` URI için bu yeterli.
     
-    if source_sample_rate != INTERNAL_SAMPLE_RATE {
-        info!(from = source_sample_rate, to = INTERNAL_SAMPLE_RATE, "Ses yeniden örnekleniyor...");
+    // Header'dan Sample Rate'i okuyalım (Offset 24, 4 byte, Little Endian)
+    let sample_rate = u32::from_le_bytes([
+        audio_bytes[24], audio_bytes[25], audio_bytes[26], audio_bytes[27]
+    ]);
+    
+    let data_start = 44; // Standart header boyutu
+    let raw_samples = &audio_bytes[data_start..];
+    
+    // Bytes -> i16
+    let samples_native: Vec<i16> = raw_samples
+        .chunks_exact(2)
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+
+    // Resampling (Eğer 16kHz değilse)
+    if sample_rate != INTERNAL_SAMPLE_RATE {
+        info!(from = sample_rate, to = INTERNAL_SAMPLE_RATE, "Ses yeniden örnekleniyor (Basit Resampler)...");
+        
+        // Rubato yerine basit bir Linear Interpolation yapalım (Sessizlik için yeterli ve çok hızlı)
+        // Çünkü sessizlik verisi (0) resample edilse de 0'dır.
+        // Ancak genel kullanım için Rubato'yu koruyoruz.
+        
+        let pcm_f32: Vec<f32> = samples_native.iter().map(|s| *s as f32 / 32768.0).collect();
+        
         let params = rubato::SincInterpolationParameters {
-            sinc_len: 256, f_cutoff: 0.95,
+            sinc_len: 128, f_cutoff: 0.95,
             interpolation: rubato::SincInterpolationType::Linear,
-            oversampling_factor: 256, window: rubato::WindowFunction::BlackmanHarris2,
+            oversampling_factor: 128, window: rubato::WindowFunction::BlackmanHarris2,
         };
         let mut resampler = rubato::SincFixedIn::<f32>::new(
-            INTERNAL_SAMPLE_RATE as f64 / source_sample_rate as f64,
-            2.0, params, all_samples_f32.len(), 1,
+            INTERNAL_SAMPLE_RATE as f64 / sample_rate as f64,
+            2.0, params, pcm_f32.len(), 1,
         )?;
-        let resampled_f32 = resampler.process(&[all_samples_f32], None)?.remove(0);
+        
+        let resampled_f32 = resampler.process(&[pcm_f32], None)?.remove(0);
+        
         Ok(resampled_f32.into_iter()
             .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
             .collect())
+            
     } else {
-        Ok(all_samples_f32.into_iter()
-            .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-            .collect())
+        Ok(samples_native)
     }
 }
