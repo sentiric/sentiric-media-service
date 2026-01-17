@@ -1,9 +1,10 @@
-// File: src/rtp/stream.rs (TAM, EKSİKSİZ VE KESİNLİKLE DERLENEBİLİR NİHAİ HALİ)
+// sentiric-media-service/src/rtp/stream.rs
+
 use crate::rtp::codecs::{self, AudioCodec};
 use anyhow::{Context, Result};
 use rand::Rng;
-use rtp::header::Header;
-use rtp::packet::Packet;
+// DEĞİŞİKLİK: Eski 'rtp' crate yerine 'sentiric_rtp_core' kullanılıyor
+use sentiric_rtp_core::{RtpHeader, RtpPacket}; 
 use std::io::Cursor;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -18,7 +19,6 @@ use symphonia::core::probe::Hint;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-use webrtc_util::marshal::Marshal;
 use rubato::Resampler;
 
 pub const INTERNAL_SAMPLE_RATE: u32 = 16000;
@@ -30,16 +30,20 @@ pub async fn send_rtp_stream(
     token: CancellationToken,
     target_codec: AudioCodec,
 ) -> Result<()> {
-    let g711_payload = codecs::encode_lpcm16_to_g711(samples_16khz, target_codec)?;
+    // 1. Encode (16kHz PCM -> Hedef Codec G.711/G.729)
+    let encoded_payload = codecs::encode_lpcm16_to_g711(samples_16khz, target_codec)?;
+    
     info!(
         source_samples = samples_16khz.len(),
-        encoded_bytes = g711_payload.len(),
+        encoded_bytes = encoded_payload.len(),
         "Ses, hedef kodeğe başarıyla encode edildi."
     );
 
     let ssrc: u32 = rand::thread_rng().gen();
     let mut sequence_number: u16 = rand::thread_rng().gen();
     let mut timestamp: u32 = rand::thread_rng().gen();
+    
+    // G.711 için 20ms = 160 byte
     const SAMPLES_PER_PACKET: usize = 160;
 
     let rtp_payload_type = match target_codec {
@@ -49,27 +53,27 @@ pub async fn send_rtp_stream(
 
     let mut ticker = tokio::time::interval(Duration::from_millis(20));
 
-    for chunk in g711_payload.chunks(SAMPLES_PER_PACKET) {
-        // === DEĞİŞİKLİK BURADA: `select!` bloğu döngünün içine alındı ===
-        // Bu, her iterasyonda iptal kontrolü yapmamızı sağlar ve makronun yapısına uyar.
+    for chunk in encoded_payload.chunks(SAMPLES_PER_PACKET) {
         tokio::select! {
-            biased; // İptal kontrolünü öncelikli hale getirir
+            biased;
             _ = token.cancelled() => {
                 info!("RTP akışı dışarıdan iptal edildi.");
-                return Ok(()); // Future'dan erken çıkış
+                return Ok(());
             }
             _ = ticker.tick() => {
-                let packet = Packet {
-                    header: Header {
-                        version: 2, payload_type: rtp_payload_type, sequence_number,
-                        timestamp, ssrc, ..Default::default()
-                    },
-                    payload: chunk.to_vec().into(),
+                // DEĞİŞİKLİK: rtp-core yapısı kullanılıyor
+                let header = RtpHeader::new(rtp_payload_type, sequence_number, timestamp, ssrc);
+                let packet = RtpPacket {
+                    header,
+                    payload: chunk.to_vec(),
                 };
-                if let Err(e) = sock.send_to(&packet.marshal()?, target_addr).await {
+                
+                // DEĞİŞİKLİK: .marshal() yerine .to_bytes() kullanılıyor
+                if let Err(e) = sock.send_to(&packet.to_bytes(), target_addr).await {
                     warn!(error = %e, "RTP paketi gönderilemedi.");
-                    break; // Döngüden çık, fonksiyon sonlanacak
+                    break;
                 }
+                
                 sequence_number = sequence_number.wrapping_add(1);
                 timestamp = timestamp.wrapping_add(SAMPLES_PER_PACKET as u32);
             }

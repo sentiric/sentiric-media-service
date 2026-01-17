@@ -2417,15 +2417,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 
 [[package]]
-name = "memoffset"
-version = "0.6.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
-dependencies = [
- "autocfg",
-]
-
-[[package]]
 name = "metrics"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2522,18 +2513,6 @@ dependencies = [
  "security-framework 2.11.1",
  "security-framework-sys",
  "tempfile",
-]
-
-[[package]]
-name = "nix"
-version = "0.24.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa52e972a9a719cecb6864fb88568781eb706bac2cd1d4f04a648542dbf78069"
-dependencies = [
- "bitflags 1.3.2",
- "cfg-if",
- "libc",
- "memoffset",
 ]
 
 [[package]]
@@ -3224,19 +3203,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rtp"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed668d0114c8f796a262ba1362dc8c463b4a243b96208d073091e2cd88f4d1b6"
-dependencies = [
- "bytes",
- "rand 0.8.5",
- "serde",
- "thiserror 1.0.69",
- "webrtc-util",
-]
-
-[[package]]
 name = "rubato"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3586,8 +3552,8 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "sentiric-contracts"
-version = "1.13.1"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.13.1#2d3cfe0f8448c55cf1251e533c3c6555adbf3c87"
+version = "1.13.3"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.13.3#130a6c9aba1dd66f997a2460a1d7561454bd27dc"
 dependencies = [
  "prost",
  "prost-types",
@@ -3598,21 +3564,19 @@ dependencies = [
 
 [[package]]
 name = "sentiric-media-service"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
- "backtrace",
  "base64 0.22.1",
  "bytes",
  "chrono",
  "dotenvy",
  "futures",
  "hound",
- "http-body 0.4.6",
  "hyper 0.14.32",
  "lapin",
  "metrics",
@@ -3620,11 +3584,11 @@ dependencies = [
  "prost",
  "rand 0.8.5",
  "ring",
- "rtp",
  "rubato",
  "rustls 0.23.32",
  "rustls-pemfile 2.2.0",
  "sentiric-contracts",
+ "sentiric-rtp-core",
  "serde_json",
  "symphonia",
  "test-log",
@@ -3636,7 +3600,16 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
- "webrtc-util",
+]
+
+[[package]]
+name = "sentiric-rtp-core"
+version = "1.0.0"
+source = "git+https://github.com/sentiric/sentiric-rtp-core.git?tag=v1.0.0#c3eb711747a241c4e61757ad22747b2cc4c4bf8e"
+dependencies = [
+ "cc",
+ "glob",
+ "libc",
 ]
 
 [[package]]
@@ -4668,27 +4641,6 @@ checksum = "9367c417a924a74cae129e6a2ae3b47fabb1f8995595ab474029da749a8be120"
 dependencies = [
  "js-sys",
  "wasm-bindgen",
-]
-
-[[package]]
-name = "webrtc-util"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93f1db1727772c05cf7a2cfece52c3aca8045ca1e176cd517d323489aa3c6d87"
-dependencies = [
- "async-trait",
- "bitflags 1.3.2",
- "bytes",
- "cc",
- "ipnet",
- "lazy_static",
- "libc",
- "log",
- "nix",
- "rand 0.8.5",
- "thiserror 1.0.69",
- "tokio",
- "winapi",
 ]
 
 [[package]]
