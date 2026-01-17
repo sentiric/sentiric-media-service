@@ -1,4 +1,5 @@
 // sentiric-media-service/src/rtp/session_utils.rs
+
 use super::command::RecordingSession;
 use crate::audio::load_or_get_from_cache;
 use crate::config::AppConfig;
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use tokio::task::spawn_blocking;
 use tracing::{error, info, instrument, warn};
 
+// ... (finalize_and_save_recording AYNI KALSIN) ...
 #[instrument(skip_all, fields(uri = %session.output_uri, call_id = %session.call_id, trace_id = %session.trace_id))]
 pub async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
     if session.mixed_samples_16khz.is_empty() {
@@ -128,26 +130,32 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
     result
 }
 
+// --- DÜZELTİLEN FONKSİYON ---
 pub async fn load_and_resample_samples_from_uri(
     uri: &str,
     app_state: &AppState,
     config: &Arc<AppConfig>,
 ) -> Result<Arc<Vec<i16>>> {
     if uri.starts_with("data:") {
-        info!("Data URI'sinden ses verisi alınıyor (Raw PCM Fallback Modu).");
+        info!("Data URI'sinden ses verisi alınıyor.");
         
-        // Base64 verisini ayıkla
-        let base64_data = uri
-            .split(";base64,")
-            .nth(1)
-            .ok_or_else(|| anyhow!("Geçersiz data URI formatı"))?;
+        // Base64 verisini daha güvenli ayıkla
+        // "data:audio/pcm;base64," kısmından sonrasını al
+        let base64_data = if let Some(idx) = uri.find(";base64,") {
+            &uri[idx + 8..]
+        } else {
+            return Err(anyhow!("Geçersiz data URI formatı: base64 etiketi bulunamadı"));
+        };
             
+        // Boşlukları ve yeni satırları temizle (Robustness)
+        let clean_base64 = base64_data.replace(|c: char| c.is_whitespace(), "");
+
         let audio_bytes = general_purpose::STANDARD
-            .decode(base64_data)
+            .decode(&clean_base64)
             .context("Base64 verisi çözümlenemedi")?;
 
-        // RAW PCM (8kHz, 16-bit, Mono) varsayımı ile işlem yapıyoruz.
-        // Eğer WAV header varsa (44 byte), atlıyoruz.
+        // RAW PCM (8kHz, 16-bit, Mono) varsayımı
+        // WAV Header kontrolü
         let raw_samples_bytes = if audio_bytes.len() > 44 && &audio_bytes[0..4] == b"RIFF" {
             info!("WAV Header tespit edildi, header atlanarak raw data okunuyor.");
             &audio_bytes[44..]
@@ -155,38 +163,30 @@ pub async fn load_and_resample_samples_from_uri(
             &audio_bytes[..]
         };
         
-        // Byte array -> i16 array
         let samples_8k: Vec<i16> = raw_samples_bytes
             .chunks_exact(2)
             .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
             .collect();
             
         if samples_8k.is_empty() {
-             // Eğer decode edilemediyse Symphonia'yı son çare olarak dene
-             warn!("Raw PCM dönüşümü boş veri üretti, Symphonia decoder deneniyor...");
-             let samples = spawn_blocking(move || decode_audio_with_symphonia(audio_bytes))
-                .await
-                .context("Symphonia decode task'i başarısız oldu")??;
-             return Ok(Arc::new(samples));
+             return Err(anyhow!("Data URI ses verisi boş."));
         }
 
         // 8kHz -> 16kHz Resampling
         let resampled_samples_16khz = spawn_blocking(move || -> Result<Vec<i16>> {
-            info!(samples = samples_8k.len(), "Data URI sesi (Raw PCM) 16kHz'e yükseltiliyor.");
+            info!(samples = samples_8k.len(), "Data URI sesi 16kHz'e yükseltiliyor.");
             
             let pcm_f32: Vec<f32> = samples_8k.iter().map(|s| *s as f32 / 32768.0).collect();
             
             let params = SincInterpolationParameters {
-                sinc_len: 64, // Hız için optimize (Sessizlik paketi için kalite kritik değil)
+                sinc_len: 64,
                 f_cutoff: 0.95,
                 interpolation: SincInterpolationType::Linear,
                 oversampling_factor: 128,
                 window: WindowFunction::BlackmanHarris2,
             };
             
-            // 8000 -> 16000 (Ratio 2.0)
             let mut resampler = SincFixedIn::<f32>::new(2.0, 2.0, params, pcm_f32.len(), 1)?;
-            
             let mut resampled_channels = resampler.process(&[pcm_f32], None)?;
             
             if resampled_channels.is_empty() {
