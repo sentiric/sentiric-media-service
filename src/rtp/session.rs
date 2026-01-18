@@ -112,7 +112,10 @@ pub async fn rtp_session_handler(
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
                         {
                             let mut init_addr = initial_target_addr.lock().await;
-                            if init_addr.is_none() { *init_addr = Some(candidate_target_addr); }
+                            if init_addr.is_none() {
+                                *init_addr = Some(candidate_target_addr);
+                                info!("🎯 Initial RTP Target set to: {}", candidate_target_addr); // <--- DEBUG -> INFO
+                            }
                         }
                         let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
                         let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token, responder };

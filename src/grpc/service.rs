@@ -80,7 +80,9 @@ impl MediaService for MyMediaService {
         let (response_tx, response_rx) = mpsc::channel(1);
         
         tokio::spawn(async move {
+            // İlk mesajdaki veriyi gönder
             if !first_msg.audio_chunk.is_empty() {
+                info!("🎤 Gelen ilk ses parçası: {} bytes", first_msg.audio_chunk.len()); // <--- YENİ LOG
                 if audio_tx.send(first_msg.audio_chunk).await.is_err() {
                     return; 
                 }
@@ -88,12 +90,17 @@ impl MediaService for MyMediaService {
 
             while let Ok(Some(msg)) = in_stream.message().await {
                 if !msg.audio_chunk.is_empty() {
+                    // Log kirliliğini önlemek için sadece büyük chunkları veya belli aralıklarla loglayabiliriz
+                    // Ama debug için her chunk'ı görelim (geçici olarak)
+                    debug!("🎤 Gelen ses parçası: {} bytes", msg.audio_chunk.len()); 
+                    
                     if audio_tx.send(msg.audio_chunk).await.is_err() {
                         break;
                     }
                 }
             }
             
+            info!("StreamAudioToCall veri akışı bitti."); // <--- YENİ LOG
             let _ = response_tx.send(Ok(StreamAudioToCallResponse {
                 success: true,
                 error_message: "".to_string(),
