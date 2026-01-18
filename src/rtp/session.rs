@@ -60,13 +60,8 @@ pub async fn rtp_session_handler(
 
     let live_stream_sender = Arc::new(Mutex::new(None));
     let permanent_recording_session = Arc::new(Mutex::new(None));
-
-    // Latching State
     let actual_remote_addr = Arc::new(Mutex::new(None));
-    
-    // YENİ: SDP'den gelen ilk hedef adresi sakla (Fallback için)
     let initial_target_addr = Arc::new(Mutex::new(None)); 
-
     let outbound_codec = Arc::new(Mutex::new(None));
     let inbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(8000, 16000).expect("Inbound Resampler oluşturulamadı"),
@@ -82,7 +77,6 @@ pub async fn rtp_session_handler(
     let mut is_playing_file = false;
     let (playback_finished_tx, mut playback_finished_rx) = mpsc::channel::<()>(1);
 
-    // Socket Reader Loop
     let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
     let socket_reader_handle = {
         let socket = socket.clone();
@@ -96,9 +90,7 @@ pub async fn rtp_session_handler(
                             .send((buf[..len].to_vec(), remote_addr))
                             .await
                             .is_err()
-                        {
-                            break;
-                        }
+                        { break; }
                     }
                     Err(_) => break,
                 }
@@ -111,18 +103,17 @@ pub async fn rtp_session_handler(
             Some(command) = command_rx.recv() => {
                 match command {
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
-                        // YENİ: İlk gelen hedefi sakla
                         {
                             let mut init_addr = initial_target_addr.lock().await;
                             if init_addr.is_none() {
                                 *init_addr = Some(candidate_target_addr);
-                                info!("🎯 Initial RTP Target set to: {}", candidate_target_addr);
+                                debug!("🎯 Initial RTP Target set to: {}", candidate_target_addr);
                             }
                         }
 
                         let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
                         
-                        info!(uri = %audio_uri, target = %addr, "▶️ PlayAudioUri isteği alındı. Oynatılıyor...");
+                        debug!(uri = %audio_uri, target = %addr, "▶️ PlayAudioUri isteği alındı. Oynatılıyor...");
                         
                         let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token, responder };
                         if !is_playing_file {
@@ -132,28 +123,23 @@ pub async fn rtp_session_handler(
                             playback_queue.push_back(job);
                         }
                     },
-                    
                     RtpCommand::StartOutboundStream { audio_rx } => {
-                        info!("📤 Dış kaynaklı ses akışı (TTS) başlatıldı.");
+                        debug!("📤 Dış kaynaklı ses akışı (TTS) başlatıldı.");
                         outbound_stream_rx = Some(audio_rx);
                     },
-                    
                     RtpCommand::StopOutboundStream => {
-                        info!("Dış kaynaklı ses akışı durduruluyor.");
+                        debug!("Dış kaynaklı ses akışı durduruluyor.");
                         outbound_stream_rx = None;
                     },
-
                     RtpCommand::StartLiveAudioStream { stream_sender, .. } => {
                         info!("🎙️ Canlı ses akışı (STT) başlatılıyor.");
                         *live_stream_sender.lock().await = Some(stream_sender);
                     },
-                    
                     RtpCommand::StartPermanentRecording(mut session) => {
                         info!("💾 Kalıcı kayıt oturumu başlatılıyor.");
                         session.mixed_samples_16khz.reserve(16000 * 60 * 5); 
                         *permanent_recording_session.lock().await = Some(session);
                     },
-                    
                     RtpCommand::StopPermanentRecording { responder } => {
                         if let Some(session) = permanent_recording_session.lock().await.take() {
                             info!("Kalıcı kayıt durduruluyor.");
@@ -168,14 +154,11 @@ pub async fn rtp_session_handler(
                             let _ = responder.send(Err("Kayıt bulunamadı".to_string()));
                         }
                     },
-                    
                     RtpCommand::Shutdown => {
                         info!("🛑 Shutdown komutu alındı.");
                         break;
                     },
-                    
                     RtpCommand::StopAudio => { playback_queue.clear(); },
-                    
                     RtpCommand::StopLiveAudioStream => { *live_stream_sender.lock().await = None; },
                 }
             },
@@ -189,7 +172,8 @@ pub async fn rtp_session_handler(
                     }
                 }
                 
-                if rtp_seq % 100 == 0 {
+                // DÜZELTME: Log seviyesi DEBUG'a çekildi
+                if rtp_seq % 200 == 0 {
                     debug!("📥 RTP Inbound: {} bytes from {}", packet_data.len(), remote_addr);
                 }
 
@@ -209,7 +193,7 @@ pub async fn rtp_session_handler(
                                  AudioCodec::Pcma => CodecType::PCMA,
                              };
                              encoder = CodecFactory::create_encoder(new_type);
-                             info!("Encoder codec güncellendi: {:?}", new_type);
+                             debug!("Encoder codec güncellendi: {:?}", new_type);
                         }
                     }
                     
@@ -229,14 +213,13 @@ pub async fn rtp_session_handler(
             
             Some(_) = playback_finished_rx.recv() => {
                 is_playing_file = false;
-                info!("✅ Dosya oynatma tamamlandı.");
+                debug!("✅ Dosya oynatma tamamlandı.");
                 if let Some(next_job) = playback_queue.pop_front() {
                     is_playing_file = true;
                     start_playback(next_job, &config, socket.clone(), playback_finished_tx.clone(), permanent_recording_session.clone()).await;
                 }
             },
 
-            // --- DEĞİŞTİRİLEN KISIM: TTS Outbound Handling ---
             Some(chunk) = async { 
                 if let Some(rx) = &mut outbound_stream_rx { 
                     rx.recv().await 
@@ -244,14 +227,9 @@ pub async fn rtp_session_handler(
                     std::future::pending().await 
                 } 
             } => {
-                // HEDEF SEÇİMİ (FALLBACK MANTIĞI)
                 let target = {
                     let actual = *actual_remote_addr.lock().await;
-                    if actual.is_some() {
-                        actual
-                    } else {
-                        *initial_target_addr.lock().await
-                    }
+                    if actual.is_some() { actual } else { *initial_target_addr.lock().await }
                 };
 
                 if let Some(target_addr) = target {
@@ -270,8 +248,9 @@ pub async fn rtp_session_handler(
                             let header = RtpHeader::new(pt, rtp_seq, rtp_ts, rtp_ssrc);
                             let packet = RtpPacket { header, payload: frame.to_vec() };
                             
-                            if rtp_seq % 50 == 0 {
-                                info!("📤 RTP Outbound (TTS): Seq={} TS={} Size={} Target={}", rtp_seq, rtp_ts, frame.len(), target_addr);
+                            // DÜZELTME: Log seviyesi DEBUG'a çekildi
+                            if rtp_seq % 100 == 0 {
+                                debug!("📤 RTP Outbound (TTS): Seq={} Size={} Target={}", rtp_seq, frame.len(), target_addr);
                             }
 
                             if let Err(e) = socket.send_to(&packet.to_bytes(), target_addr).await {
@@ -284,17 +263,15 @@ pub async fn rtp_session_handler(
                         }
 
                         if let Some(session) = &mut *permanent_recording_session.lock().await {
-                            // Kayıt mix mantığı buraya
+                             // session.mixed_samples_16khz.extend_from_slice(&samples_16k);
                         }
                     }
                 } else {
-                    // Hiçbir hedef yoksa paketleri at
-                    if rtp_seq % 100 == 0 {
-                        warn!("⚠️ RTP Outbound: Hedef adres HİÇ YOK (Ne Latching Ne SDP), paketler kayboluyor.");
+                    if rtp_seq % 500 == 0 {
+                        warn!("⚠️ RTP Outbound: Hedef adres HİÇ YOK, paketler kayboluyor.");
                     }
                 }
             },
-            
             else => { break; }
         }
     }
@@ -310,7 +287,7 @@ pub async fn rtp_session_handler(
     info!("🏁 RTP Oturumu Sonlandı (Port: {})", config.port);
 }
 
-// start_playback yardımcı fonksiyonu aynı kalıyor, sadece target_addr kullanımı zaten doğru.
+// Dosya Oynatma Yardımcısı
 #[instrument(skip_all, fields(target = %job.target_addr, uri.scheme = %extract_uri_scheme(&job.audio_uri)))]
 async fn start_playback(
     job: PlaybackJob, 
@@ -324,11 +301,11 @@ async fn start_playback(
     match load_and_resample_samples_from_uri(&job.audio_uri, &config.app_state, &config.app_config).await {
         Ok(samples_16khz) => {
             if let Some(_session) = &mut *permanent_recording_session.lock().await {
-                 // Kayıt
+                 // session.mixed_samples_16khz.extend_from_slice(&samples_16khz);
             }
             task::spawn(async move {
                 let local_codec = codecs::AudioCodec::Pcmu; 
-                info!(samples = samples_16khz.len(), target = %job.target_addr, "RTP dosya akışı başlatılıyor...");
+                debug!(samples = samples_16khz.len(), target = %job.target_addr, "RTP dosya akışı başlatılıyor...");
 
                 let stream_result = crate::rtp::stream::send_rtp_stream(
                     &socket, 
