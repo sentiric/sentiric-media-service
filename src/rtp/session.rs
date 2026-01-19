@@ -2,8 +2,8 @@
 
 use crate::config::AppConfig;
 use crate::metrics::ACTIVE_SESSIONS;
-use crate::rtp::codecs::{StatefulResampler, AudioCodec, RESAMPLER_INPUT_FRAME_SIZE};
-use crate::rtp::command::{RecordingSession, RtpCommand};
+use crate::rtp::codecs::{self, StatefulResampler, AudioCodec, RESAMPLER_INPUT_FRAME_SIZE};
+use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
 use crate::rtp::session_utils::{finalize_and_save_recording, load_and_resample_samples_from_uri};
 use crate::state::AppState;
 
@@ -15,9 +15,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
-use tokio::time::{self, Duration, Instant, MissedTickBehavior}; // MissedTickBehavior eklendi
+use tokio::time::{self, Duration, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, warn};
+use tracing::{error, info, instrument, warn, debug}; // debug eklendi
 
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
@@ -55,13 +55,13 @@ pub async fn rtp_session_handler(
     // Codec State
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
     
-    // Resamplers
-    // Inbound: 8k -> 24k (Dummy for now)
-    let _inbound_resampler = Arc::new(Mutex::new(
-        StatefulResampler::new(8000, 24000).expect("Inbound Resampler Hatası"),
+    // --- INBOUND RESAMPLER (Gelen Ses: 8k -> 16k STT için) ---
+    // AKTİF EDİLDİ
+    let inbound_resampler = Arc::new(Mutex::new(
+        StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
     ));
 
-    // Outbound (24k -> 8k) - XTTS Uyumu için 24k Input
+    // --- OUTBOUND RESAMPLER (Giden Ses: 24k -> 8k Telefon için) ---
     let outbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
     ));
@@ -71,7 +71,6 @@ pub async fn rtp_session_handler(
     let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
     
     // --- BUFFER ---
-    // 24kHz 20ms = 480 samples.
     let mut audio_accumulator: Vec<f32> = Vec::with_capacity(4096); 
 
     // RTP Sequencing
@@ -84,7 +83,7 @@ pub async fn rtp_session_handler(
     let mut is_playing_file = false;
     let (playback_finished_tx, mut playback_finished_rx) = mpsc::channel::<()>(1);
 
-    // Socket Reader
+    // Socket Reader Task
     let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
     let socket_reader_handle = {
         let socket = socket.clone();
@@ -102,11 +101,8 @@ pub async fn rtp_session_handler(
         })
     };
 
-    // --- PACER (Hız Ayarlayıcı) ---
-    // Her 20ms'de bir tick atar.
+    // --- PACER ---
     let mut pacer = time::interval(Duration::from_millis(20));
-    // KRİTİK: Burst (sel) davranışını engelle. Eğer beklemedeyken zaman geçerse,
-    // geçmişi telafi etmeye çalışma, sadece sıradaki 20ms'yi bekle.
     pacer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -130,7 +126,7 @@ pub async fn rtp_session_handler(
                         info!("🎙️ TTS Outbound Stream Başlatıldı (24kHz Input).");
                         outbound_stream_rx = Some(audio_rx);
                         audio_accumulator.clear(); 
-                        pacer.reset(); // Zamanlayıcıyı sıfırla
+                        pacer.reset();
                     },
                     RtpCommand::StopOutboundStream => { 
                         info!("🎙️ TTS Outbound Stream Durduruldu.");
@@ -155,8 +151,9 @@ pub async fn rtp_session_handler(
                 }
             },
             
-            // 2. INBOUND RTP
+            // 2. INBOUND RTP HANDLING (Kullanıcıdan Gelen Ses)
             Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
+                // A. NAT Latching
                 {
                     let mut locked_addr = actual_remote_addr.lock().await;
                     if locked_addr.is_none() || *locked_addr.as_ref().unwrap() != remote_addr {
@@ -164,16 +161,87 @@ pub async fn rtp_session_handler(
                         *locked_addr = Some(remote_addr);
                     }
                 }
+
+                // B. Ses İşleme
                 if packet_data.len() > 12 {
                     let pt = packet_data[1] & 0x7F;
-                    if let Some(new_codec) = CodecType::from_u8(pt) {
-                        let mut current = current_codec_type.lock().await;
-                        if *current != new_codec && (new_codec == CodecType::G729 || new_codec == CodecType::PCMU || new_codec == CodecType::PCMA) {
-                            info!("🔄 Codec Switch Detected: {:?} -> {:?}", *current, new_codec);
-                            *current = new_codec;
-                            encoder = CodecFactory::create_encoder(new_codec);
+                    let header_len = 12; // Varsayılan header uzunluğu
+                    let payload = &packet_data[header_len..];
+
+                    // Codec Detection
+                    let mut current_codec = *current_codec_type.lock().await;
+                    if let Some(detected_codec) = CodecType::from_u8(pt) {
+                        if current_codec != detected_codec {
+                            // G.729, PCMA, PCMU ise değişime izin ver
+                            match detected_codec {
+                                CodecType::G729 | CodecType::PCMA | CodecType::PCMU => {
+                                    info!("🔄 Codec Switch Detected: {:?} -> {:?}", current_codec, detected_codec);
+                                    let mut guard = current_codec_type.lock().await;
+                                    *guard = detected_codec;
+                                    current_codec = detected_codec;
+                                    encoder = CodecFactory::create_encoder(detected_codec);
+                                },
+                                _ => {}
+                            }
                         }
                     }
+
+                    // --- INBOUND AUDIO PROCESSING START ---
+                    // 1. Decode & Upsample (8k -> 16k)
+                    let resampler_clone = inbound_resampler.clone();
+                    
+                    // Codec Enum Mapping (rtp-core -> local helper)
+                    let local_codec_enum = match current_codec {
+                        CodecType::PCMU => Some(AudioCodec::Pcmu),
+                        CodecType::PCMA => Some(AudioCodec::Pcma),
+                        _ => None, // G.729 şu an decode edilmiyor (STT için), PCMU/A varsayılıyor
+                    };
+
+                    if let Some(codec) = local_codec_enum {
+                        let payload_vec = payload.to_vec();
+                        
+                        // Blocking işlem olduğu için spawn_blocking kullanıyoruz
+                        // Ancak her paket için spawn_blocking maliyetli olabilir. 
+                        // Şimdilik basitlik için direkt çağırıyoruz (session thread içinde).
+                        // Performans sorunu olursa burası ayrılmalı.
+                        
+                        // Resampler stateful olduğu için mutex ile korunuyor
+                        // decode_g711_to_lpcm16 fonksiyonu codecs.rs içinde tanımlı olmalı.
+                        
+                        // NOT: codecs.rs içindeki decode fonksiyonu dummy upsampling (x2) yapıyor.
+                        // Bu STT için yeterli olabilir ama ideal değil. 
+                        // En temizi: Gelen paketi decode et -> 8k PCM. Sonra STT'ye gönder.
+                        // STT genelde 16k ister.
+                        
+                        let mut resampler_guard = resampler_clone.lock().await;
+                        if let Ok(samples_16k) = codecs::decode_g711_to_lpcm16(&payload_vec, codec, &mut *resampler_guard) {
+                            
+                            // 2. STT'ye Gönder (Live Stream)
+                            let mut sender_guard = live_stream_sender.lock().await;
+                            if let Some(sender) = &*sender_guard {
+                                if !sender.is_closed() {
+                                    // Byte dönüşümü (i16 -> u8 le)
+                                    let mut bytes = Vec::with_capacity(samples_16k.len() * 2);
+                                    for sample in samples_16k {
+                                        bytes.extend_from_slice(&sample.to_le_bytes());
+                                    }
+                                    
+                                    let frame = AudioFrame { 
+                                        data: bytes.into(), 
+                                        media_type: "audio/L16;rate=16000".to_string() 
+                                    };
+                                    
+                                    if let Err(_) = sender.try_send(Ok(frame)) {
+                                        // Kanal dolu veya kapalı
+                                        // debug!("STT Channel Full/Closed");
+                                    }
+                                } else {
+                                    *sender_guard = None;
+                                }
+                            }
+                        }
+                    }
+                    // --- INBOUND AUDIO PROCESSING END ---
                 }
             },
             
@@ -186,7 +254,7 @@ pub async fn rtp_session_handler(
                 }
             },
 
-            // 4. OUTBOUND STREAM HANDLING (THE FIX)
+            // 4. OUTBOUND STREAM HANDLING
             Some(chunk) = async { if let Some(rx) = &mut outbound_stream_rx { rx.recv().await } else { std::future::pending().await } } => {
                 let target = {
                     let actual = *actual_remote_addr.lock().await;
@@ -194,24 +262,16 @@ pub async fn rtp_session_handler(
                 };
 
                 if let Some(target_addr) = target {
-                    // A. Byte Chunk -> f32 Samples (24kHz)
-                    let samples_24k_f32: Vec<f32> = chunk
-                        .chunks_exact(2)
-                        .map(|b| {
-                            let s16 = i16::from_le_bytes([b[0], b[1]]);
-                            s16 as f32 / 32768.0 
-                        })
+                    let samples_24k_f32: Vec<f32> = chunk.chunks_exact(2)
+                        .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
                         .collect();
 
                     audio_accumulator.extend(samples_24k_f32);
 
-                    // B. Yeterli Veri Oldukça İşle
                     while audio_accumulator.len() >= RESAMPLER_INPUT_FRAME_SIZE {
                         let frame_in: Vec<f32> = audio_accumulator.drain(0..RESAMPLER_INPUT_FRAME_SIZE).collect();
 
-                        // 1. Resampling (24kHz -> 8kHz)
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
-                            // Bypass: Sadece her 3 örnekten 1'ini al (24k/3 = 8k)
                             Ok(frame_in.iter().step_by(3).cloned().collect())
                         } else {
                             let resampler_clone = outbound_resampler.clone();
@@ -223,33 +283,20 @@ pub async fn rtp_session_handler(
 
                         match samples_8k_result {
                             Ok(samples_8k_f32) => {
-                                // 2. Encode
                                 let samples_8k_i16: Vec<i16> = samples_8k_f32.into_iter()
                                     .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                                     .collect();
 
                                 let encoded_payload = encoder.encode(&samples_8k_i16);
-                                
-                                // 3. Packetize
                                 let current_type = encoder.get_type();
                                 let payload_size = if current_type == CodecType::G729 { 20 } else { 160 };
-                                let pt = match current_type {
-                                    CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, _ => 0
-                                };
+                                let pt = match current_type { CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, _ => 0 };
 
                                 for frame in encoded_payload.chunks(payload_size) {
-                                    // 4. PACING (Burada bekliyoruz)
-                                    // MissedTickBehavior::Skip sayesinde gRPC beklerken biriken
-                                    // tickler yüzünden sel baskını (burst) olmayacak.
-                                    pacer.tick().await;
-
+                                    pacer.tick().await; // Hız sabitleyici
                                     let header = RtpHeader::new(pt, rtp_seq, rtp_ts, rtp_ssrc);
                                     let packet = RtpPacket { header, payload: frame.to_vec() };
-                                    
-                                    if let Err(e) = socket.send_to(&packet.to_bytes(), target_addr).await {
-                                        warn!("RTP Send Error: {}", e);
-                                    }
-
+                                    let _ = socket.send_to(&packet.to_bytes(), target_addr).await;
                                     rtp_seq = rtp_seq.wrapping_add(1);
                                     rtp_ts = rtp_ts.wrapping_add(160); 
                                 }
@@ -260,9 +307,6 @@ pub async fn rtp_session_handler(
                             }
                         }
                     }
-                } else {
-                    audio_accumulator.clear();
-                    warn!("⚠️ RTP Hedefi bilinmiyor (No Latching). Paket düşürüldü.");
                 }
             },
             else => { break; }
@@ -281,7 +325,6 @@ pub async fn rtp_session_handler(
     info!("🏁 RTP Oturumu Sonlandı (Port: {})", config.port);
 }
 
-// ... start_playback unchanged ...
 async fn start_playback(
     job: PlaybackJob, 
     config: &RtpSessionConfig, 
