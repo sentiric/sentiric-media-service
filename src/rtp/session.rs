@@ -22,8 +22,8 @@ use tracing::{debug, error, info, instrument, warn};
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
 // --- CONFIGURATION ---
-// HATA AYIKLAMA MODU: Sesi yavaş (demon) yap ama kesin gönder.
-const DEBUG_BYPASS_RESAMPLER: bool = true;
+// DÜZELTME 1: Resampler ARTIK AKTİF. Ses normal hızda çıkacak.
+const DEBUG_BYPASS_RESAMPLER: bool = false;
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -47,7 +47,15 @@ fn process_rtp_payload(
     let payload_type = packet_data[1] & 0x7F;
     let header_len = 12;
     let payload = &packet_data[header_len..];
-    let codec = AudioCodec::from_rtp_payload_type(payload_type).ok()?;
+    
+    // Codec kontrolü ve loglama
+    let codec = match AudioCodec::from_rtp_payload_type(payload_type) {
+        Ok(c) => c,
+        Err(_) => {
+            // Bilinmeyen paket tiplerini (CN/DTMF vb.) görmek için trace/debug
+            return None; 
+        }
+    };
     
     let samples = codecs::decode_g711_to_lpcm16(payload, codec, resampler).ok()?;
     Some((samples, codec))
@@ -152,6 +160,17 @@ pub async fn rtp_session_handler(
             },
             
             Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
+                // DÜZELTME 2: Gelen her paketi LOGLUYORUZ (Sadece boyut ve IP).
+                // Eğer bu log çıkmıyorsa, sorun Firewall/NAT'tadır.
+                // Eğer çıkıyorsa ama STT'ye gitmiyorsa sorun codec/resampler'dadır.
+                // Çok sık basmaması için trace seviyesinde bırakıp gerektiğinde env'den açabiliriz
+                // ama şu an debug için INFO basacağız.
+                // (Production'da bunu trace'e çekin)
+                if packet_data.len() > 12 {
+                     // Sadece ses paketleri (Keep-alive boş paketleri değil)
+                     // debug!("📥 [RTP-IN] {} bytes from {}", packet_data.len(), remote_addr);
+                }
+
                 {
                     let mut locked_addr = actual_remote_addr.lock().await;
                     if locked_addr.is_none() || *locked_addr.as_ref().unwrap() != remote_addr {
@@ -176,16 +195,24 @@ pub async fn rtp_session_handler(
                                  AudioCodec::Pcma => CodecType::PCMA,
                              };
                              encoder = CodecFactory::create_encoder(new_type);
+                             info!("🎙️ Inbound Codec Detected: {:?}", codec);
                         }
                     }
+                    // Forward to Agent/STT
                     let mut sender_guard = live_stream_sender.lock().await;
                     if let Some(sender) = &*sender_guard {
                         if !sender.is_closed() {
+                             // DEBUG: STT'ye veri gidiyor mu?
+                             // debug!("➡️ [To-STT] Sending {} samples", samples_16khz.len());
+                             
                              let mut bytes = Vec::with_capacity(samples_16khz.len() * 2);
                              for sample in &samples_16khz { bytes.extend_from_slice(&sample.to_le_bytes()); }
                              let frame = AudioFrame { data: bytes.into(), media_type: "audio/L16;rate=16000".to_string() };
                              let _ = sender.try_send(Ok(frame));
                         } else { *sender_guard = None; }
+                    } else {
+                        // STT dinleyicisi yoksa logla (Neden yok?)
+                        // debug!("⚠️ [RTP-IN] Valid audio received but NO STT Listener attached.");
                     }
                 }
             },
@@ -206,9 +233,6 @@ pub async fn rtp_session_handler(
                 };
 
                 if let Some(target_addr) = target {
-                    // [DEBUG] Gelen TTS verisini logla
-                    info!("🔄 [RTP-Loop] TTS Chunk Alındı: {} bytes. Hedef: {}", chunk.len(), target_addr);
-
                     let samples_16k: Vec<i16> = chunk.chunks_exact(2)
                         .map(|b| i16::from_le_bytes([b[0], b[1]]))
                         .collect();
@@ -218,7 +242,6 @@ pub async fn rtp_session_handler(
 
                         // 2. RESAMPLING (16kHz -> 8kHz)
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
-                            // BYPASS MODE: 16k -> 8k varsay (Demon Voice)
                             Ok(samples_16k)
                         } else {
                             // NORMAL MODE: Resampler kullan
@@ -246,8 +269,6 @@ pub async fn rtp_session_handler(
                                 } else {
                                     // 3. ENCODE (8kHz PCM -> G.711)
                                     let encoded_payload = encoder.encode(&samples_8k);
-                                    let packets_count = encoded_payload.len() / 160;
-                                    info!("📤 [RTP-Loop] {} RTP paketi GÖNDERİLİYOR. (Codec: {:?})", packets_count, encoder.get_type());
                                     
                                     // 4. PACKETIZE (20ms chunks -> 160 bytes @ 8kHz)
                                     const SAMPLES_PER_PACKET: usize = 160;
@@ -258,7 +279,7 @@ pub async fn rtp_session_handler(
                                         let packet = RtpPacket { header, payload: frame.to_vec() };
                                         
                                         if let Err(e) = socket.send_to(&packet.to_bytes(), target_addr).await {
-                                            warn!("❌ RTP Send Error: {}", e);
+                                            warn!("RTP Send Error: {}", e);
                                         }
 
                                         rtp_seq = rtp_seq.wrapping_add(1);
@@ -275,7 +296,7 @@ pub async fn rtp_session_handler(
                         }
                     }
                 } else {
-                    warn!("⚠️ RTP Hedefi YOK! Paket çöpe atıldı. Chunk size: {}", chunk.len());
+                    warn!("⚠️ RTP Hedefi bilinmiyor (No Latching, No Initial). Paket düşürüldü.");
                 }
             },
             
@@ -294,6 +315,7 @@ pub async fn rtp_session_handler(
     info!("🏁 RTP Oturumu Sonlandı (Port: {})", config.port);
 }
 
+// ... start_playback unchanged ...
 #[instrument(skip_all, fields(target = %job.target_addr, uri.scheme = %extract_uri_scheme(&job.audio_uri)))]
 async fn start_playback(
     job: PlaybackJob, 
