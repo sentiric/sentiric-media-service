@@ -17,7 +17,7 @@ use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
 use tokio::time::{self, Duration, MissedTickBehavior};
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, instrument, warn, debug}; // debug eklendi
+use tracing::{error, info, instrument, warn, debug};
 
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
@@ -55,13 +55,11 @@ pub async fn rtp_session_handler(
     // Codec State
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
     
-    // --- INBOUND RESAMPLER (Gelen Ses: 8k -> 16k STT için) ---
-    // AKTİF EDİLDİ
+    // Resamplers
     let inbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
     ));
 
-    // --- OUTBOUND RESAMPLER (Giden Ses: 24k -> 8k Telefon için) ---
     let outbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
     ));
@@ -164,6 +162,11 @@ pub async fn rtp_session_handler(
 
                 // B. Ses İşleme
                 if packet_data.len() > 12 {
+                    // DIAGNOSTIC LOG (Saniyede 1 kere)
+                    if rand::thread_rng().gen_bool(0.02) {
+                        info!("🎤 [RTP-IN] {} bytes from {}", packet_data.len(), remote_addr);
+                    }
+
                     let pt = packet_data[1] & 0x7F;
                     let header_len = 12; // Varsayılan header uzunluğu
                     let payload = &packet_data[header_len..];
@@ -172,7 +175,6 @@ pub async fn rtp_session_handler(
                     let mut current_codec = *current_codec_type.lock().await;
                     if let Some(detected_codec) = CodecType::from_u8(pt) {
                         if current_codec != detected_codec {
-                            // G.729, PCMA, PCMU ise değişime izin ver
                             match detected_codec {
                                 CodecType::G729 | CodecType::PCMA | CodecType::PCMU => {
                                     info!("🔄 Codec Switch Detected: {:?} -> {:?}", current_codec, detected_codec);
@@ -187,40 +189,24 @@ pub async fn rtp_session_handler(
                     }
 
                     // --- INBOUND AUDIO PROCESSING START ---
-                    // 1. Decode & Upsample (8k -> 16k)
                     let resampler_clone = inbound_resampler.clone();
                     
-                    // Codec Enum Mapping (rtp-core -> local helper)
                     let local_codec_enum = match current_codec {
                         CodecType::PCMU => Some(AudioCodec::Pcmu),
                         CodecType::PCMA => Some(AudioCodec::Pcma),
-                        _ => None, // G.729 şu an decode edilmiyor (STT için), PCMU/A varsayılıyor
+                        _ => None,
                     };
 
                     if let Some(codec) = local_codec_enum {
                         let payload_vec = payload.to_vec();
                         
-                        // Blocking işlem olduğu için spawn_blocking kullanıyoruz
-                        // Ancak her paket için spawn_blocking maliyetli olabilir. 
-                        // Şimdilik basitlik için direkt çağırıyoruz (session thread içinde).
-                        // Performans sorunu olursa burası ayrılmalı.
-                        
-                        // Resampler stateful olduğu için mutex ile korunuyor
-                        // decode_g711_to_lpcm16 fonksiyonu codecs.rs içinde tanımlı olmalı.
-                        
-                        // NOT: codecs.rs içindeki decode fonksiyonu dummy upsampling (x2) yapıyor.
-                        // Bu STT için yeterli olabilir ama ideal değil. 
-                        // En temizi: Gelen paketi decode et -> 8k PCM. Sonra STT'ye gönder.
-                        // STT genelde 16k ister.
-                        
                         let mut resampler_guard = resampler_clone.lock().await;
                         if let Ok(samples_16k) = codecs::decode_g711_to_lpcm16(&payload_vec, codec, &mut *resampler_guard) {
                             
-                            // 2. STT'ye Gönder (Live Stream)
+                            // STT'ye Gönder
                             let mut sender_guard = live_stream_sender.lock().await;
                             if let Some(sender) = &*sender_guard {
                                 if !sender.is_closed() {
-                                    // Byte dönüşümü (i16 -> u8 le)
                                     let mut bytes = Vec::with_capacity(samples_16k.len() * 2);
                                     for sample in samples_16k {
                                         bytes.extend_from_slice(&sample.to_le_bytes());
@@ -232,7 +218,6 @@ pub async fn rtp_session_handler(
                                     };
                                     
                                     if let Err(_) = sender.try_send(Ok(frame)) {
-                                        // Kanal dolu veya kapalı
                                         // debug!("STT Channel Full/Closed");
                                     }
                                 } else {
@@ -293,7 +278,7 @@ pub async fn rtp_session_handler(
                                 let pt = match current_type { CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, _ => 0 };
 
                                 for frame in encoded_payload.chunks(payload_size) {
-                                    pacer.tick().await; // Hız sabitleyici
+                                    pacer.tick().await; 
                                     let header = RtpHeader::new(pt, rtp_seq, rtp_ts, rtp_ssrc);
                                     let packet = RtpPacket { header, payload: frame.to_vec() };
                                     let _ = socket.send_to(&packet.to_bytes(), target_addr).await;
