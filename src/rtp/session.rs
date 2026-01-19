@@ -14,7 +14,7 @@ use rand::Rng;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-// use tokio::net::UdpSocket; // KALDIRILDI: Kullanılmayan import
+// use tokio::net::UdpSocket; // KALDIRILDI
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
 use tokio_util::sync::CancellationToken;
@@ -23,7 +23,8 @@ use tracing::{debug, error, info, instrument, warn};
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
 // --- CONFIGURATION ---
-const DEBUG_BYPASS_RESAMPLER: bool = true;
+// DÜZELTME: Artık False yapıyoruz. Resampler devreye girsin.
+const DEBUG_BYPASS_RESAMPLER: bool = false;
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -214,13 +215,13 @@ pub async fn rtp_session_handler(
 
                     if !samples_16k.is_empty() {
                         
-                        // [FIX]: Vektör closure'a taşınmadan önce boyutunu al.
+                        // [FIX]: HATA ÖNLEYİCİ - Veriyi Move Etmeden Önce Boyutunu Sakla
                         let input_len = samples_16k.len();
 
                         // 2. RESAMPLING (16kHz -> 8kHz)
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
-                            // BYPASS MODE: Hiçbir işlem yapma, 16k veriyi 8k gibi kullan.
-                            Ok(samples_16k.clone())
+                            // BYPASS MODE
+                            Ok(samples_16k)
                         } else {
                             // NORMAL MODE: Resampler kullan
                             let resampler_clone = outbound_resampler.clone();
@@ -245,7 +246,7 @@ pub async fn rtp_session_handler(
                         match samples_8k_result {
                             Ok(samples_8k) => {
                                 if samples_8k.is_empty() {
-                                    // [FIX]: Artık `input_len` kullanılıyor, `samples_16k` değil.
+                                    // [FIX]: Artık `input_len` kullanılıyor (Derleme hatası çözüldü)
                                     warn!("⚠️ Resampler output is empty! Input size: {}", input_len);
                                 } else {
                                     // 3. ENCODE (8kHz PCM -> G.711)
@@ -266,7 +267,7 @@ pub async fn rtp_session_handler(
                                         rtp_seq = rtp_seq.wrapping_add(1);
                                         rtp_ts = rtp_ts.wrapping_add(SAMPLES_PER_PACKET as u32);
                                         
-                                        // 20ms Gecikme (Buffer kontrolü için hassas ayar)
+                                        // 20ms Gecikme
                                         tokio::time::sleep(std::time::Duration::from_millis(19)).await;
                                     }
                                 }
