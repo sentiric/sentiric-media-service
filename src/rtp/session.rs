@@ -15,6 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
+use tokio::time::{self, Duration, Instant}; // Time modülü eklendi
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
@@ -51,27 +52,27 @@ pub async fn rtp_session_handler(
     let actual_remote_addr = Arc::new(Mutex::new(None));
     let initial_target_addr = Arc::new(Mutex::new(None)); 
 
-    // Codec State: Varsayılan PCMU
+    // Codec State
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
     
     // Resamplers
+    // Inbound: 8k -> 24k (Gelecek planı için) veya 16k. Şimdilik dummy.
     let _inbound_resampler = Arc::new(Mutex::new(
-        StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
+        StatefulResampler::new(8000, 24000).expect("Inbound Resampler Hatası"),
     ));
 
-    // Outbound (16k -> 8k) - TTS'den kullanıcıya
+    // Outbound: XTTS(24k) -> RTP(8k)
+    // --- KRİTİK DÜZELTME BURADA: 16000 -> 24000 YAPILDI ---
     let outbound_resampler = Arc::new(Mutex::new(
-        StatefulResampler::new(16000, 8000).expect("Outbound Resampler Hatası"),
+        StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
     ));
 
-    // Encoder Başlat
+    // Encoder
     let mut encoder = CodecFactory::create_encoder(CodecType::PCMU);
-    
-    // Outbound Stream Channels & Buffers
     let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
     
     // --- BUFFER ---
-    // 320 sample = 20ms @ 16kHz
+    // 24kHz 20ms = 480 samples.
     let mut audio_accumulator: Vec<f32> = Vec::with_capacity(4096); 
 
     // RTP Sequencing
@@ -84,7 +85,7 @@ pub async fn rtp_session_handler(
     let mut is_playing_file = false;
     let (playback_finished_tx, mut playback_finished_rx) = mpsc::channel::<()>(1);
 
-    // Socket Reader Task
+    // Socket Reader
     let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
     let socket_reader_handle = {
         let socket = socket.clone();
@@ -102,18 +103,21 @@ pub async fn rtp_session_handler(
         })
     };
 
+    // --- PACER (Hız Ayarlayıcı) ---
+    // Her 20ms'de bir tick atar. Drift (kayma) yapmaz.
+    let mut pacer = time::interval(Duration::from_millis(20));
+    // İlk tick hemen atılır, o yüzden bir kere boşa çekelim.
+    pacer.tick().await;
+
     loop {
         tokio::select! {
-            // 1. COMMAND CHANNEL HANDLING
+            // 1. COMMANDS
             Some(command) = command_rx.recv() => {
                 match command {
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
                         {
                             let mut init_addr = initial_target_addr.lock().await;
-                            if init_addr.is_none() {
-                                *init_addr = Some(candidate_target_addr);
-                                info!("🎯 Initial RTP Target set to: {}", candidate_target_addr);
-                            }
+                            if init_addr.is_none() { *init_addr = Some(candidate_target_addr); }
                         }
                         let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
                         let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token, responder };
@@ -123,9 +127,10 @@ pub async fn rtp_session_handler(
                         } else { playback_queue.push_back(job); }
                     },
                     RtpCommand::StartOutboundStream { audio_rx } => { 
-                        info!("🎙️ TTS Outbound Stream Başlatıldı.");
+                        info!("🎙️ TTS Outbound Stream Başlatıldı (24kHz Input).");
                         outbound_stream_rx = Some(audio_rx);
                         audio_accumulator.clear(); 
+                        pacer.reset(); // Zamanlayıcıyı sıfırla
                     },
                     RtpCommand::StopOutboundStream => { 
                         info!("🎙️ TTS Outbound Stream Durduruldu.");
@@ -150,9 +155,8 @@ pub async fn rtp_session_handler(
                 }
             },
             
-            // 2. INBOUND RTP HANDLING
+            // 2. INBOUND RTP
             Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
-                // NAT Latching
                 {
                     let mut locked_addr = actual_remote_addr.lock().await;
                     if locked_addr.is_none() || *locked_addr.as_ref().unwrap() != remote_addr {
@@ -160,8 +164,6 @@ pub async fn rtp_session_handler(
                         *locked_addr = Some(remote_addr);
                     }
                 }
-                
-                // Codec Detection
                 if packet_data.len() > 12 {
                     let pt = packet_data[1] & 0x7F;
                     if let Some(new_codec) = CodecType::from_u8(pt) {
@@ -184,9 +186,8 @@ pub async fn rtp_session_handler(
                 }
             },
 
-            // 4. OUTBOUND STREAM HANDLING (TTS -> RTP)
+            // 4. OUTBOUND STREAM HANDLING (THE FIX)
             Some(chunk) = async { if let Some(rx) = &mut outbound_stream_rx { rx.recv().await } else { std::future::pending().await } } => {
-                
                 let target = {
                     let actual = *actual_remote_addr.lock().await;
                     if actual.is_some() { actual } else { *initial_target_addr.lock().await }
@@ -194,7 +195,8 @@ pub async fn rtp_session_handler(
 
                 if let Some(target_addr) = target {
                     // A. Byte Chunk -> f32 Samples
-                    let samples_16k_f32: Vec<f32> = chunk
+                    // Gelen veri 24kHz olduğu varsayılıyor!
+                    let samples_24k_f32: Vec<f32> = chunk
                         .chunks_exact(2)
                         .map(|b| {
                             let s16 = i16::from_le_bytes([b[0], b[1]]);
@@ -202,15 +204,16 @@ pub async fn rtp_session_handler(
                         })
                         .collect();
 
-                    audio_accumulator.extend(samples_16k_f32);
+                    audio_accumulator.extend(samples_24k_f32);
 
-                    // C. Yeterli Veri Oldukça İşle
+                    // B. Yeterli Veri Oldukça İşle
                     while audio_accumulator.len() >= RESAMPLER_INPUT_FRAME_SIZE {
                         let frame_in: Vec<f32> = audio_accumulator.drain(0..RESAMPLER_INPUT_FRAME_SIZE).collect();
 
-                        // 1. Resampling
+                        // 1. Resampling (24kHz -> 8kHz)
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
-                            Ok(frame_in.iter().step_by(2).cloned().collect())
+                            // Bypass: Sadece her 3 örnekten 1'ini al (24k/3 = 8k)
+                            Ok(frame_in.iter().step_by(3).cloned().collect())
                         } else {
                             let resampler_clone = outbound_resampler.clone();
                             spawn_blocking(move || {
@@ -221,15 +224,14 @@ pub async fn rtp_session_handler(
 
                         match samples_8k_result {
                             Ok(samples_8k_f32) => {
-                                // 2. f32 -> i16 
+                                // 2. Encode
                                 let samples_8k_i16: Vec<i16> = samples_8k_f32.into_iter()
                                     .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                                     .collect();
 
-                                // 3. Encode
                                 let encoded_payload = encoder.encode(&samples_8k_i16);
                                 
-                                // 4. Packetize & Send
+                                // 3. Packetize & Send
                                 let current_type = encoder.get_type();
                                 let payload_size = if current_type == CodecType::G729 { 20 } else { 160 };
                                 let pt = match current_type {
@@ -247,11 +249,11 @@ pub async fn rtp_session_handler(
                                     rtp_seq = rtp_seq.wrapping_add(1);
                                     rtp_ts = rtp_ts.wrapping_add(160); 
 
-                                    // --- THE FIX: REAL-TIME PACER (HIZ AYARLAYICI) ---
-                                    // 160 sample (8kHz) = 20ms demektir. 
-                                    // Sesi doğal hızında göndermek için her paketten sonra ~20ms beklemeliyiz.
-                                    // İşlemci yükünü hesaba katarak 19ms bekletiyoruz.
-                                    tokio::time::sleep(std::time::Duration::from_millis(19)).await;
+                                    // --- THE FIX: INTERVAL BASED PACING ---
+                                    // Sleep yerine interval.tick() kullanıyoruz.
+                                    // Bu, işlem süresinden kaynaklanan kaymaları (drift) otomatik telafi eder.
+                                    // Her 20ms'de bir uyanmayı garanti eder.
+                                    pacer.tick().await; 
                                 }
                             },
                             Err(e) => {
@@ -265,7 +267,6 @@ pub async fn rtp_session_handler(
                     warn!("⚠️ RTP Hedefi bilinmiyor (No Latching). Paket düşürüldü.");
                 }
             },
-            
             else => { break; }
         }
     }
@@ -282,6 +283,7 @@ pub async fn rtp_session_handler(
     info!("🏁 RTP Oturumu Sonlandı (Port: {})", config.port);
 }
 
+// start_playback aynı kalıyor
 async fn start_playback(
     job: PlaybackJob, 
     config: &RtpSessionConfig, 

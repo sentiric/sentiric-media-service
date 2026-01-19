@@ -1,14 +1,18 @@
-// src/rtp/codecs.rs
+// sentiric-media-service/src/rtp/codecs.rs
 
 use anyhow::{anyhow, Result};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use sentiric_rtp_core::G711; // rtp-core G711 fonksiyonlarını kullanacağız
+use sentiric_rtp_core::G711; 
 
-// --- CONSTANTS ---
-// 20ms frame size @ 16kHz input -> 320 samples
-pub const RESAMPLER_INPUT_FRAME_SIZE: usize = 320; 
+// --- CRITICAL CONSTANTS ---
+// XTTS v2 Output: 24kHz
+// Target RTP: 8kHz
+// Frame Duration: 20ms
+
+// 20ms @ 24kHz input -> 480 samples
+pub const RESAMPLER_INPUT_FRAME_SIZE: usize = 480; 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
@@ -27,12 +31,13 @@ impl AudioCodec {
 }
 
 // --- StatefulResampler (TTS Akışı İçin) ---
-// Rubato resampler'ını ve durumunu sarmalar.
 pub struct StatefulResampler {
     resampler: SincFixedIn<f32>,
 }
 
 impl StatefulResampler {
+    /// source_rate: Genelde 24000 (TTS)
+    /// target_rate: Genelde 8000 (RTP)
     pub fn new(source_rate: u32, target_rate: u32) -> Result<Self> {
         let params = SincInterpolationParameters {
             sinc_len: 256,
@@ -42,6 +47,7 @@ impl StatefulResampler {
             window: WindowFunction::BlackmanHarris2,
         };
 
+        // Ratio: 8000 / 24000 = 0.3333... (Downsampling)
         let resampler = SincFixedIn::<f32>::new(
             target_rate as f64 / source_rate as f64, 
             2.0, 
@@ -73,17 +79,13 @@ impl StatefulResampler {
     }
 }
 
-// --- Helper Functions (Dosya Oynatma İçin) ---
-
-/// Gelen 16kHz LPCM verisini 8kHz'e düşürüp G.711 (PCMA/PCMU) olarak kodlar.
-/// Not: Bu fonksiyon `stream.rs` tarafından kullanılır ve basit bir decimation (atlama) yapar.
-/// TTS için yukarıdaki StatefulResampler kullanılır.
+// --- Helper Functions (Dosya Oynatma İçin - 16k to 8k Legacy) ---
+// Dosyalar hala 16k olabilir, bu yüzden burası 16k->8k kalabilir veya dosya header'ına bakılmalı.
+// Basitlik için burayı da güncellemeyelim, dosyaların 16k olduğu varsayılıyor.
 pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
-    // 1. Basit Downsampling (16k -> 8k)
-    // Her 2 örnekten 1'ini alıyoruz. Dosya okumalarında bu yeterli performansı verir.
+    // 16k -> 8k Basit Decimation
     let samples_8k_i16: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();
 
-    // 2. Encode (G.711)
     let g711_payload: Vec<u8> = match target_codec {
         AudioCodec::Pcmu => samples_8k_i16.iter().map(|&s| G711::linear_to_ulaw(s)).collect(),
         AudioCodec::Pcma => samples_8k_i16.iter().map(|&s| G711::linear_to_alaw(s)).collect(),
@@ -92,39 +94,23 @@ pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> R
     Ok(g711_payload)
 }
 
-/// Gelen g711 payload'unu LPCM16'ya çevirir (Gelen ses için)
 pub fn decode_g711_to_lpcm16(
     payload: &[u8],
     codec: AudioCodec,
-    _resampler: &mut StatefulResampler, // Gelecekte upsampling için rezerve
+    _resampler: &mut StatefulResampler,
 ) -> Result<Vec<i16>> {
-    // Basit Upsampling (8k -> 16k)
-    // Her örneği iki kere yazıyoruz (Linear Interpolation yerine Nearest Neighbor)
     let mut samples_16k = Vec::with_capacity(payload.len() * 2);
-    
     for &byte in payload {
         let pcm_val = match codec {
-            // G711 modülündeki decode fonksiyonları olmadığı için (rtp-core'da private olabilir)
-            // burada manuel decode yerine, rtp-core'un decoder'ını kullanmak isterdik ama 
-            // linear_to_ulaw encode yönlüdür.
-            // Bu proje kapsamında decode çok kritik değil (STT için), o yüzden basit bırakıyoruz.
-            // STT için zaten G.711 -> PCM dönüşümü gerekiyor.
-            
-            // Eğer rtp-core'da decode yoksa basit bir lookup tablosu veya formül gerekir.
-            // Şimdilik 0 dönüyorum çünkü inbound akış bu issue'nun konusu değil.
-            // STT çalışması için buranın dolu olması gerekirse rtp-core güncellenmeli.
             AudioCodec::Pcmu => ulaw_to_linear(byte),
             AudioCodec::Pcma => alaw_to_linear(byte),
         };
-        
         samples_16k.push(pcm_val);
         samples_16k.push(pcm_val);
     }
-
     Ok(samples_16k)
 }
 
-// Basit G.711 Decoder Yardımcıları
 fn ulaw_to_linear(u_val: u8) -> i16 {
     let t = !u_val;
     let mut t16 = ((t & 0xf) as i16) << 3;
