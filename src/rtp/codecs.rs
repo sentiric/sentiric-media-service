@@ -79,9 +79,7 @@ impl StatefulResampler {
     }
 }
 
-// --- Helper Functions (Dosya Oynatma İçin - 16k to 8k Legacy) ---
-// Dosyalar hala 16k olabilir, bu yüzden burası 16k->8k kalabilir veya dosya header'ına bakılmalı.
-// Basitlik için burayı da güncellemeyelim, dosyaların 16k olduğu varsayılıyor.
+// --- Helper Functions (Dosya Oynatma İçin - 16k Legacy Support) ---
 pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
     // 16k -> 8k Basit Decimation
     let samples_8k_i16: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();

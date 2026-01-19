@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
-use tokio::time::{self, Duration, Instant, MissedTickBehavior}; // MissedTickBehavior EKLENDİ
+use tokio::time::{self, Duration, Instant, MissedTickBehavior}; // MissedTickBehavior eklendi
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
@@ -56,11 +56,12 @@ pub async fn rtp_session_handler(
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
     
     // Resamplers
+    // Inbound: 8k -> 24k (Dummy for now)
     let _inbound_resampler = Arc::new(Mutex::new(
-        StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
+        StatefulResampler::new(8000, 24000).expect("Inbound Resampler Hatası"),
     ));
 
-    // Outbound (24k -> 8k) - XTTS Uyumu
+    // Outbound (24k -> 8k) - XTTS Uyumu için 24k Input
     let outbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
     ));
@@ -102,10 +103,10 @@ pub async fn rtp_session_handler(
     };
 
     // --- PACER (Hız Ayarlayıcı) ---
+    // Her 20ms'de bir tick atar.
     let mut pacer = time::interval(Duration::from_millis(20));
-    
-    // KRİTİK DÜZELTME: Burst davranışını kapatıyoruz. 
-    // gRPC beklerken biriken tick'leri atla, sadece şu an için bekle.
+    // KRİTİK: Burst (sel) davranışını engelle. Eğer beklemedeyken zaman geçerse,
+    // geçmişi telafi etmeye çalışma, sadece sıradaki 20ms'yi bekle.
     pacer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
@@ -129,7 +130,7 @@ pub async fn rtp_session_handler(
                         info!("🎙️ TTS Outbound Stream Başlatıldı (24kHz Input).");
                         outbound_stream_rx = Some(audio_rx);
                         audio_accumulator.clear(); 
-                        pacer.reset();
+                        pacer.reset(); // Zamanlayıcıyı sıfırla
                     },
                     RtpCommand::StopOutboundStream => { 
                         info!("🎙️ TTS Outbound Stream Durduruldu.");
@@ -185,7 +186,7 @@ pub async fn rtp_session_handler(
                 }
             },
 
-            // 4. OUTBOUND STREAM HANDLING
+            // 4. OUTBOUND STREAM HANDLING (THE FIX)
             Some(chunk) = async { if let Some(rx) = &mut outbound_stream_rx { rx.recv().await } else { std::future::pending().await } } => {
                 let target = {
                     let actual = *actual_remote_addr.lock().await;
@@ -210,6 +211,7 @@ pub async fn rtp_session_handler(
 
                         // 1. Resampling (24kHz -> 8kHz)
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
+                            // Bypass: Sadece her 3 örnekten 1'ini al (24k/3 = 8k)
                             Ok(frame_in.iter().step_by(3).cloned().collect())
                         } else {
                             let resampler_clone = outbound_resampler.clone();
