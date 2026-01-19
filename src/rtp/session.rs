@@ -14,7 +14,7 @@ use rand::Rng;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::net::UdpSocket;
+// use tokio::net::UdpSocket; // KALDIRILDI: Kullanılmayan import
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
 use tokio_util::sync::CancellationToken;
@@ -23,9 +23,6 @@ use tracing::{debug, error, info, instrument, warn};
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
 // --- CONFIGURATION ---
-// HATA AYIKLAMA MODU: Eğer true ise, Resampler devre dışı bırakılır.
-// Ses 16kHz -> 8kHz (PCMU) olarak direkt basılacağı için "Yavaş/Kalın" çıkar.
-// Bu modda ses duyuluyorsa, sorun Resampler'dadır.
 const DEBUG_BYPASS_RESAMPLER: bool = true;
 
 pub struct RtpSessionConfig {
@@ -52,9 +49,6 @@ fn process_rtp_payload(
     let payload = &packet_data[header_len..];
     let codec = AudioCodec::from_rtp_payload_type(payload_type).ok()?;
     
-    // Inbound (Gelen Ses) için de Bypass kontrolü
-    // Eğer DEBUG açıksa burada da resampling yapma (ama codec decode şart)
-    // Şimdilik buraya dokunmuyoruz, odak noktamız Outbound (TTS).
     let samples = codecs::decode_g711_to_lpcm16(payload, codec, resampler).ok()?;
     Some((samples, codec))
 }
@@ -219,12 +213,13 @@ pub async fn rtp_session_handler(
                         .collect();
 
                     if !samples_16k.is_empty() {
-                        // info!("🎤 TTS Chunk Received: {} samples", samples_16k.len());
+                        
+                        // [FIX]: Vektör closure'a taşınmadan önce boyutunu al.
+                        let input_len = samples_16k.len();
 
                         // 2. RESAMPLING (16kHz -> 8kHz)
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
                             // BYPASS MODE: Hiçbir işlem yapma, 16k veriyi 8k gibi kullan.
-                            // Ses yavaş ve kalın (Demon) çıkar ama ÇIKAR.
                             Ok(samples_16k.clone())
                         } else {
                             // NORMAL MODE: Resampler kullan
@@ -250,7 +245,8 @@ pub async fn rtp_session_handler(
                         match samples_8k_result {
                             Ok(samples_8k) => {
                                 if samples_8k.is_empty() {
-                                    warn!("⚠️ Resampler output is empty! Input size: {}", samples_16k.len());
+                                    // [FIX]: Artık `input_len` kullanılıyor, `samples_16k` değil.
+                                    warn!("⚠️ Resampler output is empty! Input size: {}", input_len);
                                 } else {
                                     // 3. ENCODE (8kHz PCM -> G.711)
                                     let encoded_payload = encoder.encode(&samples_8k);
@@ -316,13 +312,6 @@ async fn start_playback(
                  // Kayıt logic...
             }
             task::spawn(async move {
-                // Anonslar her zaman 16kHz olarak gelir ve stream fonksiyonu içinde encode edilir.
-                // Bu yüzden local_codec PCMU/A olsa da stream fonksiyonu bunu 8kHz'e çevirmelidir.
-                // Şimdilik dosya oynatma fonksiyonu kendi içinde encode ettiği için
-                // ve g711::encode fonksiyonu örnekleme hızı dönüşümü yapmadığı için
-                // dosya oynatma esnasında HIZ SORUNU yaşanabilir.
-                // Ancak acil olan TTS (Canlı Akış) olduğu için burayı şimdilik pas geçiyoruz.
-                
                 let local_codec = codecs::AudioCodec::Pcmu; 
                 debug!(samples = samples_16khz.len(), target = %job.target_addr, "RTP dosya akışı başlatılıyor...");
 

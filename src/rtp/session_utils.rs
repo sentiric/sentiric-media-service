@@ -6,7 +6,7 @@ use crate::config::AppConfig;
 use crate::rabbitmq;
 use crate::rtp::writers;
 use crate::state::AppState;
-use crate::rtp::stream::decode_audio_with_symphonia;
+// use crate::rtp::stream::decode_audio_with_symphonia; // KALDIRILDI
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine};
 use hound::WavWriter;
@@ -18,9 +18,15 @@ use std::sync::Arc;
 use tokio::task::spawn_blocking;
 use tracing::{error, info, instrument, warn};
 
-// ... (finalize_and_save_recording AYNI KALSIN) ...
+// ... (Geri kalanı aynı) ...
 #[instrument(skip_all, fields(uri = %session.output_uri, call_id = %session.call_id, trace_id = %session.trace_id))]
 pub async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
+    // ... (Kodun geri kalanı değişmedi) ...
+    // Hataları önlemek için tam içeriği tekrar kopyalamıyorum, önceki response'daki 
+    // finalize_and_save_recording ve load_and_resample_samples_from_uri fonksiyonları 
+    // geçerliliğini korumaktadır. Sadece import satırını silmeniz yeterli.
+    // Ancak tam bir dosya istiyorsanız aşağıdadır.
+    
     if session.mixed_samples_16khz.is_empty() {
         warn!("Kaydedilecek ses verisi yok, boş dosya oluşturulmayacak.");
         return Ok(());
@@ -130,7 +136,6 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
     result
 }
 
-// --- DÜZELTİLEN FONKSİYON ---
 pub async fn load_and_resample_samples_from_uri(
     uri: &str,
     app_state: &AppState,
@@ -139,23 +144,18 @@ pub async fn load_and_resample_samples_from_uri(
     if uri.starts_with("data:") {
         info!("Data URI'sinden ses verisi alınıyor.");
         
-        // Base64 verisini daha güvenli ayıkla
-        // "data:audio/pcm;base64," kısmından sonrasını al
         let base64_data = if let Some(idx) = uri.find(";base64,") {
             &uri[idx + 8..]
         } else {
             return Err(anyhow!("Geçersiz data URI formatı: base64 etiketi bulunamadı"));
         };
             
-        // Boşlukları ve yeni satırları temizle (Robustness)
         let clean_base64 = base64_data.replace(|c: char| c.is_whitespace(), "");
 
         let audio_bytes = general_purpose::STANDARD
             .decode(&clean_base64)
             .context("Base64 verisi çözümlenemedi")?;
 
-        // RAW PCM (8kHz, 16-bit, Mono) varsayımı
-        // WAV Header kontrolü
         let raw_samples_bytes = if audio_bytes.len() > 44 && &audio_bytes[0..4] == b"RIFF" {
             info!("WAV Header tespit edildi, header atlanarak raw data okunuyor.");
             &audio_bytes[44..]
@@ -172,7 +172,6 @@ pub async fn load_and_resample_samples_from_uri(
              return Err(anyhow!("Data URI ses verisi boş."));
         }
 
-        // 8kHz -> 16kHz Resampling
         let resampled_samples_16khz = spawn_blocking(move || -> Result<Vec<i16>> {
             info!(samples = samples_8k.len(), "Data URI sesi 16kHz'e yükseltiliyor.");
             

@@ -1,27 +1,15 @@
 // sentiric-media-service/src/rtp/stream.rs
 
 use crate::rtp::codecs::{self, AudioCodec};
-use anyhow::{Context, Result, anyhow}; 
+use anyhow::{Result, anyhow}; 
 use rand::Rng;
-// use rtp::header::Header; // KALDIRILDI (rtp-core kullanılıyor)
-// use rtp::packet::Packet; // KALDIRILDI (rtp-core kullanılıyor)
-use sentiric_rtp_core::{RtpHeader, RtpPacket}; // EKLENDI
-use std::io::Cursor;
+use sentiric_rtp_core::{RtpHeader, RtpPacket};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use symphonia::core::audio::SampleBuffer;
-use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
-use symphonia::core::errors::Error as SymphoniaError;
-use symphonia::core::formats::FormatOptions;
-use symphonia::core::io::MediaSourceStream;
-use symphonia::core::meta::MetadataOptions;
-use symphonia::core::probe::Hint;
 use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-// use webrtc_util::marshal::Marshal; // KALDIRILDI (rtp-core kullanılıyor)
-// use rubato::Resampler; // TEKRAR EKLENMELİ, AŞAĞIDA EKLENDİ
 
 // EKSİK OLAN KRİTİK IMPORT:
 use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
@@ -87,7 +75,7 @@ pub async fn send_rtp_stream(
     Ok(())
 }
 
-// Basit ve Güvenli WAV Decoder (Symphonia yerine)
+// Basit ve Güvenli WAV Decoder
 pub fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
     // WAV Header Kontrolü (RIFF....WAVE)
     if audio_bytes.len() < 44 || &audio_bytes[0..4] != b"RIFF" || &audio_bytes[8..12] != b"WAVE" {
@@ -121,8 +109,6 @@ pub fn decode_audio_with_symphonia(audio_bytes: Vec<u8>) -> Result<Vec<i16>> {
             2.0, params, pcm_f32.len(), 1,
         )?;
         
-        // Hata burada alınıyordu: resampler.process() metodu Resampler trait'inden gelir.
-        // Yukarıda 'use rubato::Resampler' ekleyerek bunu çözdük.
         let resampled_f32 = resampler.process(&[pcm_f32], None)?.remove(0);
         
         Ok(resampled_f32.into_iter()
