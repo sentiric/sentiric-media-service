@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
-use tokio::time::{self, Duration, Instant}; // Time modülü eklendi
+use tokio::time::{self, Duration, Instant, MissedTickBehavior}; // MissedTickBehavior EKLENDİ
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, instrument, warn};
 
@@ -56,13 +56,11 @@ pub async fn rtp_session_handler(
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
     
     // Resamplers
-    // Inbound: 8k -> 24k (Gelecek planı için) veya 16k. Şimdilik dummy.
     let _inbound_resampler = Arc::new(Mutex::new(
-        StatefulResampler::new(8000, 24000).expect("Inbound Resampler Hatası"),
+        StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
     ));
 
-    // Outbound: XTTS(24k) -> RTP(8k)
-    // --- KRİTİK DÜZELTME BURADA: 16000 -> 24000 YAPILDI ---
+    // Outbound (24k -> 8k) - XTTS Uyumu
     let outbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
     ));
@@ -104,10 +102,11 @@ pub async fn rtp_session_handler(
     };
 
     // --- PACER (Hız Ayarlayıcı) ---
-    // Her 20ms'de bir tick atar. Drift (kayma) yapmaz.
     let mut pacer = time::interval(Duration::from_millis(20));
-    // İlk tick hemen atılır, o yüzden bir kere boşa çekelim.
-    pacer.tick().await;
+    
+    // KRİTİK DÜZELTME: Burst davranışını kapatıyoruz. 
+    // gRPC beklerken biriken tick'leri atla, sadece şu an için bekle.
+    pacer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -130,7 +129,7 @@ pub async fn rtp_session_handler(
                         info!("🎙️ TTS Outbound Stream Başlatıldı (24kHz Input).");
                         outbound_stream_rx = Some(audio_rx);
                         audio_accumulator.clear(); 
-                        pacer.reset(); // Zamanlayıcıyı sıfırla
+                        pacer.reset();
                     },
                     RtpCommand::StopOutboundStream => { 
                         info!("🎙️ TTS Outbound Stream Durduruldu.");
@@ -186,7 +185,7 @@ pub async fn rtp_session_handler(
                 }
             },
 
-            // 4. OUTBOUND STREAM HANDLING (THE FIX)
+            // 4. OUTBOUND STREAM HANDLING
             Some(chunk) = async { if let Some(rx) = &mut outbound_stream_rx { rx.recv().await } else { std::future::pending().await } } => {
                 let target = {
                     let actual = *actual_remote_addr.lock().await;
@@ -194,8 +193,7 @@ pub async fn rtp_session_handler(
                 };
 
                 if let Some(target_addr) = target {
-                    // A. Byte Chunk -> f32 Samples
-                    // Gelen veri 24kHz olduğu varsayılıyor!
+                    // A. Byte Chunk -> f32 Samples (24kHz)
                     let samples_24k_f32: Vec<f32> = chunk
                         .chunks_exact(2)
                         .map(|b| {
@@ -212,7 +210,6 @@ pub async fn rtp_session_handler(
 
                         // 1. Resampling (24kHz -> 8kHz)
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
-                            // Bypass: Sadece her 3 örnekten 1'ini al (24k/3 = 8k)
                             Ok(frame_in.iter().step_by(3).cloned().collect())
                         } else {
                             let resampler_clone = outbound_resampler.clone();
@@ -231,7 +228,7 @@ pub async fn rtp_session_handler(
 
                                 let encoded_payload = encoder.encode(&samples_8k_i16);
                                 
-                                // 3. Packetize & Send
+                                // 3. Packetize
                                 let current_type = encoder.get_type();
                                 let payload_size = if current_type == CodecType::G729 { 20 } else { 160 };
                                 let pt = match current_type {
@@ -239,6 +236,11 @@ pub async fn rtp_session_handler(
                                 };
 
                                 for frame in encoded_payload.chunks(payload_size) {
+                                    // 4. PACING (Burada bekliyoruz)
+                                    // MissedTickBehavior::Skip sayesinde gRPC beklerken biriken
+                                    // tickler yüzünden sel baskını (burst) olmayacak.
+                                    pacer.tick().await;
+
                                     let header = RtpHeader::new(pt, rtp_seq, rtp_ts, rtp_ssrc);
                                     let packet = RtpPacket { header, payload: frame.to_vec() };
                                     
@@ -248,12 +250,6 @@ pub async fn rtp_session_handler(
 
                                     rtp_seq = rtp_seq.wrapping_add(1);
                                     rtp_ts = rtp_ts.wrapping_add(160); 
-
-                                    // --- THE FIX: INTERVAL BASED PACING ---
-                                    // Sleep yerine interval.tick() kullanıyoruz.
-                                    // Bu, işlem süresinden kaynaklanan kaymaları (drift) otomatik telafi eder.
-                                    // Her 20ms'de bir uyanmayı garanti eder.
-                                    pacer.tick().await; 
                                 }
                             },
                             Err(e) => {
@@ -283,7 +279,7 @@ pub async fn rtp_session_handler(
     info!("🏁 RTP Oturumu Sonlandı (Port: {})", config.port);
 }
 
-// start_playback aynı kalıyor
+// ... start_playback unchanged ...
 async fn start_playback(
     job: PlaybackJob, 
     config: &RtpSessionConfig, 
