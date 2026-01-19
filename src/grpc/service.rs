@@ -26,7 +26,7 @@ use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, field, info, instrument, warn};
 use url::Url;
-use crate::metrics::ACTIVE_SESSIONS; // Gauge için gerekli
+use crate::metrics::ACTIVE_SESSIONS;
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -54,7 +54,6 @@ impl MediaService for MyMediaService {
 
         let mut in_stream = request.into_inner();
         
-        // İlk mesajı alarak Call-ID'yi çözümle
         let first_msg = match in_stream.message().await {
             Ok(Some(msg)) => msg,
             Ok(None) => return Err(Status::invalid_argument("Stream boş")),
@@ -72,7 +71,8 @@ impl MediaService for MyMediaService {
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| Status::not_found("RTP oturum kanalı bulunamadı"))?;
 
-        let (audio_tx, audio_rx) = mpsc::channel(128);
+        // Channel boyutunu genişlettik
+        let (audio_tx, audio_rx) = mpsc::channel(4096);
         
         session_tx.send(RtpCommand::StartOutboundStream { audio_rx }).await
             .map_err(|_| Status::internal("RTP oturumuna komut gönderilemedi"))?;
@@ -80,27 +80,35 @@ impl MediaService for MyMediaService {
         let (response_tx, response_rx) = mpsc::channel(1);
         
         tokio::spawn(async move {
-            // İlk mesajdaki veriyi gönder
+            let mut total_bytes = 0;
+
             if !first_msg.audio_chunk.is_empty() {
-                info!("🎤 Gelen ilk ses parçası: {} bytes", first_msg.audio_chunk.len()); // <--- YENİ LOG
+                let size = first_msg.audio_chunk.len();
+                total_bytes += size;
+                info!("🎤 [gRPC-IN] İlk Paket: {} bytes", size);
+                
                 if audio_tx.send(first_msg.audio_chunk).await.is_err() {
+                    warn!("⚠️ [gRPC-IN] RTP Kanalı kapalı (Early Drop)");
                     return; 
                 }
             }
 
             while let Ok(Some(msg)) = in_stream.message().await {
                 if !msg.audio_chunk.is_empty() {
-                    // Log kirliliğini önlemek için sadece büyük chunkları veya belli aralıklarla loglayabiliriz
-                    // Ama debug için her chunk'ı görelim (geçici olarak)
-                    debug!("🎤 Gelen ses parçası: {} bytes", msg.audio_chunk.len()); 
+                    let size = msg.audio_chunk.len();
+                    total_bytes += size;
+                    
+                    // DEBUG: Her paketi logluyoruz (Ses akışını görmek için)
+                    info!("🎤 [gRPC-IN] Chunk Alındı: {} bytes", size);
                     
                     if audio_tx.send(msg.audio_chunk).await.is_err() {
+                        warn!("⚠️ [gRPC-IN] RTP Kanalı koptu (Session Closed)");
                         break;
                     }
                 }
             }
             
-            info!("StreamAudioToCall veri akışı bitti."); // <--- YENİ LOG
+            info!("✅ [gRPC-IN] Stream Bitti. Toplam: {} bytes", total_bytes);
             let _ = response_tx.send(Ok(StreamAudioToCallResponse {
                 success: true,
                 error_message: "".to_string(),
@@ -307,7 +315,6 @@ impl MediaService for MyMediaService {
         session_tx.send(RtpCommand::StopPermanentRecording { responder: tx }).await
             .map_err(|_| ServiceError::CommandSendError("StopPermanentRecording".to_string()))?;
             
-        // Hata yakalama değişkeni düzeltildi: _e kullanıldı
         match rx.await {
             Ok(Ok(_)) => Ok(Response::new(StopRecordingResponse { success: true })),
             Ok(Err(e)) => Err(ServiceError::RecordingSaveFailed { source: e }.into()),

@@ -14,7 +14,6 @@ use rand::Rng;
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
-// use tokio::net::UdpSocket; // KALDIRILDI
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
 use tokio_util::sync::CancellationToken;
@@ -23,8 +22,8 @@ use tracing::{debug, error, info, instrument, warn};
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
 // --- CONFIGURATION ---
-// DÜZELTME: Artık False yapıyoruz. Resampler devreye girsin.
-const DEBUG_BYPASS_RESAMPLER: bool = false;
+// HATA AYIKLAMA MODU: Sesi yavaş (demon) yap ama kesin gönder.
+const DEBUG_BYPASS_RESAMPLER: bool = true;
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -179,7 +178,6 @@ pub async fn rtp_session_handler(
                              encoder = CodecFactory::create_encoder(new_type);
                         }
                     }
-                    // Forward to Agent/STT
                     let mut sender_guard = live_stream_sender.lock().await;
                     if let Some(sender) = &*sender_guard {
                         if !sender.is_closed() {
@@ -208,31 +206,29 @@ pub async fn rtp_session_handler(
                 };
 
                 if let Some(target_addr) = target {
-                    // 1. Chunk'ı i16 Vektörüne çevir (Source: 16kHz)
+                    // [DEBUG] Gelen TTS verisini logla
+                    info!("🔄 [RTP-Loop] TTS Chunk Alındı: {} bytes. Hedef: {}", chunk.len(), target_addr);
+
                     let samples_16k: Vec<i16> = chunk.chunks_exact(2)
                         .map(|b| i16::from_le_bytes([b[0], b[1]]))
                         .collect();
 
                     if !samples_16k.is_empty() {
-                        
-                        // [FIX]: HATA ÖNLEYİCİ - Veriyi Move Etmeden Önce Boyutunu Sakla
                         let input_len = samples_16k.len();
 
                         // 2. RESAMPLING (16kHz -> 8kHz)
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
-                            // BYPASS MODE
+                            // BYPASS MODE: 16k -> 8k varsay (Demon Voice)
                             Ok(samples_16k)
                         } else {
                             // NORMAL MODE: Resampler kullan
                             let resampler_clone = outbound_resampler.clone();
                             spawn_blocking(move || {
-                                // i16 -> f32
                                 let input_f32: Vec<f32> = samples_16k.iter().map(|&s| s as f32 / 32768.0).collect();
                                 let mut guard = resampler_clone.blocking_lock();
                                 
                                 match guard.process(&input_f32) {
                                     Ok(output_f32) => {
-                                        // f32 -> i16 (8kHz)
                                         let output_i16: Vec<i16> = output_f32.iter()
                                             .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                                             .collect();
@@ -246,11 +242,12 @@ pub async fn rtp_session_handler(
                         match samples_8k_result {
                             Ok(samples_8k) => {
                                 if samples_8k.is_empty() {
-                                    // [FIX]: Artık `input_len` kullanılıyor (Derleme hatası çözüldü)
                                     warn!("⚠️ Resampler output is empty! Input size: {}", input_len);
                                 } else {
                                     // 3. ENCODE (8kHz PCM -> G.711)
                                     let encoded_payload = encoder.encode(&samples_8k);
+                                    let packets_count = encoded_payload.len() / 160;
+                                    info!("📤 [RTP-Loop] {} RTP paketi GÖNDERİLİYOR. (Codec: {:?})", packets_count, encoder.get_type());
                                     
                                     // 4. PACKETIZE (20ms chunks -> 160 bytes @ 8kHz)
                                     const SAMPLES_PER_PACKET: usize = 160;
@@ -261,7 +258,7 @@ pub async fn rtp_session_handler(
                                         let packet = RtpPacket { header, payload: frame.to_vec() };
                                         
                                         if let Err(e) = socket.send_to(&packet.to_bytes(), target_addr).await {
-                                            warn!("RTP Send Error: {}", e);
+                                            warn!("❌ RTP Send Error: {}", e);
                                         }
 
                                         rtp_seq = rtp_seq.wrapping_add(1);
@@ -278,7 +275,7 @@ pub async fn rtp_session_handler(
                         }
                     }
                 } else {
-                    warn!("⚠️ RTP Hedefi bilinmiyor (No Latching, No Initial). Paket düşürüldü.");
+                    warn!("⚠️ RTP Hedefi YOK! Paket çöpe atıldı. Chunk size: {}", chunk.len());
                 }
             },
             
