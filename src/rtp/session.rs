@@ -51,7 +51,7 @@ pub async fn rtp_session_handler(
     let actual_remote_addr = Arc::new(Mutex::new(None));
     let initial_target_addr = Arc::new(Mutex::new(None)); 
 
-    // Codec State: Varsayılan PCMU, ama gelen pakete göre değişecek.
+    // Codec State: Varsayılan PCMU
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
     
     // Resamplers
@@ -64,7 +64,7 @@ pub async fn rtp_session_handler(
         StatefulResampler::new(16000, 8000).expect("Outbound Resampler Hatası"),
     ));
 
-    // Encoder Başlat (Varsayılan PCMU)
+    // Encoder Başlat
     let mut encoder = CodecFactory::create_encoder(CodecType::PCMU);
     
     // Outbound Stream Channels & Buffers
@@ -150,7 +150,7 @@ pub async fn rtp_session_handler(
                 }
             },
             
-            // 2. INBOUND RTP HANDLING (Kullanıcıdan Gelen Ses & Codec Tespiti)
+            // 2. INBOUND RTP HANDLING
             Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
                 // NAT Latching
                 {
@@ -161,18 +161,14 @@ pub async fn rtp_session_handler(
                     }
                 }
                 
-                // Codec Detection & Switching Logic (G.729 Desteği)
+                // Codec Detection
                 if packet_data.len() > 12 {
                     let pt = packet_data[1] & 0x7F;
-                    
                     if let Some(new_codec) = CodecType::from_u8(pt) {
                         let mut current = current_codec_type.lock().await;
-                        // Sadece PCMU/PCMA/G729/G722 değişiminde log bas
                         if *current != new_codec && (new_codec == CodecType::G729 || new_codec == CodecType::PCMU || new_codec == CodecType::PCMA) {
                             info!("🔄 Codec Switch Detected: {:?} -> {:?}", *current, new_codec);
                             *current = new_codec;
-                            
-                            // Encoder'ı anında güncelle (G.711 -> G.729 geçişi burada olur)
                             encoder = CodecFactory::create_encoder(new_codec);
                         }
                     }
@@ -206,14 +202,13 @@ pub async fn rtp_session_handler(
                         })
                         .collect();
 
-                    // B. Biriktiriciye Ekle
                     audio_accumulator.extend(samples_16k_f32);
 
                     // C. Yeterli Veri Oldukça İşle
                     while audio_accumulator.len() >= RESAMPLER_INPUT_FRAME_SIZE {
                         let frame_in: Vec<f32> = audio_accumulator.drain(0..RESAMPLER_INPUT_FRAME_SIZE).collect();
 
-                        // 1. Resampling (16kHz -> 8kHz)
+                        // 1. Resampling
                         let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
                             Ok(frame_in.iter().step_by(2).cloned().collect())
                         } else {
@@ -231,27 +226,14 @@ pub async fn rtp_session_handler(
                                     .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
                                     .collect();
 
-                                // 3. Encode (PCMU/PCMA/G729) - Encoder dinamik olarak güncellenmiştir
+                                // 3. Encode
                                 let encoded_payload = encoder.encode(&samples_8k_i16);
                                 
                                 // 4. Packetize & Send
-                                // G.711: 160 bytes (20ms), G.729: 20 bytes (20ms)
                                 let current_type = encoder.get_type();
-                                
-                                // Paket boyutunu codec tipine göre dinamik belirle
-                                let payload_size = if current_type == CodecType::G729 { 
-                                    // G.729 için genelde 2 frame (20ms) bir pakete sığar: 10 + 10 = 20 byte
-                                    20 
-                                } else { 
-                                    // G.711 için 20ms = 160 byte
-                                    160 
-                                };
-                                
+                                let payload_size = if current_type == CodecType::G729 { 20 } else { 160 };
                                 let pt = match current_type {
-                                    CodecType::PCMU => 0,
-                                    CodecType::PCMA => 8,
-                                    CodecType::G729 => 18,
-                                    _ => 0
+                                    CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, _ => 0
                                 };
 
                                 for frame in encoded_payload.chunks(payload_size) {
@@ -264,6 +246,12 @@ pub async fn rtp_session_handler(
 
                                     rtp_seq = rtp_seq.wrapping_add(1);
                                     rtp_ts = rtp_ts.wrapping_add(160); 
+
+                                    // --- THE FIX: REAL-TIME PACER (HIZ AYARLAYICI) ---
+                                    // 160 sample (8kHz) = 20ms demektir. 
+                                    // Sesi doğal hızında göndermek için her paketten sonra ~20ms beklemeliyiz.
+                                    // İşlemci yükünü hesaba katarak 19ms bekletiyoruz.
+                                    tokio::time::sleep(std::time::Duration::from_millis(19)).await;
                                 }
                             },
                             Err(e) => {
@@ -294,7 +282,6 @@ pub async fn rtp_session_handler(
     info!("🏁 RTP Oturumu Sonlandı (Port: {})", config.port);
 }
 
-// Dosya Oynatma Fonksiyonu
 async fn start_playback(
     job: PlaybackJob, 
     config: &RtpSessionConfig, 
@@ -306,12 +293,7 @@ async fn start_playback(
 
     match load_and_resample_samples_from_uri(&job.audio_uri, &config.app_state, &config.app_config).await {
         Ok(samples_16khz) => {
-            // ... (Kayıt logic - Şimdilik devre dışı/pasif) ...
             task::spawn(async move {
-                // Burada dosya oynatırken varsayılan olarak PCMU kullanıyoruz (basitlik için).
-                // İdealde buranın da 'current_codec_type' kullanması gerekirdi ama playback
-                // ayrı bir issue. Şu anki odak noktamız TTS akışı.
-                // Kod derlensin diye AudioCodec::Pcmu doğrudan kullanıldı.
                 let local_codec = AudioCodec::Pcmu; 
                 let stream_result = crate::rtp::stream::send_rtp_stream(
                     &socket, 
