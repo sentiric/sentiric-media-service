@@ -22,7 +22,12 @@ use tracing::{debug, error, info, instrument, warn};
 
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
-// ... (Struct tanımları aynı) ...
+// --- CONFIGURATION ---
+// HATA AYIKLAMA MODU: Eğer true ise, Resampler devre dışı bırakılır.
+// Ses 16kHz -> 8kHz (PCMU) olarak direkt basılacağı için "Yavaş/Kalın" çıkar.
+// Bu modda ses duyuluyorsa, sorun Resampler'dadır.
+const DEBUG_BYPASS_RESAMPLER: bool = true;
+
 pub struct RtpSessionConfig {
     pub app_state: AppState,
     pub app_config: Arc<AppConfig>,
@@ -46,6 +51,10 @@ fn process_rtp_payload(
     let header_len = 12;
     let payload = &packet_data[header_len..];
     let codec = AudioCodec::from_rtp_payload_type(payload_type).ok()?;
+    
+    // Inbound (Gelen Ses) için de Bypass kontrolü
+    // Eğer DEBUG açıksa burada da resampling yapma (ama codec decode şart)
+    // Şimdilik buraya dokunmuyoruz, odak noktamız Outbound (TTS).
     let samples = codecs::decode_g711_to_lpcm16(payload, codec, resampler).ok()?;
     Some((samples, codec))
 }
@@ -65,13 +74,10 @@ pub async fn rtp_session_handler(
 
     let outbound_codec = Arc::new(Mutex::new(None));
     
-    // Inbound: 8k -> 16k (STT için)
     let inbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
     ));
 
-    // YENİ: Outbound: 16k -> 8k (RTP/G.711 için)
-    // TTS'ten 16kHz geliyor, telefon hattı 8kHz istiyor.
     let outbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(16000, 8000).expect("Outbound Resampler Hatası"),
     ));
@@ -114,7 +120,7 @@ pub async fn rtp_session_handler(
                             let mut init_addr = initial_target_addr.lock().await;
                             if init_addr.is_none() {
                                 *init_addr = Some(candidate_target_addr);
-                                info!("🎯 Initial RTP Target set to: {}", candidate_target_addr); // <--- DEBUG -> INFO
+                                info!("🎯 Initial RTP Target set to: {}", candidate_target_addr);
                             }
                         }
                         let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
@@ -124,8 +130,14 @@ pub async fn rtp_session_handler(
                             start_playback(job, &config, socket.clone(), playback_finished_tx.clone(), permanent_recording_session.clone()).await;
                         } else { playback_queue.push_back(job); }
                     },
-                    RtpCommand::StartOutboundStream { audio_rx } => { outbound_stream_rx = Some(audio_rx); },
-                    RtpCommand::StopOutboundStream => { outbound_stream_rx = None; },
+                    RtpCommand::StartOutboundStream { audio_rx } => { 
+                        info!("🎙️ TTS Outbound Stream Başlatıldı.");
+                        outbound_stream_rx = Some(audio_rx); 
+                    },
+                    RtpCommand::StopOutboundStream => { 
+                        info!("🎙️ TTS Outbound Stream Durduruldu.");
+                        outbound_stream_rx = None; 
+                    },
                     RtpCommand::StartLiveAudioStream { stream_sender, .. } => { *live_stream_sender.lock().await = Some(stream_sender); },
                     RtpCommand::StartPermanentRecording(mut session) => {
                         session.mixed_samples_16khz.reserve(16000 * 60 * 5); 
@@ -193,7 +205,7 @@ pub async fn rtp_session_handler(
                 }
             },
 
-            // --- STREAMING OUTBOUND (TTS) - RESAMPLING EKLENDİ ---
+            // --- STREAMING OUTBOUND (TTS) ---
             Some(chunk) = async { if let Some(rx) = &mut outbound_stream_rx { rx.recv().await } else { std::future::pending().await } } => {
                 let target = {
                     let actual = *actual_remote_addr.lock().await;
@@ -207,53 +219,69 @@ pub async fn rtp_session_handler(
                         .collect();
 
                     if !samples_16k.is_empty() {
-                        
+                        // info!("🎤 TTS Chunk Received: {} samples", samples_16k.len());
+
                         // 2. RESAMPLING (16kHz -> 8kHz)
-                        // CPU yoğun işlem olduğu için blocking task'e atıyoruz
-                        let resampler_clone = outbound_resampler.clone();
-                        let resampled_result = spawn_blocking(move || {
-                            // i16 -> f32
-                            let input_f32: Vec<f32> = samples_16k.iter().map(|&s| s as f32 / 32768.0).collect();
-                            let mut guard = resampler_clone.blocking_lock();
-                            
-                            // Resample
-                            match guard.process(&input_f32) {
-                                Ok(output_f32) => {
-                                    // f32 -> i16 (8kHz)
-                                    let output_i16: Vec<i16> = output_f32.iter()
-                                        .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-                                        .collect();
-                                    Ok(output_i16)
-                                },
-                                Err(e) => Err(e)
-                            }
-                        }).await;
-
-                        if let Ok(Ok(samples_8k)) = resampled_result {
-                            // 3. ENCODE (8kHz PCM -> G.711)
-                            let encoded_payload = encoder.encode(&samples_8k);
-                            
-                            // 4. PACKETIZE (20ms chunks -> 160 bytes @ 8kHz)
-                            const SAMPLES_PER_PACKET: usize = 160;
-                            let pt = match encoder.get_type() { CodecType::PCMU => 0, CodecType::PCMA => 8, _ => 0 };
-
-                            for frame in encoded_payload.chunks(SAMPLES_PER_PACKET) {
-                                let header = RtpHeader::new(pt, rtp_seq, rtp_ts, rtp_ssrc);
-                                let packet = RtpPacket { header, payload: frame.to_vec() };
-                                
-                                // Gerekirse logla
-                                // if rtp_seq % 100 == 0 { debug!("Sent packet seq={}", rtp_seq); }
-
-                                let _ = socket.send_to(&packet.to_bytes(), target_addr).await;
-
-                                rtp_seq = rtp_seq.wrapping_add(1);
-                                rtp_ts = rtp_ts.wrapping_add(SAMPLES_PER_PACKET as u32);
-                                tokio::time::sleep(std::time::Duration::from_millis(19)).await;
-                            }
+                        let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
+                            // BYPASS MODE: Hiçbir işlem yapma, 16k veriyi 8k gibi kullan.
+                            // Ses yavaş ve kalın (Demon) çıkar ama ÇIKAR.
+                            Ok(samples_16k.clone())
                         } else {
-                            error!("Outbound resampling hatası!");
+                            // NORMAL MODE: Resampler kullan
+                            let resampler_clone = outbound_resampler.clone();
+                            spawn_blocking(move || {
+                                // i16 -> f32
+                                let input_f32: Vec<f32> = samples_16k.iter().map(|&s| s as f32 / 32768.0).collect();
+                                let mut guard = resampler_clone.blocking_lock();
+                                
+                                match guard.process(&input_f32) {
+                                    Ok(output_f32) => {
+                                        // f32 -> i16 (8kHz)
+                                        let output_i16: Vec<i16> = output_f32.iter()
+                                            .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
+                                            .collect();
+                                        Ok(output_i16)
+                                    },
+                                    Err(e) => Err(e)
+                                }
+                            }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("JoinError: {}", e)))
+                        };
+
+                        match samples_8k_result {
+                            Ok(samples_8k) => {
+                                if samples_8k.is_empty() {
+                                    warn!("⚠️ Resampler output is empty! Input size: {}", samples_16k.len());
+                                } else {
+                                    // 3. ENCODE (8kHz PCM -> G.711)
+                                    let encoded_payload = encoder.encode(&samples_8k);
+                                    
+                                    // 4. PACKETIZE (20ms chunks -> 160 bytes @ 8kHz)
+                                    const SAMPLES_PER_PACKET: usize = 160;
+                                    let pt = match encoder.get_type() { CodecType::PCMU => 0, CodecType::PCMA => 8, _ => 0 };
+
+                                    for frame in encoded_payload.chunks(SAMPLES_PER_PACKET) {
+                                        let header = RtpHeader::new(pt, rtp_seq, rtp_ts, rtp_ssrc);
+                                        let packet = RtpPacket { header, payload: frame.to_vec() };
+                                        
+                                        if let Err(e) = socket.send_to(&packet.to_bytes(), target_addr).await {
+                                            warn!("RTP Send Error: {}", e);
+                                        }
+
+                                        rtp_seq = rtp_seq.wrapping_add(1);
+                                        rtp_ts = rtp_ts.wrapping_add(SAMPLES_PER_PACKET as u32);
+                                        
+                                        // 20ms Gecikme (Buffer kontrolü için hassas ayar)
+                                        tokio::time::sleep(std::time::Duration::from_millis(19)).await;
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                error!("❌ Resampling Error: {}", e);
+                            }
                         }
                     }
+                } else {
+                    warn!("⚠️ RTP Hedefi bilinmiyor (No Latching, No Initial). Paket düşürüldü.");
                 }
             },
             
@@ -272,7 +300,6 @@ pub async fn rtp_session_handler(
     info!("🏁 RTP Oturumu Sonlandı (Port: {})", config.port);
 }
 
-// ... (start_playback fonksiyonu aynı kalıyor) ...
 #[instrument(skip_all, fields(target = %job.target_addr, uri.scheme = %extract_uri_scheme(&job.audio_uri)))]
 async fn start_playback(
     job: PlaybackJob, 
@@ -286,9 +313,16 @@ async fn start_playback(
     match load_and_resample_samples_from_uri(&job.audio_uri, &config.app_state, &config.app_config).await {
         Ok(samples_16khz) => {
             if let Some(_session) = &mut *permanent_recording_session.lock().await {
-                 // Kayıt
+                 // Kayıt logic...
             }
             task::spawn(async move {
+                // Anonslar her zaman 16kHz olarak gelir ve stream fonksiyonu içinde encode edilir.
+                // Bu yüzden local_codec PCMU/A olsa da stream fonksiyonu bunu 8kHz'e çevirmelidir.
+                // Şimdilik dosya oynatma fonksiyonu kendi içinde encode ettiği için
+                // ve g711::encode fonksiyonu örnekleme hızı dönüşümü yapmadığı için
+                // dosya oynatma esnasında HIZ SORUNU yaşanabilir.
+                // Ancak acil olan TTS (Canlı Akış) olduğu için burayı şimdilik pas geçiyoruz.
+                
                 let local_codec = codecs::AudioCodec::Pcmu; 
                 debug!(samples = samples_16khz.len(), target = %job.target_addr, "RTP dosya akışı başlatılıyor...");
 
