@@ -3552,8 +3552,8 @@ checksum = "d767eb0aabc880b29956c35734170f26ed551a859dbd361d140cdbeca61ab1e2"
 
 [[package]]
 name = "sentiric-contracts"
-version = "1.13.3"
-source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.13.3#130a6c9aba1dd66f997a2460a1d7561454bd27dc"
+version = "1.13.4"
+source = "git+https://github.com/sentiric/sentiric-contracts.git?tag=v1.13.4#6b4d75f724f61e5f043b8ce7131548c13cac6101"
 dependencies = [
  "prost",
  "prost-types",
@@ -3604,12 +3604,14 @@ dependencies = [
 
 [[package]]
 name = "sentiric-rtp-core"
-version = "1.0.0"
-source = "git+https://github.com/sentiric/sentiric-rtp-core.git?tag=v1.0.0#c3eb711747a241c4e61757ad22747b2cc4c4bf8e"
+version = "1.2.0"
+source = "git+https://github.com/sentiric/sentiric-rtp-core.git?tag=v1.2.0#ac490d4c36a11cd81121b1ef2e2eaedc85d888c0"
 dependencies = [
  "cc",
  "glob",
  "libc",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

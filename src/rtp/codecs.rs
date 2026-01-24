@@ -4,14 +4,10 @@ use anyhow::{anyhow, Result};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+// KANIT: Core kütüphaneden G711 algoritmasını kullanıyoruz.
+// Kendi içimizde G711 matematiksel dönüşümü yapmıyoruz.
 use sentiric_rtp_core::G711; 
 
-// --- CRITICAL CONSTANTS ---
-// XTTS v2 Output: 24kHz
-// Target RTP: 8kHz
-// Frame Duration: 20ms
-
-// 20ms @ 24kHz input -> 480 samples
 pub const RESAMPLER_INPUT_FRAME_SIZE: usize = 480; 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,14 +26,11 @@ impl AudioCodec {
     }
 }
 
-// --- StatefulResampler (TTS Akışı İçin) ---
 pub struct StatefulResampler {
     resampler: SincFixedIn<f32>,
 }
 
 impl StatefulResampler {
-    /// source_rate: Genelde 24000 (TTS)
-    /// target_rate: Genelde 8000 (RTP)
     pub fn new(source_rate: u32, target_rate: u32) -> Result<Self> {
         let params = SincInterpolationParameters {
             sinc_len: 256,
@@ -47,7 +40,6 @@ impl StatefulResampler {
             window: WindowFunction::BlackmanHarris2,
         };
 
-        // Ratio: 8000 / 24000 = 0.3333... (Downsampling)
         let resampler = SincFixedIn::<f32>::new(
             target_rate as f64 / source_rate as f64, 
             2.0, 
@@ -79,11 +71,12 @@ impl StatefulResampler {
     }
 }
 
-// --- Helper Functions (Dosya Oynatma İçin - 16k Legacy Support) ---
+// 16k LPCM'den G.711'e (RTP için)
 pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
     // 16k -> 8k Basit Decimation
     let samples_8k_i16: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();
 
+    // sentiric-rtp-core kütüphanesini kullanıyoruz:
     let g711_payload: Vec<u8> = match target_codec {
         AudioCodec::Pcmu => samples_8k_i16.iter().map(|&s| G711::linear_to_ulaw(s)).collect(),
         AudioCodec::Pcma => samples_8k_i16.iter().map(|&s| G711::linear_to_alaw(s)).collect(),
@@ -92,40 +85,25 @@ pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> R
     Ok(g711_payload)
 }
 
+// G.711'den 16k LPCM'e (STT için)
 pub fn decode_g711_to_lpcm16(
     payload: &[u8],
     codec: AudioCodec,
     _resampler: &mut StatefulResampler,
 ) -> Result<Vec<i16>> {
-    let mut samples_16k = Vec::with_capacity(payload.len() * 2);
-    for &byte in payload {
-        let pcm_val = match codec {
-            AudioCodec::Pcmu => ulaw_to_linear(byte),
-            AudioCodec::Pcma => alaw_to_linear(byte),
-        };
-        samples_16k.push(pcm_val);
-        samples_16k.push(pcm_val);
+    // sentiric-rtp-core kütüphanesini kullanıyoruz:
+    let samples_8k: Vec<i16> = match codec {
+        AudioCodec::Pcmu => payload.iter().map(|&b| G711::ulaw_to_linear(b)).collect(),
+        AudioCodec::Pcma => payload.iter().map(|&b| G711::alaw_to_linear(b)).collect(),
+    };
+    
+    // 8k -> 16k Basit Upsampling (Her örneği 2 kere yaz)
+    // Kaliteli olması için interpolasyon yapılabilir ama STT için bu yeterli ve hızlı.
+    let mut samples_16k = Vec::with_capacity(samples_8k.len() * 2);
+    for s in samples_8k {
+        samples_16k.push(s);
+        samples_16k.push(s);
     }
+    
     Ok(samples_16k)
-}
-
-fn ulaw_to_linear(u_val: u8) -> i16 {
-    let t = !u_val;
-    let mut t16 = ((t & 0xf) as i16) << 3;
-    t16 += 0x84;
-    t16 <<= (t & 0x70) >> 4;
-    t16 -= 0x84;
-    if (t & 0x80) == 0 { -t16 } else { t16 }
-}
-
-fn alaw_to_linear(a_val: u8) -> i16 {
-    let t = a_val ^ 0x55;
-    let mut t16 = ((t & 0xf) as i16) << 4;
-    t16 += 8;
-    if (t & 0x70) != 0 {
-        t16 += 0x100;
-        let shift = ((t & 0x70) >> 4) - 1;
-        t16 <<= shift;
-    }
-    if (t & 0x80) == 0 { -t16 } else { t16 }
 }
