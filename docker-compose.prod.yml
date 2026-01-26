@@ -34,25 +34,23 @@ services:
       - "${ASSETS_REPO_PATH:-../sentiric-assets}:/sentiric-assets:ro"
     environment:
       # --- Service Identity ---
-      - ENV=development
+      - ENV=production
       - RUST_LOG=info,sentiric_media_service=info
 
       # --- Network & Ports ---
       - MEDIA_SERVICE_GRPC_PORT=13031
       - MEDIA_SERVICE_METRICS_PORT=13032
 
-      # RTP Range
+      # RTP Range (GENİŞLETİLDİ)
       - RTP_SERVICE_LISTEN_ADDRESS=0.0.0.0
       - RTP_SERVICE_PORT_MIN=10000
-      - RTP_SERVICE_PORT_MAX=10100
-      - RTP_SERVICE_PORT_QUARANTINE_SECONDS=5
+      - RTP_SERVICE_PORT_MAX=20000
+      - RTP_SERVICE_PORT_QUARANTINE_SECONDS=2 # Karantina süresi optimize edildi
 
       # --- Assets & Records ---
       - ASSETS_BASE_PATH=/sentiric-assets
 
-      # --- Certificates (Dummy Paths for Local Dev/Test) ---
-      # Gerçek test için bu dosyaların var olması gerekir. 
-      # Yoksa 'cargo run' öncesi dummy sertifika oluşturulmalı veya bu yollar geçerli bir yere bakmalı.
+      # --- Certificates ---
       - GRPC_TLS_CA_PATH=/sentiric-certificates/certs/ca.crt
       - MEDIA_SERVICE_CERT_PATH=/sentiric-certificates/certs/media-service-chain.crt
       - MEDIA_SERVICE_KEY_PATH=/sentiric-certificates/certs/media-service.key
@@ -69,21 +67,18 @@ services:
 
       # --- Tuning ---
       - RTP_SESSION_INACTIVITY_TIMEOUT_SECONDS=30
-      - RTP_COMMAND_CHANNEL_BUFFER=32
-      - LIVE_AUDIO_STREAM_BUFFER=64
+      - RTP_COMMAND_CHANNEL_BUFFER=128 # Buffer artırıldı
+      - LIVE_AUDIO_STREAM_BUFFER=128
 
     ports:
       - "${MEDIA_SERVICE_HTTP_PORT:-13030}:${MEDIA_SERVICE_HTTP_PORT:-13030}"
       - "${MEDIA_SERVICE_GRPC_PORT:-13031}:${MEDIA_SERVICE_GRPC_PORT:-13031}"
       - "${MEDIA_SERVICE_METRICS_PORT:-13032}:${MEDIA_SERVICE_METRICS_PORT:-13032}"
-      - "${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}:${RTP_SERVICE_PORT_MIN:-10000}-${RTP_SERVICE_PORT_MAX:-10100}/udp"
+      # UDP Port Aralığı Genişletildi (10k - 20k)
+      - "10000-20000:10000-20000/udp"
+      
     networks:
       sentiric-net:
         ipv4_address: ${MEDIA_SERVICE_IPV4_ADDRESS:-10.88.30.3}
     healthcheck:
       test: [ "CMD", "curl", "-f", "http://localhost:${MEDIA_SERVICE_METRICS_PORT:-13032}/healthz" ]
-    # depends_on:
-    #   minio:
-    #     condition: service_healthy
-    #   rabbitmq:
-    #     condition: service_healthy
