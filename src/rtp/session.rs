@@ -15,16 +15,17 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
-use tokio::time::{self, Duration, MissedTickBehavior};
+use tokio::time::{self, Duration, Instant, MissedTickBehavior}; // Instant eklendi
 use tokio_util::sync::CancellationToken;
 
-// DÜZELTME: Kullanılmayan 'warn', 'debug' kaldırıldı.
-use tracing::{error, info, instrument};
+use tracing::{error, info, instrument, warn}; // warn eklendi
 
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
 // Configuration
 const DEBUG_BYPASS_RESAMPLER: bool = false;
+// Timeout kontrol sıklığı
+const INACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -101,14 +102,28 @@ pub async fn rtp_session_handler(
         })
     };
 
-    // --- PACER ---
+    // --- TIMING & WATCHDOG ---
     let mut pacer = time::interval(Duration::from_millis(20));
     pacer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    let mut inactivity_checker = time::interval(INACTIVITY_CHECK_INTERVAL);
+    inactivity_checker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut last_activity = Instant::now();
+    let inactivity_limit = config.app_config.rtp_session_inactivity_timeout;
+
     loop {
         tokio::select! {
+            // 0. INACTIVITY CHECK
+            _ = inactivity_checker.tick() => {
+                if last_activity.elapsed() > inactivity_limit {
+                    warn!("⏳ RTP Oturumu zaman aşımına uğradı (İnaktivite: {:?}). Oturum sonlandırılıyor.", last_activity.elapsed());
+                    break;
+                }
+            },
+
             // 1. COMMANDS
             Some(command) = command_rx.recv() => {
+                last_activity = Instant::now(); // Update activity
                 match command {
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
                         {
@@ -145,7 +160,10 @@ pub async fn rtp_session_handler(
                             let _ = responder.send(Ok(uri));
                         } else { let _ = responder.send(Err("Kayıt bulunamadı".to_string())); }
                     },
-                    RtpCommand::Shutdown => { break; },
+                    RtpCommand::Shutdown => { 
+                        info!("🛑 Shutdown komutu alındı.");
+                        break; 
+                    },
                     RtpCommand::StopAudio => { playback_queue.clear(); },
                     RtpCommand::StopLiveAudioStream => { *live_stream_sender.lock().await = None; },
                 }
@@ -153,6 +171,8 @@ pub async fn rtp_session_handler(
             
             // 2. INBOUND RTP HANDLING (Kullanıcıdan Gelen Ses)
             Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
+                last_activity = Instant::now(); // Update activity
+                
                 // A. NAT Latching
                 {
                     let mut locked_addr = actual_remote_addr.lock().await;
@@ -234,6 +254,7 @@ pub async fn rtp_session_handler(
             
             // 3. PLAYBACK FINISHED
             Some(_) = playback_finished_rx.recv() => {
+                last_activity = Instant::now(); // Update activity (System generated event)
                 is_playing_file = false;
                 if let Some(next_job) = playback_queue.pop_front() {
                     is_playing_file = true;
@@ -243,6 +264,8 @@ pub async fn rtp_session_handler(
 
             // 4. OUTBOUND STREAM HANDLING
             Some(chunk) = async { if let Some(rx) = &mut outbound_stream_rx { rx.recv().await } else { std::future::pending().await } } => {
+                last_activity = Instant::now(); // Update activity (Outbound stream active)
+                
                 let target = {
                     let actual = *actual_remote_addr.lock().await;
                     if actual.is_some() { actual } else { *initial_target_addr.lock().await }
