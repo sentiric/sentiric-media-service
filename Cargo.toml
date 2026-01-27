@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-media-service"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 
 [dependencies]
@@ -31,9 +31,9 @@ url = "2.5.0"
 serde_json = "1.0.117"
 
 # --- CORE LIBRARIES ---
-# rtp ve webrtc-util KALDIRILDI. Yerine bu geldi:
 sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.2.0" }
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.4" }
+# GÜNCELLEME: Platform geneli tutarlılık için v1.13.5 sürümüne yükseltildi.
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.5" }
 
 # Medya İşleme
 hound = "3.5.1"
