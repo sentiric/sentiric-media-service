@@ -15,10 +15,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::{self, spawn_blocking};
-use tokio::time::{self, Duration, Instant, MissedTickBehavior}; // Instant eklendi
+use tokio::time::{self, Duration, Instant, MissedTickBehavior}; 
 use tokio_util::sync::CancellationToken;
 
-use tracing::{error, info, instrument, warn}; // warn eklendi
+use tracing::{error, info, instrument, warn}; 
 
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
 
@@ -128,8 +128,25 @@ pub async fn rtp_session_handler(
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
                         {
                             let mut init_addr = initial_target_addr.lock().await;
-                            if init_addr.is_none() { *init_addr = Some(candidate_target_addr); }
+                            
+                            // [YENİ] Aggressive Hole Punching
+                            // Eğer ilk kez bir hedef adres (candidate) öğreniyorsak,
+                            // karşı tarafın bize ulaşmasını beklemeden ona boş paketler atmaya başla.
+                            if init_addr.is_none() { 
+                                *init_addr = Some(candidate_target_addr); 
+                                info!("🔨 [NAT] Hole Punching başlatılıyor -> {}", candidate_target_addr);
+                                let socket_clone = socket.clone();
+                                let target_clone = candidate_target_addr;
+                                tokio::spawn(async move {
+                                    let silence = vec![0x80u8; 160]; // PCMU Sessizlik
+                                    for _ in 0..10 { // 200ms boyunca gönder
+                                        let _ = socket_clone.send_to(&silence, target_clone).await;
+                                        tokio::time::sleep(Duration::from_millis(20)).await;
+                                    }
+                                });
+                            }
                         }
+                        
                         let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
                         let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token, responder };
                         if !is_playing_file {
