@@ -51,11 +51,11 @@ pub async fn rtp_session_handler(
     let live_stream_sender = Arc::new(Mutex::new(None));
     let permanent_recording_session = Arc::new(Mutex::new(None));
     
-    // RTP Endpoint (Latching Mantığı)
+    // RTP Endpoint (Latching Mantığı içinde)
     // Başlangıçta hedefimiz yok, paket geldikçe veya komutla öğreneceğiz.
     let endpoint = RtpEndpoint::new(None); 
     
-    // Latching öncesi geçici hedef (Hole Punching için gerekli)
+    // Latching öncesi geçici hedef (Hole Punching ve İlk Ses Gönderimi için gerekli)
     let mut pre_latch_target: Option<SocketAddr> = None;
 
     // Codec State
@@ -221,12 +221,8 @@ pub async fn rtp_session_handler(
                                     let mut guard = current_codec_type.lock().await;
                                     *guard = detected_codec;
                                     current_codec = detected_codec;
-                                    
-                                    // [FIX] Hem Decoder hem Encoder güncellenmeli!
-                                    // Eğer karşı taraf G729 gönderiyorsa, bizden de G729 bekliyordur.
+                                    // Encoder'ı güncelle
                                     encoder = CodecFactory::create_encoder(detected_codec);
-                                    // Decoder zaten helper fonksiyon içinde (codecs::decode_...) hallediliyor ama
-                                    // mimari gereği burada durması zarar vermez.
                                 },
                                 _ => {}
                             }
@@ -245,6 +241,7 @@ pub async fn rtp_session_handler(
                         let payload_vec = payload.to_vec();
                         let mut resampler_guard = resampler_clone.lock().await;
                         
+                        // RTP paketini decode et ve 16kHz'e çevir
                         if let Ok(samples_16k) = codecs::decode_g711_to_lpcm16(&payload_vec, codec, &mut *resampler_guard) {
                             
                             // STT Kanalına Bas
@@ -252,7 +249,9 @@ pub async fn rtp_session_handler(
                             if let Some(sender) = &*sender_guard {
                                 if !sender.is_closed() {
                                     let mut bytes = Vec::with_capacity(samples_16k.len() * 2);
-                                    // FIX E0382: Döngüde referans kullanıldı
+                                    
+                                    // DÜZELTME [E0382]: `samples_16k`'yı referansla iterate ediyoruz
+                                    // Böylece ownership taşınmaz ve aşağıda tekrar kullanılabilir.
                                     for sample in &samples_16k {
                                         bytes.extend_from_slice(&sample.to_le_bytes());
                                     }
@@ -262,8 +261,9 @@ pub async fn rtp_session_handler(
                                         media_type: "audio/L16;rate=16000".to_string() 
                                     };
                                     
+                                    // Non-blocking send
                                     if let Err(_) = sender.try_send(Ok(frame)) {
-                                        // Buffer dolu
+                                        // Buffer doluysa paketi at (Gerçek zamanlılık için)
                                     }
                                 } else {
                                     *sender_guard = None;
@@ -273,7 +273,7 @@ pub async fn rtp_session_handler(
                             // Kalıcı Kayıt İçin Biriktir
                             let mut rec_guard = permanent_recording_session.lock().await;
                             if let Some(session) = rec_guard.as_mut() {
-                                // FIX E0382: samples_16k burada tekrar kullanılabiliyor (into_iter yerine iter)
+                                // Burada da iteratörü klonlamadan kullanıyoruz (i16 Copy trait'e sahiptir)
                                 session.mixed_samples_16khz.extend(samples_16k.iter()); 
                             }
                         }
