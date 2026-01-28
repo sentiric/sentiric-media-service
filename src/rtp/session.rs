@@ -2,7 +2,7 @@
 
 use crate::config::AppConfig;
 use crate::metrics::ACTIVE_SESSIONS;
-use crate::rtp::codecs::{self, StatefulResampler, AudioCodec, RESAMPLER_INPUT_FRAME_SIZE};
+use crate::rtp::codecs::{self, StatefulResampler, AudioCodec}; // [FIX] Sabit kaldırıldı
 use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
 use crate::rtp::session_utils::{finalize_and_save_recording, load_and_resample_samples_from_uri};
 use crate::state::AppState;
@@ -22,9 +22,7 @@ use tracing::{error, info, instrument, warn};
 
 use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket, RtpEndpoint};
 
-// Timeout kontrol sıklığı
 const INACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
-// Sessizlik paketi limiti (yaklaşık 1 saniye)
 const MAX_SILENCE_PACKETS: usize = 50; 
 
 pub struct RtpSessionConfig {
@@ -49,7 +47,6 @@ pub async fn rtp_session_handler(
 ) {
     info!("🎧 RTP Oturumu Başlatıldı (Port: {}). Dinleniyor...", config.port);
 
-    // --- STATE VARIABLES ---
     let live_stream_sender = Arc::new(Mutex::new(None));
     let permanent_recording_session = Arc::new(Mutex::new(None));
     
@@ -58,16 +55,18 @@ pub async fn rtp_session_handler(
 
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
     
-    // Inbound: 8k -> 16k (STT için)
+    // Inbound: 8k -> 16k
     let inbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
     ));
 
-    // [FIX] Outbound: 24k -> 8k (TTS'den gelen sesi RTP için düşür)
-    // Coqui XTTS v2 24000 Hz çıktı verir.
+    // Outbound: 24k -> 8k
     let outbound_resampler = Arc::new(Mutex::new(
         StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
     ));
+    
+    // [FIX] Dinamik Frame Size'ı al (480 sample)
+    let outbound_frame_size = outbound_resampler.lock().await.input_frame_size;
 
     let mut encoder = CodecFactory::create_encoder(CodecType::PCMU);
     let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
@@ -82,7 +81,6 @@ pub async fn rtp_session_handler(
     let mut is_playing_file = false;
     let (playback_finished_tx, mut playback_finished_rx) = mpsc::channel::<()>(1);
 
-    // Socket Reader Task
     let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
     let socket_reader_handle = {
         let socket = socket.clone();
@@ -116,20 +114,17 @@ pub async fn rtp_session_handler(
 
     loop {
         tokio::select! {
-            // A. PACER TICK (RTP GÖNDERİM ZAMANI)
+            // A. PACER TICK
             _ = pacer.tick() => {
                 if is_streaming_active {
                     let target = endpoint.get_target().or(pre_latch_target);
                     
                     if let Some(target_addr) = target {
-                         // --- DEFANSİF KONTROL: Geçersiz Adres ---
                          if target_addr.ip().is_unspecified() || target_addr.port() == 0 {
                              // Hedef yoksa gönderme
                          } else {
                             if let Some(rx) = &mut outbound_stream_rx {
                                 while let Ok(chunk) = rx.try_recv() {
-                                    // [FIX] Input: 24kHz (Coqui Native)
-                                    // 24000 * 0.02 = 480 sample/frame
                                     let samples_f32: Vec<f32> = chunk.chunks_exact(2)
                                         .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
                                         .collect();
@@ -137,10 +132,10 @@ pub async fn rtp_session_handler(
                                 }
                             }
 
-                            // [FIX] 480 Sample (24k @ 20ms) biriktiyse işle
-                            if audio_accumulator.len() >= RESAMPLER_INPUT_FRAME_SIZE {
+                            // [FIX] Dinamik Boyut Kullanımı (480)
+                            if audio_accumulator.len() >= outbound_frame_size {
                                 silence_counter = 0;
-                                let frame_in: Vec<f32> = audio_accumulator.drain(0..RESAMPLER_INPUT_FRAME_SIZE).collect();
+                                let frame_in: Vec<f32> = audio_accumulator.drain(0..outbound_frame_size).collect();
                                 
                                 let resampler_clone = outbound_resampler.clone();
                                 let samples_8k_result = spawn_blocking(move || {
@@ -286,6 +281,9 @@ pub async fn rtp_session_handler(
                         let payload_vec = payload.to_vec();
                         let mut resampler_guard = resampler_clone.lock().await;
                         
+                        // [FIX] Burada decode_g711_to_lpcm16 fonksiyonunu çağırırken
+                        // resampler referansını veriyoruz, ama fonksiyon içinde resampler kullanılmayacak.
+                        // Çünkü 8k->16k için basit upsampling yeterli ve güvenli.
                         if let Ok(samples_16k) = codecs::decode_g711_to_lpcm16(&payload_vec, codec, &mut *resampler_guard) {
                             let mut sender_guard = live_stream_sender.lock().await;
                             if let Some(sender) = &*sender_guard {

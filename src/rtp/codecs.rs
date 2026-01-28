@@ -6,9 +6,8 @@ use rubato::{
 };
 use sentiric_rtp_core::G711; 
 
-// [FIX] 24kHz input için 20ms frame size (24000 * 0.02 = 480 samples)
-// Coqui XTTS v2 native 24kHz stream eder.
-pub const RESAMPLER_INPUT_FRAME_SIZE: usize = 480; 
+// [FIX] SABİT KALDIRILDI. Artık her instance kendi boyutunu biliyor.
+// pub const RESAMPLER_INPUT_FRAME_SIZE: usize = 480; 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
@@ -28,6 +27,8 @@ impl AudioCodec {
 
 pub struct StatefulResampler {
     resampler: SincFixedIn<f32>,
+    // [YENİ] Her instance kendi beklediği giriş boyutunu bilir.
+    pub input_frame_size: usize,
 }
 
 impl StatefulResampler {
@@ -40,16 +41,11 @@ impl StatefulResampler {
             window: WindowFunction::BlackmanHarris2,
         };
 
-        // Input frame size hesaplama (20ms için):
+        // 20ms Frame Size Hesaplama
         // 24000 Hz -> 480 sample
         // 16000 Hz -> 320 sample
         // 8000 Hz  -> 160 sample
         let input_frame_size = (source_rate as f32 * 0.02) as usize;
-
-        // Validasyon: Rubato sabit boyut ister
-        if input_frame_size != RESAMPLER_INPUT_FRAME_SIZE && source_rate == 24000 {
-             return Err(anyhow!("Internal Logic Error: 24k rate must match fixed buffer size 480"));
-        }
 
         let resampler = SincFixedIn::<f32>::new(
             target_rate as f64 / source_rate as f64, 
@@ -59,14 +55,18 @@ impl StatefulResampler {
             1, 
         )?;
 
-        Ok(Self { resampler })
+        Ok(Self { 
+            resampler,
+            input_frame_size,
+        })
     }
 
     pub fn process(&mut self, samples_in: &[f32]) -> Result<Vec<f32>> {
-        if samples_in.len() != RESAMPLER_INPUT_FRAME_SIZE {
+        // [FIX] Dinamik kontrol
+        if samples_in.len() != self.input_frame_size {
             return Err(anyhow!(
                 "Resampler input size mismatch! Expected: {}, Got: {}",
-                RESAMPLER_INPUT_FRAME_SIZE,
+                self.input_frame_size,
                 samples_in.len()
             ));
         }
@@ -82,10 +82,8 @@ impl StatefulResampler {
     }
 }
 
-// 16k LPCM'den G.711'e (RTP için) - BU FONKSİYON HALA 16K KABUL EDİYOR OLABİLİR AMA KULLANMIYORUZ
-// Bizim asıl akışımız session.rs içinde manuel yapılıyor.
+// 16k LPCM'den G.711'e (RTP için)
 pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
-    // 16k -> 8k Basit Decimation
     let samples_8k_i16: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();
 
     let g711_payload: Vec<u8> = match target_codec {
@@ -100,6 +98,8 @@ pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> R
 pub fn decode_g711_to_lpcm16(
     payload: &[u8],
     codec: AudioCodec,
+    // [FIX] Artık resampler kullanılmıyor, basit upsampling yapılıyor.
+    // _resampler parametresi kaldırılabilir veya kullanılmayabilir.
     _resampler: &mut StatefulResampler,
 ) -> Result<Vec<i16>> {
     let samples_8k: Vec<i16> = match codec {
@@ -107,7 +107,7 @@ pub fn decode_g711_to_lpcm16(
         AudioCodec::Pcma => payload.iter().map(|&b| G711::alaw_to_linear(b)).collect(),
     };
     
-    // 8k -> 16k Basit Upsampling
+    // 8k -> 16k Basit Upsampling (Her örneği 2 kere yaz - En hızlı yöntem)
     let mut samples_16k = Vec::with_capacity(samples_8k.len() * 2);
     for s in samples_8k {
         samples_16k.push(s);
