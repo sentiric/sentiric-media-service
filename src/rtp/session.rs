@@ -20,10 +20,8 @@ use tokio_util::sync::CancellationToken;
 
 use tracing::{error, info, instrument, warn}; 
 
-use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket};
+use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket, Pacer, RtpEndpoint};
 
-// Configuration
-const DEBUG_BYPASS_RESAMPLER: bool = false;
 // Timeout kontrol sıklığı
 const INACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -49,11 +47,16 @@ pub async fn rtp_session_handler(
 ) {
     info!("🎧 RTP Oturumu Başlatıldı (Port: {}). Dinleniyor...", config.port);
 
-    // State Variables
+    // --- STATE VARIABLES ---
     let live_stream_sender = Arc::new(Mutex::new(None));
     let permanent_recording_session = Arc::new(Mutex::new(None));
-    let actual_remote_addr = Arc::new(Mutex::new(None));
-    let initial_target_addr = Arc::new(Mutex::new(None)); 
+    
+    // RTP Endpoint (Latching Mantığı)
+    // Başlangıçta hedefimiz yok, paket geldikçe veya komutla öğreneceğiz.
+    let endpoint = RtpEndpoint::new(None); 
+    
+    // Latching öncesi geçici hedef (Hole Punching için gerekli)
+    let mut pre_latch_target: Option<SocketAddr> = None;
 
     // Codec State
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
@@ -67,11 +70,14 @@ pub async fn rtp_session_handler(
         StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
     ));
 
-    // Encoder
+    // Encoder (Giden ses için)
     let mut encoder = CodecFactory::create_encoder(CodecType::PCMU);
+    
+    // Gelen TTS akışı kanalı
     let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
     
     // --- BUFFER ---
+    // 24kHz'den gelen veriyi 8kHz'e çevirmek için tampon
     let mut audio_accumulator: Vec<f32> = Vec::with_capacity(4096); 
 
     // RTP Sequencing
@@ -79,12 +85,12 @@ pub async fn rtp_session_handler(
     let mut rtp_seq: u16 = rand::thread_rng().gen();
     let mut rtp_ts: u32 = rand::thread_rng().gen();
 
-    // Playback Logic
+    // Playback Logic (Dosya Çalma)
     let mut playback_queue: VecDeque<PlaybackJob> = VecDeque::new();
     let mut is_playing_file = false;
     let (playback_finished_tx, mut playback_finished_rx) = mpsc::channel::<()>(1);
 
-    // Socket Reader Task
+    // Socket Reader Task (Gelen RTP paketlerini ana döngüye taşır)
     let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
     let socket_reader_handle = {
         let socket = socket.clone();
@@ -94,6 +100,10 @@ pub async fn rtp_session_handler(
             loop {
                 match socket.recv_from(&mut buf).await {
                     Ok((len, remote_addr)) => {
+                        // Keep-Alive Filtresi (CRLF, \0 vb. filtrele)
+                        if len < 4 || buf[..len].iter().all(|&b| b == b'\r' || b == b'\n' || b == 0) {
+                            continue;
+                        }
                         if rtp_packet_tx.send((buf[..len].to_vec(), remote_addr)).await.is_err() { break; }
                     }
                     Err(_) => break,
@@ -103,8 +113,7 @@ pub async fn rtp_session_handler(
     };
 
     // --- TIMING & WATCHDOG ---
-    let mut pacer = time::interval(Duration::from_millis(20));
-    pacer.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut pacer = Pacer::new(Duration::from_millis(20));
 
     let mut inactivity_checker = time::interval(INACTIVITY_CHECK_INTERVAL);
     inactivity_checker.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -123,36 +132,35 @@ pub async fn rtp_session_handler(
 
             // 1. COMMANDS
             Some(command) = command_rx.recv() => {
-                last_activity = Instant::now(); // Update activity
+                last_activity = Instant::now();
                 match command {
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
-                        {
-                            let mut init_addr = initial_target_addr.lock().await;
+                        // Eğer henüz bir hedefimiz yoksa, bu adresi aday olarak belirle
+                        if endpoint.get_target().is_none() && pre_latch_target.is_none() { 
+                            pre_latch_target = Some(candidate_target_addr);
+                            info!("🔨 [NAT] Hole Punching başlatılıyor -> {}", candidate_target_addr);
                             
-                            // [YENİ] Aggressive Hole Punching
-                            // Eğer ilk kez bir hedef adres (candidate) öğreniyorsak,
-                            // karşı tarafın bize ulaşmasını beklemeden ona boş paketler atmaya başla.
-                            if init_addr.is_none() { 
-                                *init_addr = Some(candidate_target_addr); 
-                                info!("🔨 [NAT] Hole Punching başlatılıyor -> {}", candidate_target_addr);
-                                let socket_clone = socket.clone();
-                                let target_clone = candidate_target_addr;
-                                tokio::spawn(async move {
-                                    let silence = vec![0x80u8; 160]; // PCMU Sessizlik
-                                    for _ in 0..10 { // 200ms boyunca gönder
-                                        let _ = socket_clone.send_to(&silence, target_clone).await;
-                                        tokio::time::sleep(Duration::from_millis(20)).await;
-                                    }
-                                });
-                            }
+                            // Agresif Delme (Fire-and-forget)
+                            let socket_clone = socket.clone();
+                            tokio::spawn(async move {
+                                let silence = vec![0x80u8; 160]; // PCMU Sessizlik
+                                for _ in 0..5 { 
+                                    let _ = socket_clone.send_to(&silence, candidate_target_addr).await;
+                                    tokio::time::sleep(Duration::from_millis(20)).await;
+                                }
+                            });
                         }
                         
-                        let addr = actual_remote_addr.lock().await.unwrap_or(candidate_target_addr);
-                        let job = PlaybackJob { audio_uri, target_addr: addr, cancellation_token, responder };
+                        // Hedef belirleme: Latched > Pre-Latch (Candidate)
+                        let target = endpoint.get_target().or(pre_latch_target).unwrap_or(candidate_target_addr);
+                        
+                        let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
                         if !is_playing_file {
                             is_playing_file = true;
                             start_playback(job, &config, socket.clone(), playback_finished_tx.clone(), permanent_recording_session.clone()).await;
-                        } else { playback_queue.push_back(job); }
+                        } else { 
+                            playback_queue.push_back(job); 
+                        }
                     },
                     RtpCommand::StartOutboundStream { audio_rx } => { 
                         info!("🎙️ TTS Outbound Stream Başlatıldı (24kHz Input).");
@@ -188,26 +196,19 @@ pub async fn rtp_session_handler(
             
             // 2. INBOUND RTP HANDLING (Kullanıcıdan Gelen Ses)
             Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
-                last_activity = Instant::now(); // Update activity
+                last_activity = Instant::now();
                 
                 // A. NAT Latching
-                {
-                    let mut locked_addr = actual_remote_addr.lock().await;
-                    if locked_addr.is_none() || *locked_addr.as_ref().unwrap() != remote_addr {
-                        info!("🔄 NAT Latching: Hedef güncellendi -> {}", remote_addr);
-                        *locked_addr = Some(remote_addr);
-                    }
+                if endpoint.latch(remote_addr) {
+                    info!("🔄 NAT Latching: Hedef Kilitlendi -> {}", remote_addr);
+                    // Latch olduğunda pre_latch'i boşa çıkarabiliriz, artık endpoint.get_target() dolu.
+                    pre_latch_target = None;
                 }
 
                 // B. Ses İşleme
                 if packet_data.len() > 12 {
-                    // DIAGNOSTIC LOG (Saniyede 1 kere)
-                    if rand::thread_rng().gen_bool(0.02) {
-                        info!("🎤 [RTP-IN] {} bytes from {}", packet_data.len(), remote_addr);
-                    }
-
                     let pt = packet_data[1] & 0x7F;
-                    let header_len = 12; // Varsayılan header uzunluğu
+                    let header_len = 12; 
                     let payload = &packet_data[header_len..];
 
                     // Codec Detection
@@ -227,9 +228,8 @@ pub async fn rtp_session_handler(
                         }
                     }
 
-                    // --- INBOUND AUDIO PROCESSING START ---
+                    // Decode & Resample & Send to STT
                     let resampler_clone = inbound_resampler.clone();
-                    
                     let local_codec_enum = match current_codec {
                         CodecType::PCMU => Some(AudioCodec::Pcmu),
                         CodecType::PCMA => Some(AudioCodec::Pcma),
@@ -238,16 +238,17 @@ pub async fn rtp_session_handler(
 
                     if let Some(codec) = local_codec_enum {
                         let payload_vec = payload.to_vec();
-                        
                         let mut resampler_guard = resampler_clone.lock().await;
+                        
                         if let Ok(samples_16k) = codecs::decode_g711_to_lpcm16(&payload_vec, codec, &mut *resampler_guard) {
                             
-                            // STT'ye Gönder
+                            // STT Kanalına Bas
                             let mut sender_guard = live_stream_sender.lock().await;
                             if let Some(sender) = &*sender_guard {
                                 if !sender.is_closed() {
                                     let mut bytes = Vec::with_capacity(samples_16k.len() * 2);
-                                    for sample in samples_16k {
+                                    // FIX E0382: Döngüde referans kullanıldı
+                                    for sample in &samples_16k {
                                         bytes.extend_from_slice(&sample.to_le_bytes());
                                     }
                                     
@@ -257,21 +258,27 @@ pub async fn rtp_session_handler(
                                     };
                                     
                                     if let Err(_) = sender.try_send(Ok(frame)) {
-                                        // debug!("STT Channel Full/Closed");
+                                        // Buffer dolu
                                     }
                                 } else {
                                     *sender_guard = None;
                                 }
                             }
+                            
+                            // Kalıcı Kayıt İçin Biriktir
+                            let mut rec_guard = permanent_recording_session.lock().await;
+                            if let Some(session) = rec_guard.as_mut() {
+                                // FIX E0382: samples_16k burada tekrar kullanılabiliyor (into_iter yerine iter)
+                                session.mixed_samples_16khz.extend(samples_16k.iter()); 
+                            }
                         }
                     }
-                    // --- INBOUND AUDIO PROCESSING END ---
                 }
             },
             
             // 3. PLAYBACK FINISHED
             Some(_) = playback_finished_rx.recv() => {
-                last_activity = Instant::now(); // Update activity (System generated event)
+                last_activity = Instant::now();
                 is_playing_file = false;
                 if let Some(next_job) = playback_queue.pop_front() {
                     is_playing_file = true;
@@ -279,34 +286,31 @@ pub async fn rtp_session_handler(
                 }
             },
 
-            // 4. OUTBOUND STREAM HANDLING
+            // 4. OUTBOUND STREAM HANDLING (Canlı TTS Akışı)
             Some(chunk) = async { if let Some(rx) = &mut outbound_stream_rx { rx.recv().await } else { std::future::pending().await } } => {
-                last_activity = Instant::now(); // Update activity (Outbound stream active)
+                last_activity = Instant::now();
                 
-                let target = {
-                    let actual = *actual_remote_addr.lock().await;
-                    if actual.is_some() { actual } else { *initial_target_addr.lock().await }
-                };
+                // MANTIKSAL DÜZELTME: Hedef belirleme
+                // Latched Target (Kesin) > Pre-Latch Target (Aday)
+                let target = endpoint.get_target().or(pre_latch_target);
 
                 if let Some(target_addr) = target {
+                    // Chunk: 16-bit PCM -> f32
                     let samples_24k_f32: Vec<f32> = chunk.chunks_exact(2)
                         .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
                         .collect();
 
                     audio_accumulator.extend(samples_24k_f32);
 
+                    // Resampler (480 samples @ 24k = 20ms)
                     while audio_accumulator.len() >= RESAMPLER_INPUT_FRAME_SIZE {
                         let frame_in: Vec<f32> = audio_accumulator.drain(0..RESAMPLER_INPUT_FRAME_SIZE).collect();
 
-                        let samples_8k_result = if DEBUG_BYPASS_RESAMPLER {
-                            Ok(frame_in.iter().step_by(3).cloned().collect())
-                        } else {
-                            let resampler_clone = outbound_resampler.clone();
-                            spawn_blocking(move || {
-                                let mut guard = resampler_clone.blocking_lock();
-                                guard.process(&frame_in)
-                            }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("JoinError: {}", e)))
-                        };
+                        let resampler_clone = outbound_resampler.clone();
+                        let samples_8k_result = spawn_blocking(move || {
+                            let mut guard = resampler_clone.blocking_lock();
+                            guard.process(&frame_in)
+                        }).await.unwrap_or_else(|e| Err(anyhow::anyhow!("JoinError: {}", e)));
 
                         match samples_8k_result {
                             Ok(samples_8k_f32) => {
@@ -320,12 +324,15 @@ pub async fn rtp_session_handler(
                                 let pt = match current_type { CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, _ => 0 };
 
                                 for frame in encoded_payload.chunks(payload_size) {
-                                    pacer.tick().await; 
+                                    pacer.wait();
+                                    
                                     let header = RtpHeader::new(pt, rtp_seq, rtp_ts, rtp_ssrc);
                                     let packet = RtpPacket { header, payload: frame.to_vec() };
+                                    
                                     let _ = socket.send_to(&packet.to_bytes(), target_addr).await;
+                                    
                                     rtp_seq = rtp_seq.wrapping_add(1);
-                                    rtp_ts = rtp_ts.wrapping_add(160); 
+                                    rtp_ts = rtp_ts.wrapping_add(160);
                                 }
                             },
                             Err(e) => {
@@ -336,7 +343,6 @@ pub async fn rtp_session_handler(
                     }
                 }
             },
-            else => { break; }
         }
     }
     
