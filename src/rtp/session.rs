@@ -68,8 +68,9 @@ pub async fn rtp_session_handler(
         StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
     ));
 
+    // [FIX] TTS'den 16kHz geliyor, RTP 8kHz istiyor.
     let outbound_resampler = Arc::new(Mutex::new(
-        StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
+        StatefulResampler::new(16000, 8000).expect("Outbound Resampler Hatası"),
     ));
 
     // Encoder (Giden ses için)
@@ -141,14 +142,16 @@ pub async fn rtp_session_handler(
                         if let Some(rx) = &mut outbound_stream_rx {
                              // Kanaldan alabildiğimiz kadar veriyi accumulator'a çek
                              while let Ok(chunk) = rx.try_recv() {
-                                 let samples_24k_f32: Vec<f32> = chunk.chunks_exact(2)
+                                 // [FIX] Input artık 16kHz
+                                 let samples_f32: Vec<f32> = chunk.chunks_exact(2)
                                     .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
                                     .collect();
-                                 audio_accumulator.extend(samples_24k_f32);
+                                 audio_accumulator.extend(samples_f32);
                              }
                         }
 
-                        // 2. Accumulator'dan 20ms'lik veri (480 sample @ 24k) çekebiliyor muyuz?
+                        // 2. Accumulator'dan 20ms'lik veri (320 sample @ 16k) çekebiliyor muyuz?
+                        // [FIX] RESAMPLER_INPUT_FRAME_SIZE artık 16k->8k için 320 sample
                         if audio_accumulator.len() >= RESAMPLER_INPUT_FRAME_SIZE {
                             silence_counter = 0; // Ses var, sayacı sıfırla
                             
@@ -171,6 +174,8 @@ pub async fn rtp_session_handler(
                                 
                                 let encoded = encoder.encode(&samples_8k_i16);
                                 let current_type = encoder.get_type();
+                                
+                                // G.729: 10ms frame = 10 bytes. 20ms packet = 20 bytes.
                                 let payload_size = if current_type == CodecType::G729 { 20 } else { 160 };
                                 let pt = match current_type { CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, _ => 0 };
 
@@ -182,6 +187,11 @@ pub async fn rtp_session_handler(
                                      
                                      rtp_seq = rtp_seq.wrapping_add(1);
                                      rtp_ts = rtp_ts.wrapping_add(160);
+                                     
+                                     // [DEBUG LOG] Sadece ilk paketi veya arada bir logla
+                                     if rtp_seq % 100 == 0 {
+                                        info!("📤 [TX] Sending RTP seq={} size={} to {}", rtp_seq, frame.len(), target_addr);
+                                     }
                                 }
                             }
                         } else if silence_counter < MAX_SILENCE_PACKETS {
@@ -231,6 +241,7 @@ pub async fn rtp_session_handler(
                             }
                         });
                         
+                        // Hedef belirleme: Latched > Pre-Latch (Candidate)
                         let target = endpoint.get_target().or(pre_latch_target).unwrap_or(candidate_target_addr);
                         
                         let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
@@ -242,7 +253,7 @@ pub async fn rtp_session_handler(
                         }
                     },
                     RtpCommand::StartOutboundStream { audio_rx } => { 
-                        info!("🎙️ TTS Outbound Stream Başlatıldı (24kHz Input).");
+                        info!("🎙️ TTS Outbound Stream Başlatıldı (16kHz Input)."); // Log güncellendi
                         outbound_stream_rx = Some(audio_rx);
                         audio_accumulator.clear(); 
                         is_streaming_active = true; // Pacer döngüsünü aktif et
