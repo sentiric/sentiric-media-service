@@ -210,23 +210,27 @@ pub async fn rtp_session_handler(
                 last_activity = Instant::now();
                 match command {
                     RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
-                        // Eğer henüz bir hedefimiz yoksa, bu adresi aday olarak belirle ve delik aç
-                        if endpoint.get_target().is_none() && pre_latch_target.is_none() { 
-                            pre_latch_target = Some(candidate_target_addr);
-                            info!("🔨 [NAT] Hole Punching başlatılıyor -> {}", candidate_target_addr);
-                            
-                            // Agresif Delme (Fire-and-forget)
-                            let socket_clone = socket.clone();
-                            tokio::spawn(async move {
-                                let silence = vec![0x80u8; 160]; // PCMU Sessizlik
-                                for _ in 0..5 { 
-                                    let _ = socket_clone.send_to(&silence, candidate_target_addr).await;
-                                    tokio::time::sleep(Duration::from_millis(20)).await;
-                                }
-                            });
+                        // [FIX] HEDEF BELİRLEME (KRİTİK)
+                        // Eğer Latch olmuş hedef yoksa, B2BUA'dan gelen adresi "Geçici Hedef" yap.
+                        if endpoint.get_target().is_none() {
+                             info!("🎯 [RTP] Pre-Latch Target Set -> {}", candidate_target_addr);
+                             pre_latch_target = Some(candidate_target_addr);
                         }
+
+                        // Hole Punching (Agresif)
+                        // Latching olsa bile göndeririz, zarar gelmez, yolu açık tutar.
+                        let target_to_punch = endpoint.get_target().unwrap_or(candidate_target_addr);
+                        let socket_clone = socket.clone();
                         
-                        // Hedef belirleme: Latched > Pre-Latch (Candidate)
+                        tokio::spawn(async move {
+                            // 5 paket yerine 20 paket gönder (daha garantici)
+                            let silence = vec![0x80u8; 160]; 
+                            for _ in 0..20 { 
+                                let _ = socket_clone.send_to(&silence, target_to_punch).await;
+                                tokio::time::sleep(Duration::from_millis(20)).await;
+                            }
+                        });
+                        
                         let target = endpoint.get_target().or(pre_latch_target).unwrap_or(candidate_target_addr);
                         
                         let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
