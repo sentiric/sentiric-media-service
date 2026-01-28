@@ -221,7 +221,12 @@ pub async fn rtp_session_handler(
                                     let mut guard = current_codec_type.lock().await;
                                     *guard = detected_codec;
                                     current_codec = detected_codec;
+                                    
+                                    // [FIX] Hem Decoder hem Encoder güncellenmeli!
+                                    // Eğer karşı taraf G729 gönderiyorsa, bizden de G729 bekliyordur.
                                     encoder = CodecFactory::create_encoder(detected_codec);
+                                    // Decoder zaten helper fonksiyon içinde (codecs::decode_...) hallediliyor ama
+                                    // mimari gereği burada durması zarar vermez.
                                 },
                                 _ => {}
                             }
