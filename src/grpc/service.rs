@@ -1,4 +1,5 @@
 // sentiric-media-service/src/grpc/service.rs
+
 use crate::config::AppConfig;
 use crate::grpc::error::ServiceError;
 use crate::metrics::GRPC_REQUESTS_TOTAL;
@@ -71,8 +72,8 @@ impl MediaService for MyMediaService {
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| Status::not_found("RTP oturum kanalı bulunamadı"))?;
 
-        // Channel boyutunu genişlettik
-        let (audio_tx, audio_rx) = mpsc::channel(4096);
+        // [FIX] Kanal boyutu 8192'ye çıkarıldı (High-Throughput için)
+        let (audio_tx, audio_rx) = mpsc::channel(8192);
         
         session_tx.send(RtpCommand::StartOutboundStream { audio_rx }).await
             .map_err(|_| Status::internal("RTP oturumuna komut gönderilemedi"))?;
@@ -85,8 +86,11 @@ impl MediaService for MyMediaService {
             if !first_msg.audio_chunk.is_empty() {
                 let size = first_msg.audio_chunk.len();
                 total_bytes += size;
+                
                 info!("🎤 [gRPC-IN] İlk Paket: {} bytes", size);
                 
+                // [FIX] send().await kullanarak backpressure uyguluyoruz.
+                // Eğer RTP işleyicisi yavaşsa, burası bekleyecek (paketi düşürmeyecek).
                 if audio_tx.send(first_msg.audio_chunk).await.is_err() {
                     warn!("⚠️ [gRPC-IN] RTP Kanalı kapalı (Early Drop)");
                     return; 
@@ -97,9 +101,9 @@ impl MediaService for MyMediaService {
                 if !msg.audio_chunk.is_empty() {
                     let size = msg.audio_chunk.len();
                     total_bytes += size;
-                    
+
                     // DEBUG: Her paketi logluyoruz (Ses akışını görmek için)
-                    info!("🎤 [gRPC-IN] Chunk Alındı: {} bytes", size);
+                    debug!("🎤 [gRPC-IN] Chunk Alındı: {} bytes", size);
                     
                     if audio_tx.send(msg.audio_chunk).await.is_err() {
                         warn!("⚠️ [gRPC-IN] RTP Kanalı koptu (Session Closed)");
@@ -117,7 +121,8 @@ impl MediaService for MyMediaService {
 
         Ok(Response::new(Box::pin(ReceiverStream::new(response_rx))))
     }
-
+    
+   
     #[instrument(skip_all, fields(service = "media-service", call_id = %request.get_ref().call_id))]
     async fn allocate_port(
         &self,
