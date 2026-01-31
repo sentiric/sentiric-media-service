@@ -2,7 +2,7 @@
 
 use crate::config::AppConfig;
 use crate::metrics::ACTIVE_SESSIONS;
-use crate::rtp::codecs::{self, StatefulResampler, AudioCodec}; // [FIX] Sabit kaldırıldı
+use crate::rtp::codecs::{self, AudioCodec};
 use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
 use crate::rtp::session_utils::{finalize_and_save_recording, load_and_resample_samples_from_uri};
 use crate::state::AppState;
@@ -20,10 +20,11 @@ use tokio_util::sync::CancellationToken;
 
 use tracing::{error, info, instrument, warn}; 
 
-use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket, RtpEndpoint};
+use sentiric_rtp_core::{CodecFactory, CodecType, RtpHeader, RtpPacket, RtcpPacket, RtpEndpoint};
 
 const INACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_SILENCE_PACKETS: usize = 50; 
+const RTCP_INTERVAL: Duration = Duration::from_secs(5);
 
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -55,17 +56,10 @@ pub async fn rtp_session_handler(
 
     let current_codec_type = Arc::new(Mutex::new(CodecType::PCMU));
     
-    // Inbound: 8k -> 16k
-    let inbound_resampler = Arc::new(Mutex::new(
-        StatefulResampler::new(8000, 16000).expect("Inbound Resampler Hatası"),
-    ));
-
-    // Outbound: 24k -> 8k
     let outbound_resampler = Arc::new(Mutex::new(
-        StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
+        codecs::StatefulResampler::new(24000, 8000).expect("Outbound Resampler Hatası"),
     ));
     
-    // [FIX] Dinamik Frame Size'ı al (480 sample)
     let outbound_frame_size = outbound_resampler.lock().await.input_frame_size;
 
     let mut encoder = CodecFactory::create_encoder(CodecType::PCMU);
@@ -104,6 +98,9 @@ pub async fn rtp_session_handler(
     let mut pacer = time::interval(Duration::from_millis(20));
     pacer.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
+    let mut rtcp_ticker = time::interval(RTCP_INTERVAL);
+    rtcp_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
     let mut inactivity_checker = time::interval(INACTIVITY_CHECK_INTERVAL);
     inactivity_checker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut last_activity = Instant::now();
@@ -114,7 +111,7 @@ pub async fn rtp_session_handler(
 
     loop {
         tokio::select! {
-            // A. PACER TICK
+            // A. PACER TICK (RTP Sending)
             _ = pacer.tick() => {
                 if is_streaming_active {
                     let target = endpoint.get_target().or(pre_latch_target);
@@ -132,7 +129,6 @@ pub async fn rtp_session_handler(
                                 }
                             }
 
-                            // [FIX] Dinamik Boyut Kullanımı (480)
                             if audio_accumulator.len() >= outbound_frame_size {
                                 silence_counter = 0;
                                 let frame_in: Vec<f32> = audio_accumulator.drain(0..outbound_frame_size).collect();
@@ -178,7 +174,23 @@ pub async fn rtp_session_handler(
                 }
             },
 
-            // B. COMMANDS
+            // B. RTCP TICK (Keep-alive)
+            _ = rtcp_ticker.tick() => {
+                let target = endpoint.get_target().or(pre_latch_target);
+                if let Some(mut target_addr) = target {
+                    if !target_addr.ip().is_unspecified() && target_addr.port() != 0 {
+                        let rtcp_port = target_addr.port() + 1;
+                        target_addr.set_port(rtcp_port);
+                        
+                        let rtcp = RtcpPacket::new_sender_report(rtp_ssrc);
+                        if let Err(e) = socket.send_to(&rtcp.to_bytes(), target_addr).await {
+                            tracing::debug!("RTCP Send Error: {}", e);
+                        }
+                    }
+                }
+            },
+
+            // C. COMMANDS
             Some(command) = command_rx.recv() => {
                 last_activity = Instant::now();
                 match command {
@@ -242,7 +254,7 @@ pub async fn rtp_session_handler(
                 }
             },
             
-            // C. INBOUND RTP HANDLING
+            // D. INBOUND RTP HANDLING
             Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
                 last_activity = Instant::now();
                 if endpoint.latch(remote_addr) {
@@ -270,7 +282,6 @@ pub async fn rtp_session_handler(
                         }
                     }
 
-                    let resampler_clone = inbound_resampler.clone();
                     let local_codec_enum = match current_codec {
                         CodecType::PCMU => Some(AudioCodec::Pcmu),
                         CodecType::PCMA => Some(AudioCodec::Pcma),
@@ -279,12 +290,8 @@ pub async fn rtp_session_handler(
 
                     if let Some(codec) = local_codec_enum {
                         let payload_vec = payload.to_vec();
-                        let mut resampler_guard = resampler_clone.lock().await;
                         
-                        // [FIX] Burada decode_g711_to_lpcm16 fonksiyonunu çağırırken
-                        // resampler referansını veriyoruz, ama fonksiyon içinde resampler kullanılmayacak.
-                        // Çünkü 8k->16k için basit upsampling yeterli ve güvenli.
-                        if let Ok(samples_16k) = codecs::decode_g711_to_lpcm16(&payload_vec, codec, &mut *resampler_guard) {
+                        if let Ok(samples_16k) = codecs::decode_g711_to_lpcm16(&payload_vec, codec) {
                             let mut sender_guard = live_stream_sender.lock().await;
                             if let Some(sender) = &*sender_guard {
                                 if !sender.is_closed() {
@@ -310,7 +317,7 @@ pub async fn rtp_session_handler(
                 }
             },
             
-            // D. INACTIVITY CHECK
+            // E. INACTIVITY CHECK
             _ = inactivity_checker.tick() => {
                 if last_activity.elapsed() > inactivity_limit {
                     warn!("⏳ RTP Oturumu zaman aşımına uğradı (İnaktivite: {:?}). Oturum sonlandırılıyor.", last_activity.elapsed());
@@ -318,7 +325,7 @@ pub async fn rtp_session_handler(
                 }
             },
 
-            // E. PLAYBACK FINISHED
+            // F. PLAYBACK FINISHED
             Some(_) = playback_finished_rx.recv() => {
                 last_activity = Instant::now();
                 is_playing_file = false;

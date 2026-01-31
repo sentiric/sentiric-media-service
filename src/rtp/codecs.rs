@@ -6,9 +6,6 @@ use rubato::{
 };
 use sentiric_rtp_core::G711; 
 
-// [FIX] SABİT KALDIRILDI. Artık her instance kendi boyutunu biliyor.
-// pub const RESAMPLER_INPUT_FRAME_SIZE: usize = 480; 
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
     Pcmu,
@@ -27,7 +24,6 @@ impl AudioCodec {
 
 pub struct StatefulResampler {
     resampler: SincFixedIn<f32>,
-    // [YENİ] Her instance kendi beklediği giriş boyutunu bilir.
     pub input_frame_size: usize,
 }
 
@@ -62,7 +58,6 @@ impl StatefulResampler {
     }
 
     pub fn process(&mut self, samples_in: &[f32]) -> Result<Vec<f32>> {
-        // [FIX] Dinamik kontrol
         if samples_in.len() != self.input_frame_size {
             return Err(anyhow!(
                 "Resampler input size mismatch! Expected: {}, Got: {}",
@@ -84,6 +79,7 @@ impl StatefulResampler {
 
 // 16k LPCM'den G.711'e (RTP için)
 pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
+    // 16k -> 8k Basit Downsampling (Her 2 örnekten 1'ini al)
     let samples_8k_i16: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();
 
     let g711_payload: Vec<u8> = match target_codec {
@@ -98,16 +94,13 @@ pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> R
 pub fn decode_g711_to_lpcm16(
     payload: &[u8],
     codec: AudioCodec,
-    // [FIX] Artık resampler kullanılmıyor, basit upsampling yapılıyor.
-    // _resampler parametresi kaldırılabilir veya kullanılmayabilir.
-    _resampler: &mut StatefulResampler,
 ) -> Result<Vec<i16>> {
     let samples_8k: Vec<i16> = match codec {
         AudioCodec::Pcmu => payload.iter().map(|&b| G711::ulaw_to_linear(b)).collect(),
         AudioCodec::Pcma => payload.iter().map(|&b| G711::alaw_to_linear(b)).collect(),
     };
     
-    // 8k -> 16k Basit Upsampling (Her örneği 2 kere yaz - En hızlı yöntem)
+    // 8k -> 16k Basit Upsampling (Her örneği 2 kere yaz - En hızlı ve güvenli yöntem)
     let mut samples_16k = Vec::with_capacity(samples_8k.len() * 2);
     for s in samples_8k {
         samples_16k.push(s);
