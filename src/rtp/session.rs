@@ -254,7 +254,7 @@ pub async fn rtp_session_handler(
                 }
             },
             
-            // D. INBOUND RTP HANDLING
+            // D. INBOUND RTP HANDLING (GÜNCELLENDİ: TÜM KODEKLERİ DESTEKLER)
             Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
                 last_activity = Instant::now();
                 if endpoint.latch(remote_addr) {
@@ -265,33 +265,26 @@ pub async fn rtp_session_handler(
                 if packet_data.len() > 12 {
                     let pt = packet_data[1] & 0x7F;
                     let payload = &packet_data[12..];
-                    let mut current_codec = *current_codec_type.lock().await;
                     
-                    if let Some(detected_codec) = CodecType::from_u8(pt) {
-                        if current_codec != detected_codec {
-                            match detected_codec {
-                                CodecType::G729 | CodecType::PCMA | CodecType::PCMU => {
-                                    info!("🔄 Codec Switch Detected: {:?} -> {:?}", current_codec, detected_codec);
-                                    let mut guard = current_codec_type.lock().await;
-                                    *guard = detected_codec;
-                                    current_codec = detected_codec;
-                                    encoder = CodecFactory::create_encoder(detected_codec);
-                                },
-                                _ => {}
-                            }
+                    // 1. Dinamik Kodek Tespiti
+                    let detected_codec_opt = AudioCodec::from_rtp_payload_type(pt).ok();
+                    
+                    if let Some(codec) = detected_codec_opt {
+                        let mut current_type_guard = current_codec_type.lock().await;
+                        let core_codec_type = codec.to_core_type();
+
+                        // Eğer operatör kodek değiştirdiyse (Switch), biz de uyum sağlayalım
+                        if *current_type_guard != core_codec_type {
+                            info!("🔄 Codec Switch Detected: {:?} -> {:?}", *current_type_guard, core_codec_type);
+                            *current_type_guard = core_codec_type;
+                            // Giden ses (TX) için encoder'ı da güncelle
+                            encoder = CodecFactory::create_encoder(core_codec_type);
                         }
-                    }
 
-                    let local_codec_enum = match current_codec {
-                        CodecType::PCMU => Some(AudioCodec::Pcmu),
-                        CodecType::PCMA => Some(AudioCodec::Pcma),
-                        _ => None,
-                    };
-
-                    if let Some(codec) = local_codec_enum {
-                        let payload_vec = payload.to_vec();
-                        
-                        if let Ok(samples_16k) = codecs::decode_g711_to_lpcm16(&payload_vec, codec) {
+                        // 2. Çözme İşlemi (rtp/codecs.rs'deki yeni merkezi fonksiyonu kullanıyoruz)
+                        if let Ok(samples_16k) = codecs::decode_rtp_to_lpcm16(payload, codec) {
+                            
+                            // A. Canlı Stream'e Gönder (STT için)
                             let mut sender_guard = live_stream_sender.lock().await;
                             if let Some(sender) = &*sender_guard {
                                 if !sender.is_closed() {
@@ -303,11 +296,13 @@ pub async fn rtp_session_handler(
                                         data: bytes.into(), 
                                         media_type: "audio/L16;rate=16000".to_string() 
                                     };
-                                    if let Err(_) = sender.try_send(Ok(frame)) { }
+                                    let _ = sender.try_send(Ok(frame));
                                 } else {
                                     *sender_guard = None;
                                 }
                             }
+
+                            // B. Kayda Yaz
                             let mut rec_guard = permanent_recording_session.lock().await;
                             if let Some(session) = rec_guard.as_mut() {
                                 session.mixed_samples_16khz.extend(samples_16k.iter()); 

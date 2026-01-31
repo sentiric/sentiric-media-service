@@ -4,12 +4,14 @@ use anyhow::{anyhow, Result};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-use sentiric_rtp_core::G711; 
+// DÜZELTME: Sadece kullanılanları import ediyoruz (Decoder ve G711 uyarıları için silindi)
+use sentiric_rtp_core::{CodecFactory, CodecType}; 
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
     Pcmu,
     Pcma,
+    G729,
 }
 
 impl AudioCodec {
@@ -17,7 +19,17 @@ impl AudioCodec {
         match payload_type {
             0 => Ok(AudioCodec::Pcmu),
             8 => Ok(AudioCodec::Pcma),
+            18 => Ok(AudioCodec::G729),
             _ => Err(anyhow!("Desteklenmeyen RTP payload tipi: {}", payload_type)),
+        }
+    }
+
+    // RTP-CORE tipine dönüştürücü
+    pub fn to_core_type(&self) -> CodecType {
+        match self {
+            AudioCodec::Pcmu => CodecType::PCMU,
+            AudioCodec::Pcma => CodecType::PCMA,
+            AudioCodec::G729 => CodecType::G729,
         }
     }
 }
@@ -37,10 +49,6 @@ impl StatefulResampler {
             window: WindowFunction::BlackmanHarris2,
         };
 
-        // 20ms Frame Size Hesaplama
-        // 24000 Hz -> 480 sample
-        // 16000 Hz -> 320 sample
-        // 8000 Hz  -> 160 sample
         let input_frame_size = (source_rate as f32 * 0.02) as usize;
 
         let resampler = SincFixedIn::<f32>::new(
@@ -60,7 +68,7 @@ impl StatefulResampler {
     pub fn process(&mut self, samples_in: &[f32]) -> Result<Vec<f32>> {
         if samples_in.len() != self.input_frame_size {
             return Err(anyhow!(
-                "Resampler input size mismatch! Expected: {}, Got: {}",
+                "Resampler size mismatch! Expected: {}, Got: {}",
                 self.input_frame_size,
                 samples_in.len()
             ));
@@ -77,35 +85,38 @@ impl StatefulResampler {
     }
 }
 
-// 16k LPCM'den G.711'e (RTP için)
-pub fn encode_lpcm16_to_g711(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
-    // 16k -> 8k Basit Downsampling (Her 2 örnekten 1'ini al)
-    let samples_8k_i16: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();
+// --- MERKEZİ DECODE MANTIĞI ---
 
-    let g711_payload: Vec<u8> = match target_codec {
-        AudioCodec::Pcmu => samples_8k_i16.iter().map(|&s| G711::linear_to_ulaw(s)).collect(),
-        AudioCodec::Pcma => samples_8k_i16.iter().map(|&s| G711::linear_to_alaw(s)).collect(),
-    };
-
-    Ok(g711_payload)
-}
-
-// G.711'den 16k LPCM'e (STT için)
-pub fn decode_g711_to_lpcm16(
+/// Herhangi bir desteklenen RTP paketini alır ve STT/Kayıt için 16kHz LPCM'e çevirir.
+pub fn decode_rtp_to_lpcm16(
     payload: &[u8],
     codec: AudioCodec,
 ) -> Result<Vec<i16>> {
-    let samples_8k: Vec<i16> = match codec {
-        AudioCodec::Pcmu => payload.iter().map(|&b| G711::ulaw_to_linear(b)).collect(),
-        AudioCodec::Pcma => payload.iter().map(|&b| G711::alaw_to_linear(b)).collect(),
-    };
+    // 1. RTP-CORE üzerinden ilgili çözücüyü (Decoder) oluştur
+    let mut decoder = CodecFactory::create_decoder(codec.to_core_type());
     
-    // 8k -> 16k Basit Upsampling (Her örneği 2 kere yaz - En hızlı ve güvenli yöntem)
+    // 2. Çöz (Her zaman 8kHz döner - G.729 ve G.711 için)
+    let samples_8k = decoder.decode(payload);
+    
+    // 3. 8kHz -> 16kHz Upsampling (Simple & Fast)
+    Ok(upsample_8k_to_16k(samples_8k))
+}
+
+/// Giden ses için: 16k LPCM'den hedef RTP kodeğine çevirir.
+pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
+    // 16k -> 8k Downsampling
+    let samples_8k_i16: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();
+
+    // RTP-CORE üzerinden encoder oluştur ve encode et
+    let mut encoder = CodecFactory::create_encoder(target_codec.to_core_type());
+    Ok(encoder.encode(&samples_8k_i16))
+}
+
+fn upsample_8k_to_16k(samples_8k: Vec<i16>) -> Vec<i16> {
     let mut samples_16k = Vec::with_capacity(samples_8k.len() * 2);
     for s in samples_8k {
         samples_16k.push(s);
         samples_16k.push(s);
     }
-    
-    Ok(samples_16k)
+    samples_16k
 }

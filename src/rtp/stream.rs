@@ -19,7 +19,8 @@ pub async fn send_rtp_stream(
     target_codec: AudioCodec,
 ) -> Result<()> {
     // 1. Encode
-    let encoded_payload = codecs::encode_lpcm16_to_g711(samples_16khz, target_codec)?;
+    // DÜZELTME: Fonksiyon adı encode_lpcm16_to_rtp olarak güncellendi
+    let encoded_payload = codecs::encode_lpcm16_to_rtp(samples_16khz, target_codec)?;
     
     info!(
         source_samples = samples_16khz.len(),
@@ -45,11 +46,16 @@ pub async fn send_rtp_stream(
     let rtp_payload_type = match target_codec {
         AudioCodec::Pcmu => 0,
         AudioCodec::Pcma => 8,
+        // YENİ: G.729 outound stream desteği eklendi
+        AudioCodec::G729 => 18, 
     };
 
     let mut ticker = tokio::time::interval(Duration::from_millis(20));
 
-    for chunk in encoded_payload.chunks(SAMPLES_PER_PACKET) {
+    // YENİ: G.729 paket boyutu 20 byte, G.711 paket boyutu 160 byte'dır.
+    let packet_chunk_size = if target_codec == AudioCodec::G729 { 20 } else { 160 };
+
+    for chunk in encoded_payload.chunks(packet_chunk_size) {
         tokio::select! {
             biased;
             _ = token.cancelled() => {
