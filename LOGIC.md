@@ -1,10 +1,12 @@
-# 🎙️ Sentiric Media Service - Mantık Mimarisi (Final)
+# 🎙️ Sentiric Media Service - Mantık Mimarisi (Nihai)
 
-**Rol:** Gerçek Zamanlı Medya Motoru. RTP İşleme, Kayıt ve Transcoding.
+**Rol:** Gerçek Zamanlı Medya Motoru.
 
-## 1. RTP Oturum Yönetimi (The Session Loop)
+## 1. RTP Oturum Yönetimi ve "Latching" Kuralı
+Media Service, NAT arkasındaki cihazlarla çalışmak için "Latching" (Kilitlenme) kullanır.
 
-Her çağrı için bağımsız bir `Tokio Task` başlatılır. Akış şöyledir:
+*   **KRİTİK UYARI:** Latching mekanizmasının çalışabilmesi için karşı tarafın paketi **doğru UDP portuna** göndermesi şarttır. 
+*   Eğer SBC veya B2BUA karşı tarafa yanlış port ilan ederse (Port Split), Media Service asla paket alamaz ve Latching gerçekleşmez.
 
 1.  **Port Tahsisi (Allocate):**
     *   `b2bua` veya `agent` port ister.
