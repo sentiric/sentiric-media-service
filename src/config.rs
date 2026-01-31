@@ -39,10 +39,19 @@ impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
         let grpc_port: u16 = env::var("MEDIA_SERVICE_GRPC_PORT").context("MEDIA_SERVICE_GRPC_PORT eksik")?.parse()?;
         let metrics_port: u16 = env::var("MEDIA_SERVICE_METRICS_PORT").unwrap_or_else(|_| "13032".to_string()).parse().context("MEDIA_SERVICE_METRICS_PORT geçerli bir sayı olmalı")?;
-        
-        let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN").context("RTP_SERVICE_PORT_MIN eksik")?.parse()?;
-        let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX").context("RTP_SERVICE_PORT_MAX eksik")?.parse()?;
-            
+
+        // Varsayılan: 50000
+        let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN")
+            .unwrap_or_else(|_| "50000".to_string())
+            .parse()
+            .context("RTP_SERVICE_PORT_MIN geçerli bir sayı olmalı")?;
+
+        // Varsayılan: 50100
+        let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX")
+            .unwrap_or_else(|_| "50100".to_string())
+            .parse()
+            .context("RTP_SERVICE_PORT_MAX geçerli bir sayı olmalı")?;
+
         if rtp_port_min >= rtp_port_max {
             bail!("RTP port aralığı geçersiz: min ({}) >= max ({}).", rtp_port_min, rtp_port_max);
         }
