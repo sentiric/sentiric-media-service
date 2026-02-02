@@ -4,8 +4,8 @@ use anyhow::{anyhow, Result};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
-// DÜZELTME: Sadece kullanılanları import ediyoruz (Decoder ve G711 uyarıları için silindi)
-use sentiric_rtp_core::{CodecFactory, CodecType}; 
+// CORE ENTEGRASYONU
+use sentiric_rtp_core::{CodecFactory, CodecType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
@@ -49,6 +49,7 @@ impl StatefulResampler {
             window: WindowFunction::BlackmanHarris2,
         };
 
+        // 20ms frame size tahmini
         let input_frame_size = (source_rate as f32 * 0.02) as usize;
 
         let resampler = SincFixedIn::<f32>::new(
@@ -85,7 +86,7 @@ impl StatefulResampler {
     }
 }
 
-// --- MERKEZİ DECODE MANTIĞI ---
+// --- MERKEZİ DECODE MANTIĞI (CORE DELEGATION) ---
 
 /// Herhangi bir desteklenen RTP paketini alır ve STT/Kayıt için 16kHz LPCM'e çevirir.
 pub fn decode_rtp_to_lpcm16(
@@ -104,10 +105,10 @@ pub fn decode_rtp_to_lpcm16(
 
 /// Giden ses için: 16k LPCM'den hedef RTP kodeğine çevirir.
 pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
-    // 16k -> 8k Downsampling
+    // 1. 16k -> 8k Downsampling
     let samples_8k_i16: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();
 
-    // RTP-CORE üzerinden encoder oluştur ve encode et
+    // 2. RTP-CORE üzerinden encoder oluştur ve encode et
     let mut encoder = CodecFactory::create_encoder(target_codec.to_core_type());
     Ok(encoder.encode(&samples_8k_i16))
 }
@@ -115,7 +116,7 @@ pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Re
 fn upsample_8k_to_16k(samples_8k: Vec<i16>) -> Vec<i16> {
     let mut samples_16k = Vec::with_capacity(samples_8k.len() * 2);
     for s in samples_8k {
-        samples_16k.push(s);
+        samples_16k.push(s); // Duplicate sample (Linear interpolation yerine hızlı yöntem)
         samples_16k.push(s);
     }
     samples_16k
