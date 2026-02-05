@@ -25,7 +25,8 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{debug, field, info, instrument, warn};
+// DÜZELTME: 'error' importu kaldırıldı (bu dosyada kullanılmıyor), 'Url' tutuldu.
+use tracing::{debug, field, info, instrument, warn, Span};
 use url::Url;
 use crate::metrics::ACTIVE_SESSIONS;
 
@@ -38,6 +39,15 @@ impl MyMediaService {
     pub fn new(config: Arc<AppConfig>, app_state: AppState) -> Self {
         Self { app_state, config }
     }
+
+    // Helper: Metadata'dan Trace ID'yi çek
+    fn extract_trace_id<T>(req: &Request<T>) -> String {
+        req.metadata()
+            .get("x-trace-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string()
+    }
 }
 
 #[tonic::async_trait]
@@ -45,11 +55,14 @@ impl MediaService for MyMediaService {
     
     type StreamAudioToCallStream = Pin<Box<dyn Stream<Item = Result<StreamAudioToCallResponse, Status>> + Send>>;
 
-    #[instrument(skip(self, request))]
+    #[instrument(skip(self, request), fields(trace_id))]
     async fn stream_audio_to_call(
         &self,
         request: Request<Streaming<StreamAudioToCallRequest>>,
     ) -> Result<Response<Self::StreamAudioToCallStream>, Status> {
+        let trace_id = Self::extract_trace_id(&request);
+        Span::current().record("trace_id", &trace_id);
+
         counter!(GRPC_REQUESTS_TOTAL, "method" => "stream_audio_to_call").increment(1);
         info!("StreamAudioToCall isteği başlatıldı.");
 
@@ -72,7 +85,6 @@ impl MediaService for MyMediaService {
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await
             .ok_or_else(|| Status::not_found("RTP oturum kanalı bulunamadı"))?;
 
-        // [FIX] Kanal boyutu 8192'ye çıkarıldı (High-Throughput için)
         let (audio_tx, audio_rx) = mpsc::channel(8192);
         
         session_tx.send(RtpCommand::StartOutboundStream { audio_rx }).await
@@ -89,8 +101,6 @@ impl MediaService for MyMediaService {
                 
                 info!("🎤 [gRPC-IN] İlk Paket: {} bytes", size);
                 
-                // [FIX] send().await kullanarak backpressure uyguluyoruz.
-                // Eğer RTP işleyicisi yavaşsa, burası bekleyecek (paketi düşürmeyecek).
                 if audio_tx.send(first_msg.audio_chunk).await.is_err() {
                     warn!("⚠️ [gRPC-IN] RTP Kanalı kapalı (Early Drop)");
                     return; 
@@ -102,7 +112,6 @@ impl MediaService for MyMediaService {
                     let size = msg.audio_chunk.len();
                     total_bytes += size;
 
-                    // DEBUG: Her paketi logluyoruz (Ses akışını görmek için)
                     debug!("🎤 [gRPC-IN] Chunk Alındı: {} bytes", size);
                     
                     if audio_tx.send(msg.audio_chunk).await.is_err() {
@@ -122,12 +131,14 @@ impl MediaService for MyMediaService {
         Ok(Response::new(Box::pin(ReceiverStream::new(response_rx))))
     }
     
-   
-    #[instrument(skip_all, fields(service = "media-service", call_id = %request.get_ref().call_id))]
+    #[instrument(skip_all, fields(service = "media-service", call_id = %request.get_ref().call_id, trace_id))]
     async fn allocate_port(
         &self,
         request: Request<AllocatePortRequest>,
     ) -> Result<Response<AllocatePortResponse>, Status> {
+        let trace_id = Self::extract_trace_id(&request);
+        Span::current().record("trace_id", &trace_id);
+
         counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
         let call_id = request.get_ref().call_id.clone();
         info!(call_id = %call_id, "Port tahsis isteği alındı.");
@@ -175,11 +186,14 @@ impl MediaService for MyMediaService {
         Err(ServiceError::PortPoolExhausted.into())
     }
 
-    #[instrument(skip(self, request), fields(port = %request.get_ref().rtp_port))]
+    #[instrument(skip(self, request), fields(port = %request.get_ref().rtp_port, trace_id))]
     async fn release_port(
         &self,
         request: Request<ReleasePortRequest>,
     ) -> Result<Response<ReleasePortResponse>, Status> {
+        let trace_id = Self::extract_trace_id(&request);
+        Span::current().record("trace_id", &trace_id);
+
         counter!(GRPC_REQUESTS_TOTAL, "method" => "release_port").increment(1);
 
         let port = request.into_inner().rtp_port as u16;
@@ -196,24 +210,32 @@ impl MediaService for MyMediaService {
 
     #[instrument(skip(self, request), fields(
         port = %request.get_ref().server_rtp_port,
-        audio_uri.scheme = %extract_uri_scheme(&request.get_ref().audio_uri),
-        audio_uri.len = field::Empty,
+        audio_uri = field::Empty, // Başlangıçta boş
+        audio_uri_scheme = field::Empty,
+        trace_id
     ))]
     async fn play_audio(
         &self,
         request: Request<PlayAudioRequest>,
     ) -> Result<Response<PlayAudioResponse>, Status> {
+        let trace_id = Self::extract_trace_id(&request);
+        let span = Span::current();
+        span.record("trace_id", &trace_id);
+
         counter!(GRPC_REQUESTS_TOTAL, "method" => "play_audio").increment(1);
 
         let req = request.into_inner();
-        let span = tracing::Span::current();
-        span.record("audio_uri.len", &req.audio_uri.len());
+        
+        // Data URI'ler çok uzun olduğu için loglamada kısaltıyoruz, ve şemayı kaydediyoruz
+        let scheme = extract_uri_scheme(&req.audio_uri);
+        span.record("audio_uri_scheme", scheme);
 
         if req.audio_uri.starts_with("data:") {
-            let truncated_uri = &req.audio_uri[..std::cmp::min(50, req.audio_uri.len())];
-            debug!(audio_uri.preview = %truncated_uri, "PlayAudio komutu (data URI) alındı.");
+             debug!("PlayAudio: Data URI alındı (Length: {})", req.audio_uri.len());
+             span.record("audio_uri", "data:..."); 
         } else {
-            debug!(audio_uri = %req.audio_uri, "PlayAudio komutu (file URI) alındı.");
+             debug!("PlayAudio: Dosya URI alındı: {}", req.audio_uri);
+             span.record("audio_uri", &req.audio_uri);
         }
 
         let rtp_port = req.server_rtp_port as u16;
@@ -243,11 +265,14 @@ impl MediaService for MyMediaService {
 
     type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
 
-    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
+    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port, trace_id))]
     async fn record_audio(
         &self,
         request: Request<RecordAudioRequest>,
     ) -> Result<Response<Self::RecordAudioStream>, Status> {
+        let trace_id = Self::extract_trace_id(&request);
+        Span::current().record("trace_id", &trace_id);
+
         counter!(GRPC_REQUESTS_TOTAL, "method" => "record_audio").increment(1);
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
@@ -273,19 +298,26 @@ impl MediaService for MyMediaService {
 
     #[instrument(skip(self, request), fields(
         port = %request.get_ref().server_rtp_port,
-        output.scheme = field::Empty,
         call_id = %request.get_ref().call_id,
+        trace_id,
+        output_scheme = field::Empty 
     ))]
     async fn start_recording(
         &self,
         request: Request<StartRecordingRequest>,
     ) -> Result<Response<StartRecordingResponse>, Status> {
+        let trace_id = Self::extract_trace_id(&request);
+        let span = Span::current();
+        span.record("trace_id", &trace_id);
+
         counter!(GRPC_REQUESTS_TOTAL, "method" => "start_recording").increment(1);
         let req_ref = request.get_ref();
         
+        // DÜZELTME: Url::parse sonucunu kullanarak şemayı kaydet, böylece Url importu boşa gitmez.
         if let Ok(url) = Url::parse(&req_ref.output_uri) {
-            let span = tracing::Span::current();
-            span.record("output.scheme", url.scheme());
+            span.record("output_scheme", url.scheme());
+        } else {
+             span.record("output_scheme", "invalid");
         }
         
         let rtp_port = req_ref.server_rtp_port as u16;
@@ -306,11 +338,14 @@ impl MediaService for MyMediaService {
         Ok(Response::new(StartRecordingResponse { success: true }))
     }
 
-    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port))]
+    #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port, trace_id))]
     async fn stop_recording(
         &self,
         request: Request<StopRecordingRequest>,
     ) -> Result<Response<StopRecordingResponse>, Status> {
+        let trace_id = Self::extract_trace_id(&request);
+        Span::current().record("trace_id", &trace_id);
+
         counter!(GRPC_REQUESTS_TOTAL, "method" => "stop_recording").increment(1);
         let rtp_port = request.get_ref().server_rtp_port as u16;
         let session_tx = self.app_state.port_manager.get_session_sender(rtp_port).await

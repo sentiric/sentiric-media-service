@@ -27,7 +27,7 @@ use sentiric_rtp_core::{
     RtpEndpoint, Pacer
 };
 
-const INACTIVITY_CHECK_INTERVAL: Duration = Duration::from_secs(5);
+// DÜZELTME: Kullanılmayan 'INACTIVITY_CHECK_INTERVAL' sabiti kaldırıldı.
 const MAX_SILENCE_PACKETS: usize = 50; 
 const RTCP_INTERVAL: Duration = Duration::from_secs(5);
 
