@@ -18,7 +18,8 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task;
 use tokio::time::{Duration, Instant};
 
-use tracing::{info, instrument, warn};
+// [DÜZELTME] 'error' importu eklendi.
+use tracing::{info, instrument, warn, error};
 
 use sentiric_rtp_core::{
     CodecType, RtpHeader, RtpPacket, RtcpPacket, RtpEndpoint, Pacer,
@@ -166,11 +167,17 @@ pub async fn rtp_session_handler(
         }
     }
     
-    socket_reader_handle.abort();
+    // --- TEMİZLİK (GÜÇLENDİRİLDİ) ---
+    socket_reader_handle.abort(); // Ağ dinleyicisini anında kapat
+
+    // [ANTI-FRAGILE] Kayıt işlemini güvenli bir şekilde ve loglayarak yap
     if let Some(session) = permanent_recording_session.lock().await.take() {
-        let app_state_clone = config.app_state.clone();
-        task::spawn(finalize_and_save_recording(session, app_state_clone));
+        info!("Finalizing recording for call: {}", session.call_id);
+        if let Err(e) = finalize_and_save_recording(session, config.app_state.clone()).await {
+            error!("CRITICAL: Recording save failed! Error: {}", e);
+        }
     }
+
     config.app_state.port_manager.remove_session(config.port).await;
     config.app_state.port_manager.quarantine_port(config.port).await;
     gauge!(ACTIVE_SESSIONS).decrement(1.0);
