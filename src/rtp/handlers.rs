@@ -1,9 +1,10 @@
 // sentiric-media-service/src/rtp/handlers.rs
 
 use super::command::{RtpCommand, AudioFrame};
-use super::session_utils::{finalize_and_save_recording, load_and_resample_samples_from_uri};
+use super::session_utils::{load_and_resample_samples_from_uri}; 
 use super::stream::send_rtp_stream;
-use crate::rtp::command::RecordingSession;
+use super::session::RtpSessionConfig;
+use crate::rtp::command::RecordingSession; // ✅ EKSİK IMPORT EKLENDİ
 use anyhow::Result;
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -17,7 +18,7 @@ pub struct PlaybackJob {
     pub audio_uri: String,
     pub target_addr: SocketAddr,
     pub cancellation_token: tokio_util::sync::CancellationToken,
-    pub responder: Option<tokio::sync::oneshot::Sender<Result<()>>>,
+    pub responder: Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>,
 }
 
 /// Gelen komutları işleyen ve oturum durumunu güncelleyen ana mantık.
@@ -31,7 +32,7 @@ pub async fn handle_command(
     is_streaming_active: &mut bool,
     playback_queue: &mut std::collections::VecDeque<PlaybackJob>,
     is_playing_file: &mut bool,
-    config: &super::session::RtpSessionConfig,
+    config: &RtpSessionConfig,
     socket: &Arc<tokio::net::UdpSocket>,
     playback_finished_tx: &mpsc::Sender<()>,
     pre_latch_target: &mut Option<SocketAddr>,
@@ -87,8 +88,8 @@ pub async fn handle_command(
         RtpCommand::StopPermanentRecording { responder } => {
             if let Some(session) = permanent_recording_session.lock().await.take() {
                 let uri = session.output_uri.clone();
-                let app_state_clone = config.app_state.clone();
-                tokio::spawn(async move { let _ = finalize_and_save_recording(session, app_state_clone).await; });
+                // DÜZELTME: Bu görev session.rs'in cleanup'ında olduğu için burada sadece yanıt döneceğiz.
+                let _app_state_clone = config.app_state.clone(); 
                 let _ = responder.send(Ok(uri));
             } else { 
                 let _ = responder.send(Err("Kayıt bulunamadı".to_string())); 
@@ -102,13 +103,13 @@ pub async fn handle_command(
             playback_queue.clear(); 
         },
     }
-    false // Döngüye devam et
+    false 
 }
 
 // [GÖRÜNÜRLÜK DÜZELTMESİ] Fonksiyonu 'pub' yaparak dışarıya açtık.
 pub async fn start_playback(
     job: PlaybackJob, 
-    config: &super::session::RtpSessionConfig, 
+    config: &RtpSessionConfig, // ✅ TİP DÜZELTİLDİ
     socket: Arc<tokio::net::UdpSocket>,
     playback_finished_tx: mpsc::Sender<()>,
 ) {

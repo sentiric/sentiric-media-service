@@ -1,19 +1,17 @@
-// File: src/state.rs
-use std::collections::HashMap;
+// sentiric-media-service/src/state.rs
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::Mutex;
 use tracing::{debug, info};
 use aws_sdk_s3::Client as S3Client;
 use lapin::Channel as LapinChannel;
 use crate::audio::AudioCache;
-use crate::rtp::command::RtpCommand;
 use crate::config::AppConfig;
+use crate::rtp::session::RtpSession; // ✅ YENİ IMPORT
 
-type SessionChannels = Arc<Mutex<HashMap<u16, mpsc::Sender<RtpCommand>>>>;
-// YENİ: Call ID -> Port eşleşmesi
-type CallIdMap = Arc<Mutex<HashMap<String, u16>>>; 
-type PortsPool = Arc<Mutex<Vec<u16>>>;
+type ActiveSessions = Arc<Mutex<HashMap<u16, Arc<RtpSession>>>>;
+type PortsPool = Arc<Mutex<VecDeque<u16>>>; // DÜZELTİLDİ: VecDeque
 type QuarantinedPorts = Arc<Mutex<Vec<(u16, Instant)>>>;
 
 #[derive(Clone)]
@@ -41,8 +39,7 @@ impl AppState {
 
 #[derive(Clone)]
 pub struct PortManager {
-    session_channels: SessionChannels,
-    call_id_map: CallIdMap, // YENİ
+    active_sessions: ActiveSessions,
     available_ports: PortsPool,
     quarantined_ports: QuarantinedPorts,
     pub config: Arc<AppConfig>, 
@@ -50,11 +47,12 @@ pub struct PortManager {
 
 impl PortManager {
     pub fn new(rtp_port_min: u16, rtp_port_max: u16, config: Arc<AppConfig>) -> Self {
-        let initial_ports: Vec<u16> = (rtp_port_min..=rtp_port_max).filter(|&p| p % 2 == 0).collect();
+        let initial_vec: Vec<u16> = (rtp_port_min..=rtp_port_max).filter(|&p| p % 2 == 0).collect();
+        let initial_ports = VecDeque::from(initial_vec); 
+        
         info!(port_count = initial_ports.len(), "Kullanılabilir port havuzu oluşturuldu.");
         Self {
-            session_channels: Arc::new(Mutex::new(HashMap::new())),
-            call_id_map: Arc::new(Mutex::new(HashMap::new())), // YENİ
+            active_sessions: Arc::new(Mutex::new(HashMap::new())),
             available_ports: Arc::new(Mutex::new(initial_ports)),
             quarantined_ports: Arc::new(Mutex::new(Vec::new())),
             config,
@@ -62,34 +60,27 @@ impl PortManager {
     }
 
     pub async fn get_available_port(&self) -> Option<u16> {
-        self.available_ports.lock().await.pop()
+        self.available_ports.lock().await.pop_front()
     }
 
-    // GÜNCELLENDİ: Call ID opsiyonel olarak alınır ve saklanır
-    pub async fn add_session(&self, port: u16, tx: mpsc::Sender<RtpCommand>, call_id: Option<String>) {
-        self.session_channels.lock().await.insert(port, tx);
-        if let Some(cid) = call_id {
-            self.call_id_map.lock().await.insert(cid, port);
-        }
+    // Session nesnesini kaydet
+    pub async fn add_session(&self, port: u16, session: Arc<RtpSession>) {
+        self.active_sessions.lock().await.insert(port, session);
     }
     
-    pub async fn get_session_sender(&self, port: u16) -> Option<mpsc::Sender<RtpCommand>> {
-        self.session_channels.lock().await.get(&port).cloned()
+    // Port'a göre session'ı döndürür
+    pub async fn get_session(&self, port: u16) -> Option<Arc<RtpSession>> {
+        self.active_sessions.lock().await.get(&port).cloned()
     }
 
-    // YENİ: Call ID'den portu bul
-    pub async fn get_port_by_call_id(&self, call_id: &str) -> Option<u16> {
-        self.call_id_map.lock().await.get(call_id).cloned()
+    // CallID'ye göre session'ı bul
+    pub async fn get_session_by_call_id(&self, call_id: &str) -> Option<Arc<RtpSession>> {
+        let sessions = self.active_sessions.lock().await;
+        sessions.values().find(|s| s.call_id == call_id).cloned()
     }
     
     pub async fn remove_session(&self, port: u16) {
-        self.session_channels.lock().await.remove(&port);
-        // Call ID map'ten silmek için ters arama yapmak verimsiz olabilir, 
-        // ancak port sayısı sınırlı olduğu için kabul edilebilir.
-        // Veya session kapatılırken call_id'yi bilmemiz gerekirdi.
-        // Hızlı çözüm: Map'i iterate et.
-        let mut map = self.call_id_map.lock().await;
-        map.retain(|_, &mut v| v != port);
+        self.active_sessions.lock().await.remove(&port);
     }
 
     pub async fn quarantine_port(&self, port: u16) {
@@ -110,7 +101,7 @@ impl PortManager {
             quarantined_guard.retain(|(port, release_time)| {
                 if now.duration_since(*release_time) >= cooldown {
                     debug!(port, "Port karantinadan çıkarıldı ve havuza eklendi.");
-                    available_ports_guard.push(*port);
+                    available_ports_guard.push_back(*port); 
                     false
                 } else {
                     true
