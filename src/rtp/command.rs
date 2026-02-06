@@ -40,14 +40,22 @@ pub enum RtpCommand {
     },
     StopLiveAudioStream,
     
-    // --- YENİ EKLENEN: Canlı ses gönderme (gRPC -> Outbound) ---
+    // --- YENİ KRİTİK KOMUTLAR ---
+    // Media Stream'den gelen ham ses verisi (gRPC -> Outbound)
     StartOutboundStream {
-        // gRPC servisinden gelen ham ses verisi (genellikle 16kHz PCM veya Opus)
-        // Her bir Vec<u8> bir ses parçasını temsil eder.
         audio_rx: mpsc::Receiver<Vec<u8>>,
     },
     StopOutboundStream,
-
+    
+    // PlayAudio'dan gelen adresi kaydetme (Latching'i tetiklemek için)
+    SetTargetAddress {
+        target: SocketAddr,
+    },
+    // Hole Punching'i manuel tetikleme
+    HolePunching {
+        target_addr: SocketAddr,
+    },
+    
     // Kalıcı kayıt işlemleri
     StartPermanentRecording(RecordingSession),
     StopPermanentRecording {

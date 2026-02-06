@@ -2,38 +2,25 @@
 
 use crate::rtp::codecs;
 use sentiric_rtp_core::{CodecFactory, CodecType, Encoder};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+// use std::sync::Arc; // Kaldırıldı
+// use tokio::sync::Mutex; // Kaldırıldı
 use tracing::info;
 
 /// RTP oturumu içindeki ses işleme durumunu yöneten yapı.
-/// Resampling, Encoding ve Buffering işlemlerini kapsüller.
 pub struct AudioProcessor {
-    // Giden ses (TTS -> RTP) için Encoder
     encoder: Box<dyn Encoder>,
-    // Giden ses (TTS -> RTP) için Resampler (24k -> 8k)
-    resampler: Arc<Mutex<codecs::StatefulResampler>>,
-    // Encode edilmeyi bekleyen ham ses parçaları
-    accumulator: Vec<f32>,
-    // Şu an aktif olan Codec
+    accumulator: Vec<i16>,
     current_codec: CodecType,
-    // Resampler'ın beklediği frame boyutu (Cache)
-    resampler_frame_size: usize,
 }
 
 impl AudioProcessor {
     pub fn new(initial_codec: CodecType) -> Self {
-        let resampler = codecs::StatefulResampler::new(24000, 8000).expect("Resampler başlatılamadı");
-        let frame_size = resampler.input_frame_size;
-        
         info!("🎛️ Audio Processor Başlatıldı. Initial Codec: {:?}", initial_codec);
 
         Self {
             encoder: CodecFactory::create_encoder(initial_codec),
-            resampler: Arc::new(Mutex::new(resampler)),
             accumulator: Vec::with_capacity(4096),
             current_codec: initial_codec,
-            resampler_frame_size: frame_size,
         }
     }
 
@@ -46,40 +33,36 @@ impl AudioProcessor {
         }
     }
 
-    /// Gelen ham ses verisini (bytes) biriktirir.
+    /// Gelen ham 16kHz ses verisini (bytes) biriktirir ve i16'ya çevirir.
     pub fn push_data(&mut self, data: Vec<u8>) {
-        let samples_f32: Vec<f32> = data.chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+        let samples_i16: Vec<i16> = data.chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
-        self.accumulator.extend(samples_f32);
+        self.accumulator.extend(samples_i16);
     }
 
-    /// Birikmiş veriyi işleyip RTP payload'larına dönüştürür.
-    /// Eğer yeterli veri yoksa None döner.
+    /// Birikmiş 16kHz veriyi işleyip RTP payload'larına dönüştürür.
     pub async fn process_frame(&mut self) -> Option<Vec<Vec<u8>>> {
-        if self.accumulator.len() < self.resampler_frame_size {
+        const SAMPLES_PER_FRAME_16K: usize = 320; 
+
+        if self.accumulator.len() < SAMPLES_PER_FRAME_16K {
             return None;
         }
 
-        let frame_in: Vec<f32> = self.accumulator.drain(0..self.resampler_frame_size).collect();
+        let frame_in: Vec<i16> = self.accumulator.drain(0..SAMPLES_PER_FRAME_16K).collect();
         
-        let resampler_clone = self.resampler.clone();
+        let encoder_type = self.current_codec;
         
-        let samples_8k_f32 = tokio::task::spawn_blocking(move || {
-            let mut guard = resampler_clone.blocking_lock();
-            guard.process(&frame_in)
+        let encoded_payload = tokio::task::spawn_blocking(move || {
+             // 16kHz PCM -> hedef kodeğe çevirme
+             codecs::encode_lpcm16_to_rtp(&frame_in, codecs::AudioCodec::from_rtp_payload_type(encoder_type as u8).unwrap())
         }).await.ok().and_then(|r| r.ok())?;
 
-        let samples_8k_i16: Vec<i16> = samples_8k_f32.into_iter()
-            .map(|s| (s * 32767.0).clamp(-32768.0, 32767.0) as i16)
-            .collect();
-        
-        let encoded = self.encoder.encode(&samples_8k_i16);
-        
-        let payload_size = if self.current_codec == CodecType::G729 { 20 } else { 160 };
+        // G.729 paket boyutu 10 byte, G.711 paket boyutu 160 byte'dır.
+        let payload_size = if self.current_codec == CodecType::G729 { 10 } else { 160 };
         
         let mut packets = Vec::new();
-        for chunk in encoded.chunks(payload_size) {
+        for chunk in encoded_payload.chunks(payload_size) {
             packets.push(chunk.to_vec());
         }
 

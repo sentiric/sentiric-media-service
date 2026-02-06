@@ -2,7 +2,7 @@
 
 use crate::rtp::codecs::{self, AudioCodec};
 use anyhow::Result;
-use rand::Rng;
+// use rand::Rng; // Kaldırıldı
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -35,21 +35,22 @@ pub async fn send_rtp_stream(
         warn!("⚠️ Hedef adres geçersiz. Paketler atlanacak.");
     }
 
-    let ssrc: u32 = rand::thread_rng().gen();
-    let mut sequence_number: u16 = rand::thread_rng().gen();
-    let mut timestamp: u32 = rand::thread_rng().gen();
+    let ssrc: u32 = rand::Rng::gen(&mut rand::thread_rng());
+    let mut sequence_number: u16 = rand::Rng::gen(&mut rand::thread_rng());
+    let mut timestamp: u32 = rand::Rng::gen(&mut rand::thread_rng());
     
-    // YENİ: G.729 paket boyutu 20 byte, G.711 paket boyutu 160 byte'dır.
-    let packet_chunk_size = if target_codec == AudioCodec::G729 { 20 } else { 160 };
-    let samples_per_packet = 160;
+    // Payload tipini codec'ten al
+    let rtp_payload_type = target_codec.to_payload_type();
 
-    let rtp_payload_type = match target_codec {
-        AudioCodec::Pcmu => 0,
-        AudioCodec::Pcma => 8,
-        AudioCodec::G729 => 18, 
+    // Paket Boyutu ve Zaman Damgası Artışı
+    let (packet_chunk_size, samples_per_packet) = match target_codec {
+        AudioCodec::G729 => (10, 80),
+        AudioCodec::G722 => (160, 320), // 16khz * 20ms = 320 samples
+        _ => (160, 160), // G.711 için 8k * 20ms = 160 samples
     };
 
-    // --- CORE: HİBRİT PACER BAŞLAT ---
+
+    // CORE: HİBRİT PACER BAŞLAT
     let mut pacer = Pacer::new(Duration::from_millis(20));
 
     for chunk in encoded_payload.chunks(packet_chunk_size) {
@@ -58,7 +59,7 @@ pub async fn send_rtp_stream(
             return Ok(());
         }
 
-        // --- KRİTİK: BEKLE VE HİZALA ---
+        // KRİTİK: BEKLE VE HİZALA
         pacer.wait();
 
         if is_valid_target {

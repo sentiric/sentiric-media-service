@@ -7,7 +7,7 @@ use crate::rtp::session::RtpSession;
 use crate::state::AppState;
 use crate::utils::extract_uri_scheme;
 use anyhow::Result;
-use hound::{SampleFormat, WavSpec};
+use hound::{WavSpec, SampleFormat}; // SampleFormat eklendi
 use metrics::{counter, gauge};
 use sentiric_contracts::sentiric::media::v1::{
     media_service_server::MediaService, AllocatePortRequest, AllocatePortResponse,
@@ -16,6 +16,7 @@ use sentiric_contracts::sentiric::media::v1::{
     StopRecordingRequest, StopRecordingResponse,
     StreamAudioToCallRequest, StreamAudioToCallResponse,
 };
+use std::net::SocketAddr; // Eklendi
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
@@ -35,7 +36,6 @@ impl MyMediaService {
     }
 
     // Yardımcı Fonksiyon: Metadata'dan Trace ID okuma
-    // B2BUA veya Agent servisinden gelen 'x-trace-id' header'ını okur.
     fn extract_trace_id<T>(req: &Request<T>) -> String {
         req.metadata().get("x-trace-id")
             .and_then(|v| v.to_str().ok())
@@ -94,7 +94,7 @@ impl MediaService for MyMediaService {
             if !first_msg.audio_chunk.is_empty() {
                 let size = first_msg.audio_chunk.len();
                 total_bytes += size;
-                info!("🎤 [gRPC-IN] İlk Paket: {} bytes", size);
+                debug!("🎤 [gRPC-IN] İlk Paket: {} bytes", size);
                 if audio_tx.send(first_msg.audio_chunk).await.is_err() {
                     warn!("⚠️ [gRPC-IN] RTP Kanalı kapalı (Early Drop)");
                     return; 
@@ -116,6 +116,7 @@ impl MediaService for MyMediaService {
             }
             
             info!("✅ [gRPC-IN] Stream Bitti. Toplam: {} bytes", total_bytes);
+            // Sadece ACK olarak boş bir success dön
             let _ = response_tx.send(Ok(StreamAudioToCallResponse {
                 success: true,
                 error_message: "".to_string(),
@@ -137,7 +138,6 @@ impl MediaService for MyMediaService {
         
         let call_id = request.get_ref().call_id.clone();
         
-        // [GÜNCELLEME] KRİTİK LOG: İsteğin servise ulaştığını kanıtlayan satır.
         info!(call_id = %call_id, trace_id = %trace_id, "📥 [GRPC] Port Allocate İsteği Alındı. İşleniyor...");
 
         // Port Alma Mantığı
@@ -147,6 +147,7 @@ impl MediaService for MyMediaService {
                 ServiceError::PortPoolExhausted
             })?;
 
+        // UDP Soketini oluştur
         match UdpSocket::bind(format!("{}:{}", self.config.rtp_host, port_to_try)).await {
             Ok(socket) => {
                 info!(port = port_to_try, "✅ UDP Portu Bağlandı. Oturum başlatılıyor.");
@@ -155,6 +156,16 @@ impl MediaService for MyMediaService {
                 // Yeni RtpSession oluştur ve yöneticiye ekle
                 let session = RtpSession::new(call_id.clone(), port_to_try, Arc::new(socket), self.app_state.clone());
                 self.app_state.port_manager.add_session(port_to_try, session).await;
+                
+                // Hole Punching'i port tahsisi anında tetikle
+                let session_ref = self.app_state.port_manager.get_session(port_to_try).await.unwrap();
+                let public_ip = self.config.rtp_host.clone();
+                tokio::spawn(async move {
+                    // Kendi Public IP'sine boş paket atarak NAT delme
+                    let _ = session_ref.send_command(RtpCommand::HolePunching { 
+                        target_addr: format!("{}:{}", public_ip, port_to_try).parse().unwrap() 
+                    }).await;
+                });
                 
                 return Ok(Response::new(AllocatePortResponse {
                     rtp_port: port_to_try as u32,
@@ -178,6 +189,7 @@ impl MediaService for MyMediaService {
         let port = request.into_inner().rtp_port as u16;
         if let Some(session) = self.app_state.port_manager.get_session(port).await {
             info!(port, "Oturum sonlandırma sinyali gönderiliyor.");
+            // Session run döngüsünün kendisi, shutdown komutunu aldıktan sonra cleanup'ı yapacaktır.
             if session.send_command(RtpCommand::Shutdown).await.is_err() {
                 warn!(port, "Shutdown komutu gönderilemedi (kanal kapalı).");
             }
@@ -220,9 +232,15 @@ impl MediaService for MyMediaService {
         let session = self.app_state.port_manager.get_session(rtp_port).await
             .ok_or_else(|| ServiceError::SessionNotFound { port: rtp_port })?;
         
-        let target_addr = req.rtp_target_addr.parse().map_err(|e| {
+        let target_addr: SocketAddr = req.rtp_target_addr.parse().map_err(|e| {
             ServiceError::InvalidTargetAddress { addr: req.rtp_target_addr, source: e }
         })?;
+        
+        // KRİTİK DÜZELTME: Session'a target adresi kaydetme komutu gönderilir.
+        // Bu, session'ın latching için bu adresi 'aday' olarak kullanmasını sağlar.
+        session.send_command(RtpCommand::SetTargetAddress { target: target_addr }).await
+            .map_err(|_| Status::internal("RTP oturumuna SetTargetAddress komutu gönderilemedi"))?;
+
 
         let (responder_tx, responder_rx) = oneshot::channel();
         let command = RtpCommand::PlayAudioUri {
@@ -295,6 +313,7 @@ impl MediaService for MyMediaService {
             
         let session_data = RecordingSession {
             output_uri: req_ref.output_uri.clone(),
+            // Sabit 8000Hz (dar bant telefoni) kaydı için spec
             spec: WavSpec { channels: 1, sample_rate: 8000, bits_per_sample: 16, sample_format: SampleFormat::Int },
             mixed_samples_16khz: Vec::new(),
             call_id: req_ref.call_id.clone(),

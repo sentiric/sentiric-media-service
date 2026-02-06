@@ -2,15 +2,17 @@
 
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::codecs::AudioCodec;
-use crate::rtp::command::{AudioFrame, RtpCommand};
-use crate::rtp::handlers::{self, PlaybackJob};
+use crate::rtp::command::{RtpCommand, AudioFrame};
+use crate::rtp::handlers::{self}; 
+use crate::rtp::session_handlers::{PlaybackJob}; 
 use crate::rtp::processing::AudioProcessor;
 use crate::rtp::session_utils::finalize_and_save_recording;
 use crate::state::AppState;
 use crate::config::AppConfig;
+use crate::utils::send_hole_punch_packet; // Bu import kalmalı, HolePunching komutunda kullanılıyor.
 
 use metrics::gauge;
-use rand::Rng;
+// use rand::Rng; // KALDIRILDI
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -21,15 +23,14 @@ use tokio::time::{Duration, Instant};
 use tracing::{info, instrument, warn, error};
 
 use sentiric_rtp_core::{
-    CodecType, RtpHeader, RtpPacket, RtcpPacket, RtpEndpoint, Pacer, // ✅ RtcpPacket importu eklendi
+    CodecType, RtpHeader, RtpPacket, RtcpPacket, RtpEndpoint, Pacer, 
 };
-// DÜZELTME: Bu import kaldırıldı. Artık RtpSessionConfig'e ihtiyacımız yok.
-// use crate::rtp::command::RecordingSession; 
+
 
 const MAX_SILENCE_PACKETS: usize = 50;
 const RTCP_INTERVAL: Duration = Duration::from_secs(5);
 
-/// RTP Oturumunun Dışarıdan Okunabilir Konfigürasyonu
+// RTP Oturumunun Dışarıdan Okunabilir Konfigürasyonu
 #[derive(Clone)]
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -46,7 +47,7 @@ pub struct RtpSession {
 }
 
 impl RtpSession {
-    /// Yeni bir RtpSession oluşturur ve arka plan görevini başlatır.
+
     pub fn new(call_id: String, port: u16, socket: Arc<tokio::net::UdpSocket>, app_state: AppState) -> Arc<Self> {
         let (command_tx, command_rx) = mpsc::channel(app_state.port_manager.config.rtp_command_channel_buffer);
         
@@ -57,13 +58,11 @@ impl RtpSession {
             app_state: app_state.clone(),
         });
         
-        // Arka plan görevini (ana döngü) başlat
         tokio::spawn(Self::run(session.clone(), socket, command_rx));
         
         session
     }
 
-    /// Bu oturuma bir komut gönderir.
     pub async fn send_command(&self, command: RtpCommand) -> Result<(), mpsc::error::SendError<RtpCommand>> {
         self.command_tx.send(command).await
     }
@@ -76,13 +75,14 @@ impl RtpSession {
         let live_stream_sender = Arc::new(Mutex::new(None));
         let permanent_recording_session = Arc::new(Mutex::new(None));
         let endpoint = RtpEndpoint::new(None);
-        let mut pre_latch_target: Option<SocketAddr> = None;
+        
+        let mut known_target_addr: Option<SocketAddr> = None; 
 
-        let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
+        let mut audio_processor = AudioProcessor::new(CodecType::PCMU); 
 
-        let rtp_ssrc: u32 = rand::thread_rng().gen();
-        let mut rtp_seq: u16 = rand::thread_rng().gen();
-        let mut rtp_ts: u32 = rand::thread_rng().gen();
+        let rtp_ssrc: u32 = rand::Rng::gen(&mut rand::thread_rng());
+        let mut rtp_seq: u16 = rand::Rng::gen(&mut rand::thread_rng());
+        let mut rtp_ts: u32 = rand::Rng::gen(&mut rand::thread_rng());
 
         let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
         let mut is_streaming_active = false;
@@ -122,9 +122,8 @@ impl RtpSession {
             pacer.wait();
 
             if last_rtcp.elapsed() >= RTCP_INTERVAL {
-                if let Some(mut target_addr) = endpoint.get_target().or(pre_latch_target) {
-                    target_addr.set_port(target_addr.port() + 1);
-                    // ✅ Hata Düzeltildi: RtcpPacket çağrılıyor.
+                if let Some(mut target_addr) = endpoint.get_target().or(known_target_addr) {
+                    target_addr.set_port(target_addr.port().wrapping_add(1));
                     let rtcp = RtcpPacket::new_sender_report(rtp_ssrc);
                     let _ = socket.send_to(&rtcp.to_bytes(), target_addr).await;
                 }
@@ -137,7 +136,7 @@ impl RtpSession {
             }
 
             if is_streaming_active {
-                if let Some(target_addr) = endpoint.get_target().or(pre_latch_target) {
+                if let Some(target_addr) = endpoint.get_target().or(known_target_addr) {
                     if let Some(rx) = &mut outbound_stream_rx {
                         while let Ok(chunk) = rx.try_recv() {
                             audio_processor.push_data(chunk);
@@ -160,17 +159,38 @@ impl RtpSession {
                 biased;
                 Some(command) = command_rx.recv() => {
                     last_activity = Instant::now();
-                    if handlers::handle_command(
-                        command, self.port, &live_stream_sender, &permanent_recording_session, 
-                        &mut outbound_stream_rx, &mut is_streaming_active, &mut playback_queue, 
-                        &mut is_playing_file, &get_session_config(), &socket, &playback_finished_tx,
-                        &mut pre_latch_target, &endpoint
-                    ).await { break; }
+                    
+                    match command {
+                        // Yeni komutlar burada işlenir
+                        RtpCommand::SetTargetAddress { target } => {
+                            info!("🎯 Hedef Adres Güncellendi: {}", target);
+                            known_target_addr = Some(target);
+                        },
+                        RtpCommand::HolePunching { target_addr } => {
+                            info!("🔨 Hole Punching Başlatıldı -> {}", target_addr);
+                            crate::utils::send_hole_punch_packet(&socket, target_addr, 5).await;
+                        },
+                        // Diğer komutlar session_handlers'a devredilir
+                        _ => {
+                            if handlers::handle_command(
+                                command, self.port, &live_stream_sender, &permanent_recording_session, 
+                                &mut outbound_stream_rx, &mut is_streaming_active, &mut playback_queue, 
+                                &mut is_playing_file, &get_session_config(), &socket, &playback_finished_tx,
+                                &mut known_target_addr, &endpoint
+                            ).await { break; }
+                        }
+                    }
                 },
                 
                 Some((packet_data, remote_addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
-                    if endpoint.latch(remote_addr) { pre_latch_target = None; }
+                    
+                    if endpoint.latch(remote_addr) { 
+                        info!("🔒 RTP Latch Başarılı. RTP hedefi güncellendi: {}", remote_addr);
+                        // Latching olduğunda, bilinen hedef adresi de güncellenir
+                        known_target_addr = Some(remote_addr); 
+                    }
+                    
                     let pt = packet_data[1] & 0x7F;
                     let payload = &packet_data[12..];
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(pt) {
@@ -227,11 +247,12 @@ async fn send_rtp_packet(
     ssrc: u32, 
     codec: CodecType
 ) {
-    let pt = match codec { CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, _ => 0 };
+    let pt = match codec { CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, CodecType::G722 => 9 };
     let header = RtpHeader::new(pt, *seq, *ts, ssrc);
     let packet = RtpPacket { header, payload };
     let _ = socket.send_to(&packet.to_bytes(), target).await;
     
     *seq = seq.wrapping_add(1);
-    *ts = ts.wrapping_add(160);
+    let ts_increment = if codec.sample_rate() == 16000 { 320 } else { 160 }; 
+    *ts = ts.wrapping_add(ts_increment);
 }
