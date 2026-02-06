@@ -1,11 +1,9 @@
 // sentiric-media-service/src/rtp/codecs.rs
-
 use anyhow::{anyhow, Result};
-use sentiric_rtp_core::{CodecFactory, CodecType}; // CodecFactory import'u kaldırıldı
+use sentiric_rtp_core::{CodecFactory, CodecType};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
-
     Pcmu,
     Pcma,
     G729,
@@ -42,21 +40,20 @@ impl AudioCodec {
     }
 }
 
-
-// --- MERKEZİ DECODE MANTIĞI (pub eklendi) ---
-
-pub fn decode_rtp_to_lpcm16(
-    payload: &[u8],
-    codec: AudioCodec,
-) -> Result<Vec<i16>> {
+pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16>> {
     let mut decoder = CodecFactory::create_decoder(codec.to_core_type());
-    
     let samples = decoder.decode(payload);
-
+    
+    // G.711 ve G.729 (8kHz) -> AI standardı (16kHz) upsampling
     if codec.to_core_type().sample_rate() == 8000 {
-        Ok(upsample_8k_to_16k(samples))
+        let mut samples_16k = Vec::with_capacity(samples.len() * 2);
+        for s in samples {
+            samples_16k.push(s); 
+            samples_16k.push(s);
+        }
+        Ok(samples_16k)
     } else {
-        Ok(samples)
+        Ok(samples) // G.722 zaten 16kHz
     }
 }
 
@@ -66,16 +63,6 @@ pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Re
     } else {
         samples_16k.to_vec()
     };
-
     let mut encoder = CodecFactory::create_encoder(target_codec.to_core_type());
     Ok(encoder.encode(&samples_to_encode))
-}
-
-fn upsample_8k_to_16k(samples_8k: Vec<i16>) -> Vec<i16> {
-    let mut samples_16k = Vec::with_capacity(samples_8k.len() * 2);
-    for s in samples_8k {
-        samples_16k.push(s); 
-        samples_16k.push(s);
-    }
-    samples_16k
 }
