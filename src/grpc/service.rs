@@ -1,7 +1,7 @@
 // sentiric-media-service/src/grpc/service.rs
 
 use crate::grpc::error::ServiceError;
-use crate::metrics::GRPC_REQUESTS_TOTAL;
+use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
 use crate::rtp::command::{RtpCommand, RecordingSession};
 use crate::rtp::session::RtpSession;
 use crate::state::AppState;
@@ -22,8 +22,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{debug, field, info, instrument, warn, Span};
-use crate::metrics::ACTIVE_SESSIONS;
+use tracing::{debug, error, field, info, instrument, warn, Span};
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -34,8 +33,14 @@ impl MyMediaService {
     pub fn new(config: Arc<crate::config::AppConfig>, app_state: AppState) -> Self {
         Self { app_state, config }
     }
+
+    // Yardımcı Fonksiyon: Metadata'dan Trace ID okuma
+    // B2BUA veya Agent servisinden gelen 'x-trace-id' header'ını okur.
     fn extract_trace_id<T>(req: &Request<T>) -> String {
-        req.metadata().get("x-trace-id").and_then(|v| v.to_str().ok()).unwrap_or("unknown").to_string()
+        req.metadata().get("x-trace-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_string()
     }
 }
 
@@ -57,6 +62,7 @@ impl MediaService for MyMediaService {
 
         let mut in_stream = request.into_inner();
         
+        // İlk mesajı alıp Call ID'yi öğren
         let first_msg = match in_stream.message().await {
             Ok(Some(msg)) => msg,
             Ok(None) => return Err(Status::invalid_argument("Stream boş")),
@@ -68,19 +74,23 @@ impl MediaService for MyMediaService {
             return Err(Status::invalid_argument("Call ID boş olamaz"));
         }
 
+        // İlgili RTP oturumunu bul
         let session = self.app_state.port_manager.get_session_by_call_id(&call_id).await
             .ok_or_else(|| Status::not_found(format!("Call ID {} için aktif RTP oturumu bulunamadı", call_id)))?;
 
         let (audio_tx, audio_rx) = mpsc::channel(8192);
         
+        // Oturuma outbound stream başlatma komutu gönder
         session.send_command(RtpCommand::StartOutboundStream { audio_rx }).await
             .map_err(|_| Status::internal("RTP oturumuna komut gönderilemedi"))?;
 
         let (response_tx, response_rx) = mpsc::channel(1);
         
+        // Gelen stream verilerini işle
         tokio::spawn(async move {
             let mut total_bytes = 0;
 
+            // İlk mesajdaki veriyi gönder (varsa)
             if !first_msg.audio_chunk.is_empty() {
                 let size = first_msg.audio_chunk.len();
                 total_bytes += size;
@@ -91,6 +101,7 @@ impl MediaService for MyMediaService {
                 }
             }
 
+            // Stream'in geri kalanını oku
             while let Ok(Some(msg)) = in_stream.message().await {
                 if !msg.audio_chunk.is_empty() {
                     let size = msg.audio_chunk.len();
@@ -114,7 +125,7 @@ impl MediaService for MyMediaService {
         Ok(Response::new(Box::pin(ReceiverStream::new(response_rx))))
     }
     
-    #[instrument(skip_all, fields(service = "media-service", call_id = %request.get_ref().call_id, trace_id))]
+    #[instrument(skip(self, request), fields(service = "media-service", call_id = %request.get_ref().call_id, trace_id))]
     async fn allocate_port(
         &self,
         request: Request<AllocatePortRequest>,
@@ -123,17 +134,25 @@ impl MediaService for MyMediaService {
         Span::current().record("trace_id", &trace_id);
 
         counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
+        
         let call_id = request.get_ref().call_id.clone();
-        info!(call_id = %call_id, "Port tahsis isteği alındı.");
+        
+        // [GÜNCELLEME] KRİTİK LOG: İsteğin servise ulaştığını kanıtlayan satır.
+        info!(call_id = %call_id, trace_id = %trace_id, "📥 [GRPC] Port Allocate İsteği Alındı. İşleniyor...");
 
-        // DÜZELTME: MAX_RETRIES kaldırıldı. PortManager kendi mekanizmasını kullanıyor.
-        let port_to_try = self.app_state.port_manager.get_available_port().await.ok_or_else(|| ServiceError::PortPoolExhausted)?;
+        // Port Alma Mantığı
+        let port_to_try = self.app_state.port_manager.get_available_port().await
+            .ok_or_else(|| {
+                error!("❌ Port havuzu tükendi!");
+                ServiceError::PortPoolExhausted
+            })?;
 
         match UdpSocket::bind(format!("{}:{}", self.config.rtp_host, port_to_try)).await {
             Ok(socket) => {
-                info!(port = port_to_try, "Port bağlandı, RtpSession nesnesi oluşturuluyor.");
+                info!(port = port_to_try, "✅ UDP Portu Bağlandı. Oturum başlatılıyor.");
                 gauge!(ACTIVE_SESSIONS).increment(1.0);
 
+                // Yeni RtpSession oluştur ve yöneticiye ekle
                 let session = RtpSession::new(call_id.clone(), port_to_try, Arc::new(socket), self.app_state.clone());
                 self.app_state.port_manager.add_session(port_to_try, session).await;
                 
@@ -142,7 +161,7 @@ impl MediaService for MyMediaService {
                 }));
             }
             Err(e) => {
-                warn!(port = port_to_try, error = %e, "Porta bağlanılamadı, karantinaya alınıyor.");
+                warn!(port = port_to_try, error = %e, "⚠️ Porta bağlanılamadı (Bind Error), karantinaya alınıyor.");
                 self.app_state.port_manager.quarantine_port(port_to_try).await;
                 return Err(ServiceError::PortPoolExhausted.into());
             }
