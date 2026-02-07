@@ -47,7 +47,7 @@ impl RtpSession {
 
     fn parse_rtp_packet(data: Vec<u8>) -> Option<RtpPacket> {
         if data.len() < 12 { 
-            warn!("⚠️ [RTP] Packet too short: {} bytes", data.len());
+            // warn!("⚠️ [RTP] Packet too short: {} bytes", data.len());
             return None; 
         }
         
@@ -100,11 +100,13 @@ impl RtpSession {
 
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(512);
         
+        // UDP Okuyucu
         tokio::spawn({
             let socket = socket.clone();
             async move {
                 let mut buf = [0u8; 2048];
                 while let Ok((len, addr)) = socket.recv_from(&mut buf).await {
+                    // Min RTP Header 12 byte
                     if len >= 12 { 
                         let _ = rtp_packet_tx.send((buf[..len].to_vec(), addr)).await; 
                     }
@@ -123,6 +125,7 @@ impl RtpSession {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(5));
 
         loop {
+            // PACER: Her 20ms'de bir uyanır.
             pacer.wait();
 
             if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
@@ -175,11 +178,13 @@ impl RtpSession {
             }
             warmer_counter = warmer_counter.wrapping_add(1);
 
-            // --- 3. EVENT HANDLING (SELECT) ---
             tokio::select! {
                 // İstatistik Loglama
                 _ = log_ticker.tick() => {
-                    debug!("📊 Stats: Rx: {} | Tx: {} | Drops: {} | Active: {}", packets_received, packets_sent, jitter_drops, !endpoint.get_target().is_none());
+                    // Sadece aktifse logla
+                    if packets_received > 0 || packets_sent > 0 {
+                        debug!("📊 Stats: Rx: {} | Tx: {} | Drops: {} | Active: {}", packets_received, packets_sent, jitter_drops, !endpoint.get_target().is_none());
+                    }
                 },
 
                 // Gelen Paketler (Option döner)
@@ -190,13 +195,19 @@ impl RtpSession {
 
                     if endpoint.latch(addr) { info!("🔒 [LATCH] Internal media established with {}", addr); }
 
+                    // [ECHO FIX] Jitter Buffer'ı BYPASS et!
+                    // Echo testi "Sesi aldım, hemen geri yolluyorum" mantığıdır. Buffer gecikme yaratır.
                     if loopback_mode_active {
                         let mut resp = data.clone();
-                        if resp.len() > 12 {
+                        // SSRC'yi sunucunun SSRC'si ile değiştir ki "dönen" paket olduğu anlaşılsın
+                        // (İlk 12 byte header'dır. SSRC 8. byte'tan başlar)
+                        if resp.len() >= 12 {
                              resp[8..12].copy_from_slice(&rtp_ssrc.to_be_bytes());
                         }
+                        // Geri gönder
                         let _ = socket.send_to(&resp, addr).await;
                     } else {
+                        // Normal akış: Jitter Buffer'a koy
                         if let Some(packet) = Self::parse_rtp_packet(data) {
                             jitter_buffer.push(packet);
                         } else {
@@ -205,7 +216,7 @@ impl RtpSession {
                     }
                 },
                 
-                // Komutlar (Option döner)
+                // Komutlar
                 Some(cmd) = command_rx.recv() => {
                      last_activity = Instant::now();
                      match cmd {
@@ -221,7 +232,7 @@ impl RtpSession {
                     }
                 },
 
-                // Playback Bitti Sinyali (Option döner)
+                // Playback Bitti Sinyali
                 Some(_) = finished_rx.recv() => {
                      is_playing = false;
                      if let Some(next) = playback_queue.pop_front() {
