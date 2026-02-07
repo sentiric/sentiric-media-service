@@ -13,7 +13,7 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::Instant;
+use tokio::time::{Duration, Instant};
 use tracing::{info, instrument, warn, debug};
 
 use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer};
@@ -75,9 +75,7 @@ impl RtpSession {
             async move {
                 let mut buf = [0u8; 2048];
                 while let Ok((len, addr)) = socket.recv_from(&mut buf).await {
-                    if len >= 12 {
-                        let _ = rtp_packet_tx.send((buf[..len].to_vec(), addr)).await;
-                    }
+                    if len >= 12 { let _ = rtp_packet_tx.send((buf[..len].to_vec(), addr)).await; }
                 }
             }
         });
@@ -89,22 +87,24 @@ impl RtpSession {
             pacer.wait();
 
             if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
-                warn!("Oturum zaman aşımı. Port {} serbest bırakılıyor.", self.port);
+                warn!("Session timeout. Reclaiming port {}", self.port);
                 break;
             }
 
-            // [MİMARİ DÜZELTME - v2.3]: SMART WARMER
-            // Sadece Echo modu aktifse VE son 100ms içinde gerçek bir paket gelmediyse 'Warmer' gönder.
-            // Bu, 'tık tık' sesine sebep olan paket çakışmasını (collision) engeller.
-            if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(100) {
-                if let Some(target) = endpoint.get_target().or(known_target) {
-                    let silence_payload = vec![0x80; 160];
-                    Self::send_raw_rtp(&socket, target, silence_payload, &mut rtp_seq, &mut rtp_ts, rtp_ssrc, CodecType::PCMU).await;
+            // [PROACTIVE WARMER]: Tüneli her 500ms'de bir sars (SBC kilitlenmesi için)
+            if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(100) && warmer_counter % 25 == 0 {
+                if let Some(target) = known_target {
+                    // Sentiric Signature: Valid RTP header but empty/comfort-noise payload
+                    let header = RtpHeader::new(0, rtp_seq, rtp_ts, rtp_ssrc);
+                    let packet = RtpPacket { header, payload: vec![0x80; 160] };
+                    let _ = socket.send_to(&packet.to_bytes(), target).await;
+                    rtp_seq = rtp_seq.wrapping_add(1);
+                    rtp_ts = rtp_ts.wrapping_add(160);
                 }
             }
             warmer_counter = warmer_counter.wrapping_add(1);
 
-            // Outbound AI Audio (Normal diyalog modu)
+            // TTS / Media Outbound
             if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
@@ -124,11 +124,9 @@ impl RtpSession {
                     match cmd {
                         RtpCommand::EnableEchoTest => {
                             loopback_mode_active = true;
-                            info!("🔊 Echo Reflex Modu Aktif.");
+                            info!("🔊 Sentiric Echo Plus ENABLED.");
                         },
-                        RtpCommand::DisableEchoTest => {
-                            loopback_mode_active = false;
-                        },
+                        RtpCommand::DisableEchoTest => loopback_mode_active = false,
                         RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
                         _ => {
                             if session_handlers::handle_command(
@@ -142,19 +140,22 @@ impl RtpSession {
                 },
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
-                    last_rtp_received = Instant::now(); // Paket geldi, warmer sussun.
+                    last_rtp_received = Instant::now();
 
                     if endpoint.latch(addr) { 
-                        info!("🔒 [LATCH] Medya tüneli bağlandı: {}", addr);
+                        info!("🔒 [LATCH] Tunnel Established with {}", addr);
                     }
 
-                    // [ECHO REFLEX]: Gelen paketi aynen geri yolla
                     if loopback_mode_active {
-                        let _ = socket.send_to(&data, addr).await;
+                        // [ECHO PLUS]: Gelen paketi yansıt ama SSRC ve SEQ'i düzenle (RFC 3550 uyumu)
+                        let mut resp_pkt = data.clone();
+                        // Kendi SSRC'mizi basarak NAT firewall'lardan pürüzsüz geçiş sağla
+                        resp_pkt[8..12].copy_from_slice(&rtp_ssrc.to_be_bytes());
+                        let _ = socket.send_to(&resp_pkt, addr).await;
                         continue; 
                     }
 
-                    // AI Pipeline (STT/Recording)
+                    // STT/Recording...
                     let pt = data[1] & 0x7F;
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(pt) {
                         audio_processor.update_codec(codec.to_core_type());
@@ -196,6 +197,3 @@ impl RtpSession {
         *ts = ts.wrapping_add(160);
     }
 }
-
-// KRİTİK: Importlar
-use std::time::Duration;
