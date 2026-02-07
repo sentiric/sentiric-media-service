@@ -6,8 +6,7 @@ use super::session::RtpSessionConfig;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot, Mutex};
-// use tokio::task; // [CLEANUP] Unused import kaldırıldı.
-use tracing::error;
+use tracing::{info, error, debug};
 
 #[derive(Debug)]
 pub struct PlaybackJob {
@@ -17,13 +16,14 @@ pub struct PlaybackJob {
     pub responder: Option<oneshot::Sender<anyhow::Result<()>>>,
 }
 
-/// Gelen komutları işleyen ve oturum durumunu güncelleyen ana mantık.
+/// handle_command: RtpSession döngüsü içinden gelen komutları işler.
+/// Geri dönüş değeri 'true' ise oturum sonlandırılmalıdır.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     command: RtpCommand,
     _rtp_port: u16,
-    _live_stream_sender: &Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>>,
-    _recording_session: &Arc<Mutex<Option<RecordingSession>>>,
+    live_stream_sender: &Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>>,
+    recording_session: &Arc<Mutex<Option<RecordingSession>>>,
     outbound_stream_rx: &mut Option<mpsc::Receiver<Vec<u8>>>,
     is_streaming: &mut bool,
     playback_queue: &mut std::collections::VecDeque<PlaybackJob>,
@@ -38,26 +38,72 @@ pub async fn handle_command(
         RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
             let target = endpoint.get_target().or(*known_target).unwrap_or(candidate_target_addr);
             let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
+            
             if !*is_playing {
                 *is_playing = true;
                 start_playback(job, config, socket.clone(), finished_tx.clone()).await;
             } else { 
+                debug!("⌛ Playback busy, queuing job: {}", job.audio_uri);
                 playback_queue.push_back(job); 
             }
         },
+
         RtpCommand::StartOutboundStream { audio_rx } => {
+            info!("🎤 Starting Outbound Audio Injector (TTS Pipeline)");
             *outbound_stream_rx = Some(audio_rx);
             *is_streaming = true;
         },
+
         RtpCommand::StopOutboundStream => { 
+            info!("🔇 Stopping Outbound Audio Injector");
             *is_streaming = false; 
+            *outbound_stream_rx = None;
         },
-        RtpCommand::Shutdown => return true,
-        _ => {}
+
+        RtpCommand::StartLiveAudioStream { stream_sender, .. } => {
+            info!("👂 Starting Inbound Live Stream (STT Pipeline)");
+            let mut guard = live_stream_sender.lock().await;
+            *guard = Some(stream_sender);
+        },
+
+        RtpCommand::StopLiveAudioStream => {
+            let mut guard = live_stream_sender.lock().await;
+            *guard = None;
+        },
+
+        RtpCommand::StartPermanentRecording(session) => {
+            info!(uri = %session.output_uri, "⏺️  Call recording started.");
+            let mut guard = recording_session.lock().await;
+            *guard = Some(session);
+        },
+
+        RtpCommand::StopPermanentRecording { responder } => {
+            info!("💾 Finalizing call recording...");
+            let mut guard = recording_session.lock().await;
+            if let Some(session) = guard.take() {
+                let app_state = config.app_state.clone();
+                tokio::spawn(async move {
+                    let res = crate::rtp::session_utils::finalize_and_save_recording(session, app_state).await;
+                    let _ = responder.send(res.map(|_| "Success".to_string()).map_err(|e| e.to_string()));
+                });
+            } else {
+                let _ = responder.send(Err("No active recording session found".to_string()));
+            }
+        },
+
+        RtpCommand::Shutdown => {
+            info!("🛑 Shutdown command received for session.");
+            return true;
+        },
+
+        _ => {
+            debug!("ℹ️ Command handled in session root or ignored: {:?}", command);
+        }
     }
     false
 }
 
+/// start_playback: Bir anonsun çalınma sürecini başlatır.
 pub async fn start_playback(
     job: PlaybackJob, 
     config: &RtpSessionConfig, 
@@ -65,7 +111,9 @@ pub async fn start_playback(
     finished_tx: mpsc::Sender<()>
 ) {
     let responder = job.responder;
-    match load_and_resample_samples_from_uri(&job.audio_uri, &config.app_state, &config.app_config).await {
+    let uri = job.audio_uri.clone();
+
+    match load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
         Ok(samples) => {
             tokio::spawn(async move {
                 let res = send_rtp_stream(
@@ -73,8 +121,9 @@ pub async fn start_playback(
                     job.target_addr, 
                     &samples, 
                     job.cancellation_token, 
-                    crate::rtp::codecs::AudioCodec::Pcmu
+                    crate::rtp::codecs::AudioCodec::Pcmu // Default outgoing diagnostic codec
                 ).await;
+                
                 if let Some(tx) = responder { 
                     let _ = tx.send(res.map_err(anyhow::Error::from)); 
                 }
@@ -82,7 +131,7 @@ pub async fn start_playback(
             });
         },
         Err(e) => {
-            error!("Playback error: {}", e);
+            error!("❌ Playback initialization error for {}: {}", uri, e);
             if let Some(tx) = responder { 
                 let _ = tx.send(Err(anyhow::anyhow!(e.to_string()))); 
             }
