@@ -2,7 +2,8 @@
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
-use crate::rtp::handlers; // Artık handle_command ve PlaybackJob buradan doğru şekilde gelir
+use crate::rtp::handlers; 
+use crate::rtp::session_handlers::{self, PlaybackJob}; 
 use crate::rtp::processing::AudioProcessor;
 use crate::rtp::session_utils::finalize_and_save_recording;
 use crate::state::AppState;
@@ -14,9 +15,11 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, instrument};
+use tracing::{info, instrument, error};
 
-use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer};
+use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtcpPacket, RtpEndpoint, Pacer};
+
+const RTCP_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct RtpSessionConfig {
@@ -46,7 +49,7 @@ impl RtpSession {
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!("🎧 Session Started (System Health Optimal)");
+        info!("🎧 Session Started (Thread-Safe Mode)");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
@@ -55,18 +58,19 @@ impl RtpSession {
         let mut known_target: Option<SocketAddr> = None;
         let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
 
-        let rtp_ssrc: u32 = rand::Rng::gen(&mut rand::thread_rng());
-        let mut rtp_seq: u16 = rand::Rng::gen(&mut rand::thread_rng());
-        let mut rtp_ts: u32 = rand::Rng::gen(&mut rand::thread_rng());
+        // KRİTİK DÜZELTME: ThreadRng nesnesi saklanmıyor, rastgele sayılar hemen üretiliyor.
+        let rtp_ssrc: u32 = rand::random();
+        let mut rtp_seq: u16 = rand::random();
+        let mut rtp_ts: u32 = rand::random();
 
         let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
         let mut is_streaming = false;
-        let mut playback_queue: VecDeque<handlers::PlaybackJob> = VecDeque::new();
+        let mut playback_queue: VecDeque<PlaybackJob> = VecDeque::new();
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
 
-        let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel(256);
-        let _reader = tokio::spawn({
+        let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(256);
+        let reader_handle = tokio::spawn({
             let socket = socket.clone();
             async move {
                 let mut buf = [0u8; 2048];
@@ -76,13 +80,23 @@ impl RtpSession {
             }
         });
 
-        let mut pacer = Pacer::new(Duration::from_millis(20));
+        let mut pacer = Pacer::new(20); 
         let mut last_activity = Instant::now();
+        let mut last_rtcp = Instant::now();
 
         loop {
             pacer.wait();
 
             if last_activity.elapsed() > Duration::from_secs(60) { break; }
+
+            if last_rtcp.elapsed() >= RTCP_INTERVAL {
+                if let Some(mut target) = endpoint.get_target().or(known_target) {
+                    target.set_port(target.port().wrapping_add(1));
+                    let rtcp = RtcpPacket::new_sender_report(rtp_ssrc);
+                    let _ = socket.send_to(&rtcp.to_bytes(), target).await;
+                }
+                last_rtcp = Instant::now();
+            }
 
             if is_streaming {
                 if let Some(target) = endpoint.get_target().or(known_target) {
@@ -90,9 +104,7 @@ impl RtpSession {
                         while let Ok(chunk) = rx.try_recv() { audio_processor.push_data(chunk); }
                     }
                     if let Some(packets) = audio_processor.process_frame().await {
-                        for p in packets { 
-                            send_rtp_packet(&socket, target, p, &mut rtp_seq, &mut rtp_ts, rtp_ssrc, audio_processor.get_current_codec()).await; 
-                        }
+                        for p in packets { send_rtp_packet(&socket, target, p, &mut rtp_seq, &mut rtp_ts, rtp_ssrc, audio_processor.get_current_codec()).await; }
                     }
                 }
             }
@@ -103,21 +115,7 @@ impl RtpSession {
                     match cmd {
                         RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
                         RtpCommand::HolePunching { target_addr } => { let _ = socket.send_to(&[0u8; 160], target_addr).await; },
-                        _ => if handlers::handle_command(
-                            cmd, 
-                            self.port, 
-                            &live_stream_sender, 
-                            &recording_session, 
-                            &mut outbound_stream_rx, 
-                            &mut is_streaming, 
-                            &mut playback_queue, 
-                            &mut is_playing, 
-                            &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, 
-                            &socket, 
-                            &finished_tx, 
-                            &mut known_target, 
-                            &endpoint
-                        ).await { break; }
+                        _ => if session_handlers::handle_command(cmd, self.port, &live_stream_sender, &recording_session, &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, &mut is_playing, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, &socket, &finished_tx, &mut known_target, &endpoint).await { break; }
                     }
                 },
                 Some((data, addr)) = rtp_packet_rx.recv() => {
@@ -146,8 +144,12 @@ impl RtpSession {
             }
         }
 
+        reader_handle.abort();
+        endpoint.reset(); 
         if let Some(rec) = recording_session.lock().await.take() {
-            let _ = finalize_and_save_recording(rec, self.app_state.clone()).await;
+            if let Err(e) = finalize_and_save_recording(rec, self.app_state.clone()).await {
+                error!("Recording save failed: {}", e);
+            }
         }
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
@@ -156,12 +158,7 @@ impl RtpSession {
 }
 
 async fn send_rtp_packet(socket: &tokio::net::UdpSocket, target: SocketAddr, payload: Vec<u8>, seq: &mut u16, ts: &mut u32, ssrc: u32, codec: CodecType) {
-    let pt = match codec { 
-        CodecType::PCMU => 0, 
-        CodecType::PCMA => 8, 
-        CodecType::G729 => 18, 
-        CodecType::G722 => 9 
-    };
+    let pt = match codec { CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, CodecType::G722 => 9 };
     let header = RtpHeader::new(pt, *seq, *ts, ssrc);
     let packet = RtpPacket { header, payload };
     let _ = socket.send_to(&packet.to_bytes(), target).await;
