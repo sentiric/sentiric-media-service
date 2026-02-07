@@ -13,8 +13,8 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::Instant; // Duration kaldırıldı (unused_import fix)
-use tracing::{info, instrument, warn}; // error kaldırıldı (unused_import fix)
+use tokio::time::Instant;
+use tracing::{info, instrument, warn, debug};
 
 use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer};
 
@@ -46,7 +46,7 @@ impl RtpSession {
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!("🎧 RTP Core Engine v1.3.0 Session Active");
+        info!("🎧 Iron Core RTP v1.3.0 Engine Active");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
@@ -55,8 +55,9 @@ impl RtpSession {
         let mut known_target: Option<SocketAddr> = None;
         let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
         
-        // --- NATIVE PBX STATE ---
         let mut loopback_mode_active = false;
+        // [FIX]: Ambiguous numeric type hatası u64 tip zorlaması ile giderildi.
+        let mut warmer_counter: u64 = 0; 
 
         let rtp_ssrc: u32 = rand::random();
         let mut rtp_seq: u16 = rand::random();
@@ -69,7 +70,7 @@ impl RtpSession {
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
 
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(512);
-        let reader_handle = tokio::spawn({
+        let _reader_handle = tokio::spawn({
             let socket = socket.clone();
             async move {
                 let mut buf = [0u8; 2048];
@@ -86,10 +87,20 @@ impl RtpSession {
             pacer.wait();
 
             if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
-                warn!("Session inactivity timeout.");
+                warn!("Session inactivity timeout. Releasing port {}", self.port);
                 break;
             }
 
+            // [PROACTIVE HOLE PUNCHING]: Periyodik warmer paketleri (Her 500ms bir: 25 * 20ms)
+            if loopback_mode_active && !endpoint.get_target().is_some() && warmer_counter % 25 == 0 {
+                if let Some(target) = known_target {
+                    debug!("🔥 Sending proactive warmer to ensure internal path");
+                    let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target).await;
+                }
+            }
+            warmer_counter = warmer_counter.wrapping_add(1);
+
+            // Outbound processing (TTS/AI/Media)
             if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
@@ -107,7 +118,6 @@ impl RtpSession {
                 Some(cmd) = command_rx.recv() => {
                     last_activity = Instant::now();
                     match cmd {
-                        // --- NATIVE REFLEX HANDLING ---
                         RtpCommand::EnableEchoTest => {
                             loopback_mode_active = true;
                             info!("🔊 Native Echo Loopback (Reflex) ENABLED");
@@ -116,8 +126,12 @@ impl RtpSession {
                             loopback_mode_active = false;
                             info!("🔈 Native Echo Loopback (Reflex) DISABLED");
                         },
-                        RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
-                        RtpCommand::HolePunching { target_addr } => { let _ = socket.send_to(&[0u8; 160], target_addr).await; },
+                        RtpCommand::SetTargetAddress { target } => { 
+                            known_target = Some(target); 
+                        },
+                        RtpCommand::HolePunching { target_addr } => { 
+                            let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target_addr).await; 
+                        },
                         _ => {
                             if session_handlers::handle_command(
                                 cmd, self.port, &live_stream_sender, &recording_session, 
@@ -130,13 +144,15 @@ impl RtpSession {
                 },
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
-                    if endpoint.latch(addr) { known_target = Some(addr); }
+                    
+                    // [v1.3.0 LATCH]: Dynamic binding
+                    if endpoint.latch(addr) { 
+                        debug!("🔒 [LATCH] Established with {}", addr);
+                    }
 
-                    // --- [MİMARİ KRİTİK]: NATIVE ECHO REFLEX (Short-Circuit) ---
                     if loopback_mode_active {
-                        // Gelen ham RTP paketini milisaniye içinde geri yolla (Zero-CPU decoding)
                         let _ = socket.send_to(&data, addr).await;
-                        continue; // AI katmanını tamamen bypass et
+                        continue; 
                     }
 
                     let pt = data[1] & 0x7F;
@@ -162,7 +178,7 @@ impl RtpSession {
             }
         }
 
-        reader_handle.abort();
+        // Cleanup
         endpoint.reset(); 
         if let Some(rec) = recording_session.lock().await.take() {
             let _ = finalize_and_save_recording(rec, self.app_state.clone()).await;
@@ -170,6 +186,7 @@ impl RtpSession {
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
+        info!("♻️ Session cleanup complete for port {}", self.port);
     }
 
     async fn send_raw_rtp(socket: &tokio::net::UdpSocket, target: SocketAddr, payload: Vec<u8>, seq: &mut u16, ts: &mut u32, ssrc: u32, codec: CodecType) {
