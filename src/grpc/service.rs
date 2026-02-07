@@ -118,11 +118,17 @@ impl MediaService for MyMediaService {
         let rtp_port = req.server_rtp_port as u16;
         let session = self.app_state.port_manager.get_session(rtp_port).await.ok_or(ServiceError::SessionNotFound { port: rtp_port })?;
 
+        // [MİMARİ DÜZELTME]: Hedef adresi her zaman kaydetmeliyiz. 
+        // control:// olsa bile 'rtp_target_addr' bilgisini session'a geçmeliyiz ki 'warmer' çalışsın.
+        let target_addr: SocketAddr = req.rtp_target_addr.parse().map_err(|e| ServiceError::InvalidTargetAddress { addr: req.rtp_target_addr, source: e })?;
+        let _ = session.send_command(RtpCommand::SetTargetAddress { target: target_addr }).await;
+
+        // --- NATIVE PBX CONTROL SCHEME ---
         if req.audio_uri.starts_with("control://") {
             let cmd = req.audio_uri.strip_prefix("control://").unwrap();
             match cmd {
                 "enable_echo" => {
-                    info!("🔊 Native Echo Reflex ENABLED");
+                    info!("🔊 Native Echo Reflex ENABLED for address: {}", target_addr);
                     let _ = session.send_command(RtpCommand::EnableEchoTest).await;
                     return Ok(Response::new(PlayAudioResponse { success: true, message: "Echo On".into() }));
                 }
@@ -134,9 +140,7 @@ impl MediaService for MyMediaService {
             }
         }
 
-        let target_addr: SocketAddr = req.rtp_target_addr.parse().map_err(|e| ServiceError::InvalidTargetAddress { addr: req.rtp_target_addr, source: e })?;
-        let _ = session.send_command(RtpCommand::SetTargetAddress { target: target_addr }).await;
-
+        // Normal dosya çalma mantığı devam ediyor...
         let (tx, rx) = oneshot::channel();
         session.send_command(RtpCommand::PlayAudioUri {
             audio_uri: req.audio_uri,
