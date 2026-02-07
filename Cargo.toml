@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-media-service"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2021"
 
 [dependencies]
@@ -47,4 +47,4 @@ rustls = { version = "0.23", features = ["ring"] }
 # --- THE IRON CORE (UPGRADED) ---
 sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.0" }
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.1" }
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.14.0" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.15.0" }

@@ -24,7 +24,7 @@ pub struct RecordingSession {
 
 #[derive(Debug)]
 pub enum RtpCommand {
-    // Media Playback
+    // --- Media Playback ---
     PlayAudioUri {
         audio_uri: String,
         candidate_target_addr: SocketAddr,
@@ -33,28 +33,29 @@ pub enum RtpCommand {
     },
     StopAudio,
     
-    // Inbound Audio Monitoring (AI pipeline)
+    // --- Inbound Audio Monitoring (AI pipeline Feed) ---
     StartLiveAudioStream {
         stream_sender: mpsc::Sender<Result<AudioFrame, Status>>,
         target_sample_rate: Option<u32>,
     },
     StopLiveAudioStream,
     
-    // Outbound Audio Injector (TTS pipeline)
+    // --- Outbound Audio Injector (TTS pipeline Feed) ---
     StartOutboundStream {
         audio_rx: mpsc::Receiver<Vec<u8>>,
     },
     StopOutboundStream,
 
-    // --- TELECOM PBX COMMANDS ---
-    EnableEchoTest,   // Refleks modu: Gelen her şeyi geri yolla
+    // --- TELECOM NATIVE DIAGNOSTICS ---
+    // AI Pipeline'ı tamamen bypass eden Native Echo (Refleks) modu.
+    EnableEchoTest,   
     DisableEchoTest,
 
-    // Latching / Hole Punching
+    // --- Latching & Network ---
     SetTargetAddress { target: SocketAddr },
     HolePunching { target_addr: SocketAddr },
     
-    // Recording
+    // --- Recording ---
     StartPermanentRecording(RecordingSession),
     StopPermanentRecording { responder: oneshot::Sender<Result<String, String>> },
     
