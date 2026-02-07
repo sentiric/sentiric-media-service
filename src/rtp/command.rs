@@ -24,7 +24,7 @@ pub struct RecordingSession {
 
 #[derive(Debug)]
 pub enum RtpCommand {
-    // Mevcut dosya/URI oynatma komutu
+    // Media Playback
     PlayAudioUri {
         audio_uri: String,
         candidate_target_addr: SocketAddr,
@@ -33,34 +33,30 @@ pub enum RtpCommand {
     },
     StopAudio,
     
-    // Canlı ses dinleme (Inbound -> gRPC)
+    // Inbound Audio Monitoring (AI pipeline)
     StartLiveAudioStream {
         stream_sender: mpsc::Sender<Result<AudioFrame, Status>>,
         target_sample_rate: Option<u32>,
     },
     StopLiveAudioStream,
     
-    // --- YENİ KRİTİK KOMUTLAR ---
-    // Media Stream'den gelen ham ses verisi (gRPC -> Outbound)
+    // Outbound Audio Injector (TTS pipeline)
     StartOutboundStream {
         audio_rx: mpsc::Receiver<Vec<u8>>,
     },
     StopOutboundStream,
+
+    // --- TELECOM PBX COMMANDS ---
+    EnableEchoTest,   // Refleks modu: Gelen her şeyi geri yolla
+    DisableEchoTest,
+
+    // Latching / Hole Punching
+    SetTargetAddress { target: SocketAddr },
+    HolePunching { target_addr: SocketAddr },
     
-    // PlayAudio'dan gelen adresi kaydetme (Latching'i tetiklemek için)
-    SetTargetAddress {
-        target: SocketAddr,
-    },
-    // Hole Punching'i manuel tetikleme
-    HolePunching {
-        target_addr: SocketAddr,
-    },
-    
-    // Kalıcı kayıt işlemleri
+    // Recording
     StartPermanentRecording(RecordingSession),
-    StopPermanentRecording {
-        responder: oneshot::Sender<Result<String, String>>,
-    },
+    StopPermanentRecording { responder: oneshot::Sender<Result<String, String>> },
     
     Shutdown,
 }

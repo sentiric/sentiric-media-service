@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-media-service"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2021"
 
 [dependencies]
@@ -13,7 +13,7 @@ futures = "0.3"
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 tokio-util = { version = "0.7", features = ["full"] }
 
-# Observability & Logging
+# Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 metrics = "0.22"
@@ -44,7 +44,7 @@ aws-credential-types = "1.1"
 lapin = "2.3"
 rustls = { version = "0.23", features = ["ring"] }
 
-# Sentiric Core Libraries
+# --- THE IRON CORE (UPGRADED) ---
 sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.0" }
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.1" }
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.7" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.14.0" }

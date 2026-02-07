@@ -1,9 +1,9 @@
 // sentiric-media-service/src/rtp/session.rs
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::codecs::AudioCodec;
-use crate::rtp::command::{RtpCommand, AudioFrame}; 
-// [CLEANUP] redundant handlers ve PlaybackJob importları kaldırıldı.
-use crate::rtp::session_handlers::{self}; 
+use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
+use crate::rtp::handlers; 
+use crate::rtp::session_handlers::{self, PlaybackJob}; 
 use crate::rtp::processing::AudioProcessor;
 use crate::rtp::session_utils::finalize_and_save_recording;
 use crate::state::AppState;
@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn, error};
 
 use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer};
 
@@ -35,7 +35,7 @@ pub struct RtpSession {
 
 impl RtpSession {
     pub fn new(call_id: String, port: u16, socket: Arc<tokio::net::UdpSocket>, app_state: AppState) -> Arc<Self> {
-        let (command_tx, command_rx) = mpsc::channel(32);
+        let (command_tx, command_rx) = mpsc::channel(64);
         let session = Arc::new(Self { call_id, port, command_tx, app_state: app_state.clone() });
         tokio::spawn(Self::run(session.clone(), socket, command_rx));
         session
@@ -47,14 +47,17 @@ impl RtpSession {
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!("🎧 Session Started (Perfect Clean State)");
+        info!("🎧 Session Runloop Active");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
-        let recording_session: Arc<Mutex<Option<crate::rtp::command::RecordingSession>>> = Arc::new(Mutex::new(None));
+        let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
         
         let endpoint = RtpEndpoint::new(None);
         let mut known_target: Option<SocketAddr> = None;
         let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
+        
+        // PBX States
+        let mut loopback_mode_active = false;
 
         let rtp_ssrc: u32 = rand::random();
         let mut rtp_seq: u16 = rand::random();
@@ -62,8 +65,7 @@ impl RtpSession {
 
         let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
         let mut is_streaming = false;
-        // Tip tanımı modül üzerinden yapılarak netleştirildi
-        let mut playback_queue: VecDeque<session_handlers::PlaybackJob> = VecDeque::new();
+        let mut playback_queue: VecDeque<PlaybackJob> = VecDeque::new();
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
 
@@ -78,15 +80,18 @@ impl RtpSession {
             }
         });
 
-        let mut pacer = Pacer::new(20);
+        let mut pacer = Pacer::new(20); 
         let mut last_activity = Instant::now();
 
         loop {
             pacer.wait();
 
-            if last_activity.elapsed() > Duration::from_secs(60) { break; }
+            if last_activity.elapsed() > Duration::from_secs(60) {
+                warn!("Session timeout due to inactivity.");
+                break;
+            }
 
-            if is_streaming {
+            if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
                         while let Ok(chunk) = rx.try_recv() { audio_processor.push_data(chunk); }
@@ -101,6 +106,14 @@ impl RtpSession {
                 Some(cmd) = command_rx.recv() => {
                     last_activity = Instant::now();
                     match cmd {
+                        RtpCommand::EnableEchoTest => {
+                            loopback_mode_active = true;
+                            info!("🔊 Native Echo Test (Loopback) ENABLED");
+                        },
+                        RtpCommand::DisableEchoTest => {
+                            loopback_mode_active = false;
+                            info!("🔈 Native Echo Test (Loopback) DISABLED");
+                        },
                         RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
                         RtpCommand::HolePunching { target_addr } => { let _ = socket.send_to(&[0u8; 160], target_addr).await; },
                         _ => if session_handlers::handle_command(cmd, self.port, &live_stream_sender, &recording_session, &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, &mut is_playing, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, &socket, &finished_tx, &mut known_target, &endpoint).await { break; }
@@ -109,6 +122,15 @@ impl RtpSession {
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
                     if endpoint.latch(addr) { known_target = Some(addr); }
+
+                    // --- TELECOM NATIVE REFLEX: ECHO TEST ---
+                    if loopback_mode_active {
+                        // Milisaniye hassasiyetinde geri dönüş
+                        let _ = socket.send_to(&data, addr).await;
+                        continue; // AI Pipeline'ı tamamen bypass et
+                    }
+                    // ----------------------------------------
+
                     let pt = data[1] & 0x7F;
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(pt) {
                         audio_processor.update_codec(codec.to_core_type());
