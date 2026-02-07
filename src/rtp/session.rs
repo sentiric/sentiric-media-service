@@ -46,7 +46,7 @@ impl RtpSession {
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!("🎧 Iron Core RTP v1.3.0 Engine Active");
+        info!("🎧 Iron Core RTP v1.3.0 Active");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
@@ -56,7 +56,6 @@ impl RtpSession {
         let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
         
         let mut loopback_mode_active = false;
-        // [FIX]: Ambiguous numeric type hatası u64 tip zorlaması ile giderildi.
         let mut warmer_counter: u64 = 0; 
 
         let rtp_ssrc: u32 = rand::random();
@@ -91,16 +90,19 @@ impl RtpSession {
                 break;
             }
 
-            // [PROACTIVE HOLE PUNCHING]: Periyodik warmer paketleri (Her 500ms bir: 25 * 20ms)
-            if loopback_mode_active && !endpoint.get_target().is_some() && warmer_counter % 25 == 0 {
-                if let Some(target) = known_target {
-                    debug!("🔥 Sending proactive warmer to ensure internal path");
-                    let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target).await;
+            // [MİMARİ GÜNCELLEME]: ACTIVE ECHO HEARTBEAT
+            // Echo modu aktifse, karşı tarafa sürekli boşluk (silence) gönder.
+            // Bu, hem SBC tünelini açık tutar hem de 'Hole Punching'i garantiler.
+            if loopback_mode_active {
+                if let Some(target) = endpoint.get_target().or(known_target) {
+                    // Her 20ms'de bir 160 byte PCMU Sessizlik (0x80) gönder
+                    let silence_payload = vec![0x80; 160];
+                    Self::send_raw_rtp(&socket, target, silence_payload, &mut rtp_seq, &mut rtp_ts, rtp_ssrc, CodecType::PCMU).await;
                 }
             }
             warmer_counter = warmer_counter.wrapping_add(1);
 
-            // Outbound processing (TTS/AI/Media)
+            // TTS / Media Outbound
             if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
@@ -120,17 +122,15 @@ impl RtpSession {
                     match cmd {
                         RtpCommand::EnableEchoTest => {
                             loopback_mode_active = true;
-                            info!("🔊 Native Echo Loopback (Reflex) ENABLED");
+                            info!("🔊 Native Echo Loopback (Active Heartbeat) ENABLED");
                         },
                         RtpCommand::DisableEchoTest => {
                             loopback_mode_active = false;
-                            info!("🔈 Native Echo Loopback (Reflex) DISABLED");
+                            info!("🔈 Native Echo Loopback DISABLED");
                         },
-                        RtpCommand::SetTargetAddress { target } => { 
-                            known_target = Some(target); 
-                        },
+                        RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
                         RtpCommand::HolePunching { target_addr } => { 
-                            let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target_addr).await; 
+                            let _ = socket.send_to(&[0x80; 12], target_addr).await; 
                         },
                         _ => {
                             if session_handlers::handle_command(
@@ -144,17 +144,17 @@ impl RtpSession {
                 },
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
-                    
-                    // [v1.3.0 LATCH]: Dynamic binding
                     if endpoint.latch(addr) { 
-                        debug!("🔒 [LATCH] Established with {}", addr);
+                        debug!("🔒 [LATCH] Internal media path confirmed with {}", addr);
                     }
 
+                    // Echo Reflex: Gelen paketi olduğu gibi geri yansıt (Loopback)
                     if loopback_mode_active {
                         let _ = socket.send_to(&data, addr).await;
                         continue; 
                     }
 
+                    // Normal AI Processing
                     let pt = data[1] & 0x7F;
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(pt) {
                         audio_processor.update_codec(codec.to_core_type());
@@ -178,7 +178,6 @@ impl RtpSession {
             }
         }
 
-        // Cleanup
         endpoint.reset(); 
         if let Some(rec) = recording_session.lock().await.take() {
             let _ = finalize_and_save_recording(rec, self.app_state.clone()).await;
@@ -186,7 +185,7 @@ impl RtpSession {
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
-        info!("♻️ Session cleanup complete for port {}", self.port);
+        info!("♻️ Session cleanup complete.");
     }
 
     async fn send_raw_rtp(socket: &tokio::net::UdpSocket, target: SocketAddr, payload: Vec<u8>, seq: &mut u16, ts: &mut u32, ssrc: u32, codec: CodecType) {
@@ -195,6 +194,6 @@ impl RtpSession {
         let packet = RtpPacket { header, payload };
         let _ = socket.send_to(&packet.to_bytes(), target).await;
         *seq = seq.wrapping_add(1);
-        *ts = ts.wrapping_add(if codec.sample_rate() == 16000 { 320 } else { 160 });
+        *ts = ts.wrapping_add(160);
     }
 }
