@@ -3342,13 +3342,13 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "prost",
+ "prost-types",
  "rand 0.8.5",
- "ring",
  "rubato",
  "rustls 0.23.36",
- "rustls-pemfile",
  "sentiric-contracts",
  "sentiric-rtp-core",
+ "sentiric-sip-core",
  "serde_json",
  "symphonia",
  "tokio",
@@ -3369,6 +3369,17 @@ dependencies = [
  "cc",
  "glob",
  "libc",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "sentiric-sip-core"
+version = "1.4.1"
+source = "git+https://github.com/sentiric/sentiric-sip-core.git?tag=v1.4.1#2bca4f02f8c1bc9b38b80dccbd35fe747b0ace3c"
+dependencies = [
+ "once_cell",
+ "regex",
  "tokio",
  "tracing",
 ]
@@ -4039,6 +4050,7 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "prost",
+ "rustls-native-certs 0.7.3",
  "rustls-pemfile",
  "rustls-pki-types",
  "tokio",

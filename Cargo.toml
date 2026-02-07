@@ -5,48 +5,46 @@ edition = "2021"
 
 [dependencies]
 # Async & gRPC
-tokio = { version = "1.37.0", features = ["full"] }
-tonic = { version = "0.11.0", features = ["tls"] }
-prost = "0.12.3"
-futures = "0.3.30"
-tokio-stream = { version = "0.1.15", features = ["sync", "net"] }
-tokio-util = { version = "0.7.10", features = ["full"] }
+tokio = { version = "1.37", features = ["full"] }
+tonic = { version = "0.11", features = ["tls", "tls-roots"] }
+prost = "0.12"
+prost-types = "0.12"
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync", "net"] }
+tokio-util = { version = "0.7", features = ["full"] }
 
-# Observability
-tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json", "registry"] }
-metrics = "0.22.0"
-metrics-exporter-prometheus = "0.13.1"
-hyper = { version = "0.14.28", features = ["full"] }
+# Observability & Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+metrics = "0.22"
+metrics-exporter-prometheus = "0.13"
+hyper = { version = "0.14", features = ["full"] }
 
-# Config & Utils
-dotenvy = "0.15.7"
-anyhow = "1.0.82"
-rand = "0.8.5"
-chrono = "0.4.38"
-base64 = "0.22.1"
-uuid = { version = "1.8.0", features = ["v4"] }
-async-trait = "0.1.80"
-url = "2.5.0"
-serde_json = "1.0.117"
+# Config & Data
+dotenvy = "0.15"
+anyhow = "1.0"
+rand = "0.8"
+uuid = { version = "1.8", features = ["v4"] }
+chrono = { version = "0.4" }
+base64 = "0.22"
+serde_json = "1.0"
+url = "2.5"
+async-trait = "0.1"
 
-# Medya İşleme
-hound = "3.5.1"
-bytes = "1.6.0"
-rubato = "0.14.1" 
-symphonia = { version = "0.5.4", features = ["all-codecs", "all-formats"] }
+# Media Processing
+hound = "3.5"
+bytes = "1.6"
+rubato = "0.14" 
+symphonia = { version = "0.5", features = ["all-codecs", "all-formats"] }
 
-# Cloud & Queue
-aws-config = "1.1.8"
-aws-sdk-s3 = "1.20.0"
-aws-credential-types = "1.1.8"
-lapin = "2.3.1"
+# Infrastructure
+aws-config = "1.1"
+aws-sdk-s3 = "1.20"
+aws-credential-types = "1.1"
+lapin = "2.3"
+rustls = { version = "0.23", features = ["ring"] }
 
-# Security
-rustls = { version = "0.23.31", features = ["ring"] }
-rustls-pemfile = "2.1.2"
-ring = "0.17.8"
-
-# core
+# Sentiric Core Libraries
 sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.0" }
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.1" }
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.13.7" }

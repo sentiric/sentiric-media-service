@@ -1,4 +1,5 @@
 // sentiric-media-service/src/rtp/codecs.rs
+
 use anyhow::{anyhow, Result};
 use sentiric_rtp_core::{CodecFactory, CodecType};
 
@@ -17,7 +18,7 @@ impl AudioCodec {
             8 => Ok(AudioCodec::Pcma),
             9 => Ok(AudioCodec::G722),
             18 => Ok(AudioCodec::G729),
-            _ => Err(anyhow!("Desteklenmeyen RTP payload tipi: {}", payload_type)),
+            _ => Err(anyhow!("Unsupported RTP payload type: {}", payload_type)),
         }
     }
 
@@ -44,7 +45,7 @@ pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16
     let mut decoder = CodecFactory::create_decoder(codec.to_core_type());
     let samples = decoder.decode(payload);
     
-    // G.711 ve G.729 (8kHz) -> AI standardı (16kHz) upsampling
+    // Upsampling 8k -> 16k
     if codec.to_core_type().sample_rate() == 8000 {
         let mut samples_16k = Vec::with_capacity(samples.len() * 2);
         for s in samples {
@@ -53,7 +54,7 @@ pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16
         }
         Ok(samples_16k)
     } else {
-        Ok(samples) // G.722 zaten 16kHz
+        Ok(samples)
     }
 }
 

@@ -1,9 +1,9 @@
 // sentiric-media-service/src/rtp/session.rs
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::codecs::AudioCodec;
-use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
-use crate::rtp::handlers; 
-use crate::rtp::session_handlers::{self, PlaybackJob}; 
+use crate::rtp::command::{RtpCommand, AudioFrame}; 
+// [CLEANUP] redundant handlers ve PlaybackJob importları kaldırıldı.
+use crate::rtp::session_handlers::{self}; 
 use crate::rtp::processing::AudioProcessor;
 use crate::rtp::session_utils::finalize_and_save_recording;
 use crate::state::AppState;
@@ -15,11 +15,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, instrument, error};
+use tracing::{info, instrument};
 
-use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtcpPacket, RtpEndpoint, Pacer};
-
-const RTCP_INTERVAL: Duration = Duration::from_secs(5);
+use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer};
 
 #[derive(Clone)]
 pub struct RtpSessionConfig {
@@ -49,23 +47,23 @@ impl RtpSession {
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!("🎧 Session Started (Thread-Safe Mode)");
+        info!("🎧 Session Started (Perfect Clean State)");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
-        let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
+        let recording_session: Arc<Mutex<Option<crate::rtp::command::RecordingSession>>> = Arc::new(Mutex::new(None));
         
         let endpoint = RtpEndpoint::new(None);
         let mut known_target: Option<SocketAddr> = None;
         let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
 
-        // KRİTİK DÜZELTME: ThreadRng nesnesi saklanmıyor, rastgele sayılar hemen üretiliyor.
         let rtp_ssrc: u32 = rand::random();
         let mut rtp_seq: u16 = rand::random();
         let mut rtp_ts: u32 = rand::random();
 
         let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
         let mut is_streaming = false;
-        let mut playback_queue: VecDeque<PlaybackJob> = VecDeque::new();
+        // Tip tanımı modül üzerinden yapılarak netleştirildi
+        let mut playback_queue: VecDeque<session_handlers::PlaybackJob> = VecDeque::new();
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
 
@@ -80,23 +78,13 @@ impl RtpSession {
             }
         });
 
-        let mut pacer = Pacer::new(20); 
+        let mut pacer = Pacer::new(20);
         let mut last_activity = Instant::now();
-        let mut last_rtcp = Instant::now();
 
         loop {
             pacer.wait();
 
             if last_activity.elapsed() > Duration::from_secs(60) { break; }
-
-            if last_rtcp.elapsed() >= RTCP_INTERVAL {
-                if let Some(mut target) = endpoint.get_target().or(known_target) {
-                    target.set_port(target.port().wrapping_add(1));
-                    let rtcp = RtcpPacket::new_sender_report(rtp_ssrc);
-                    let _ = socket.send_to(&rtcp.to_bytes(), target).await;
-                }
-                last_rtcp = Instant::now();
-            }
 
             if is_streaming {
                 if let Some(target) = endpoint.get_target().or(known_target) {
@@ -138,7 +126,7 @@ impl RtpSession {
                     is_playing = false;
                     if let Some(next) = playback_queue.pop_front() {
                         is_playing = true;
-                        handlers::start_playback(next, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, socket.clone(), finished_tx.clone()).await;
+                        session_handlers::start_playback(next, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, socket.clone(), finished_tx.clone()).await;
                     }
                 }
             }
@@ -147,9 +135,7 @@ impl RtpSession {
         reader_handle.abort();
         endpoint.reset(); 
         if let Some(rec) = recording_session.lock().await.take() {
-            if let Err(e) = finalize_and_save_recording(rec, self.app_state.clone()).await {
-                error!("Recording save failed: {}", e);
-            }
+            let _ = finalize_and_save_recording(rec, self.app_state.clone()).await;
         }
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;

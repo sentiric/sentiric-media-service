@@ -1,11 +1,12 @@
 // sentiric-media-service/src/rtp/processing.rs
+
 use crate::rtp::codecs;
 use sentiric_rtp_core::{CodecFactory, CodecType, Encoder};
 use tracing::info;
 
 pub struct AudioProcessor {
     encoder: Box<dyn Encoder>,
-    accumulator: Vec<i16>, // 16kHz LPCM buffer
+    accumulator: Vec<i16>, 
     current_codec: CodecType,
 }
 
@@ -34,7 +35,7 @@ impl AudioProcessor {
     }
 
     pub async fn process_frame(&mut self) -> Option<Vec<Vec<u8>>> {
-        const FRAME_SIZE_16K: usize = 320; // 20ms at 16kHz
+        const FRAME_SIZE_16K: usize = 320; // 20ms
         if self.accumulator.len() < FRAME_SIZE_16K { return None; }
 
         let frame_in: Vec<i16> = self.accumulator.drain(0..FRAME_SIZE_16K).collect();
@@ -48,7 +49,6 @@ impl AudioProcessor {
         Some(encoded.chunks(payload_size).map(|c| c.to_vec()).collect())
     }
 
-    // KRİTİK EKSİK: Getter metodu eklendi
     pub fn get_current_codec(&self) -> CodecType {
         self.current_codec
     }
