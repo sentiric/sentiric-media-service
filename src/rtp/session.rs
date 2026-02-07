@@ -56,7 +56,7 @@ impl RtpSession {
         let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
         
         let mut loopback_mode_active = false;
-        let mut warmer_counter: u64 = 0; 
+        let mut warmer_tick: u64 = 0; 
         let mut last_rtp_received = Instant::now();
 
         let rtp_ssrc: u32 = rand::random();
@@ -87,24 +87,21 @@ impl RtpSession {
             pacer.wait();
 
             if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
-                warn!("Session timeout. Reclaiming port {}", self.port);
                 break;
             }
 
-            // [PROACTIVE WARMER]: Tüneli her 500ms'de bir sars (SBC kilitlenmesi için)
-            if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(100) && warmer_counter % 25 == 0 {
-                if let Some(target) = known_target {
-                    // Sentiric Signature: Valid RTP header but empty/comfort-noise payload
-                    let header = RtpHeader::new(0, rtp_seq, rtp_ts, rtp_ssrc);
-                    let packet = RtpPacket { header, payload: vec![0x80; 160] };
-                    let _ = socket.send_to(&packet.to_bytes(), target).await;
-                    rtp_seq = rtp_seq.wrapping_add(1);
-                    rtp_ts = rtp_ts.wrapping_add(160);
+            // [v2.6 MİMARİ]: SMART WARMER / SIGNATURE HUM
+            // Sadece Echo modu aktifse VE dışarıdan ses gelmiyorsa (sessizlik anı) tüneli 'ısıt'.
+            if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(150) && warmer_tick % 25 == 0 {
+                if let Some(target) = endpoint.get_target().or(known_target) {
+                    // Sentiric Signature: Düşük frekanslı diagnostic tone (440Hz)
+                    let tone = generate_diag_sample(warmer_tick);
+                    Self::send_raw_rtp(&socket, target, vec![tone; 160], &mut rtp_seq, &mut rtp_ts, rtp_ssrc, CodecType::PCMU).await;
                 }
             }
-            warmer_counter = warmer_counter.wrapping_add(1);
+            warmer_tick = warmer_tick.wrapping_add(1);
 
-            // TTS / Media Outbound
+            // Normal Outbound (AI Response)
             if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
@@ -122,40 +119,29 @@ impl RtpSession {
                 Some(cmd) = command_rx.recv() => {
                     last_activity = Instant::now();
                     match cmd {
-                        RtpCommand::EnableEchoTest => {
-                            loopback_mode_active = true;
-                            info!("🔊 Sentiric Echo Plus ENABLED.");
-                        },
+                        RtpCommand::EnableEchoTest => { loopback_mode_active = true; info!("🔊 Sentiric Echo Plus ENABLED."); },
                         RtpCommand::DisableEchoTest => loopback_mode_active = false,
                         RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
                         _ => {
-                            if session_handlers::handle_command(
-                                cmd, self.port, &live_stream_sender, &recording_session, 
-                                &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, 
-                                &mut is_playing, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, 
-                                &socket, &finished_tx, &mut known_target, &endpoint, &self.call_id
-                            ).await { break; }
+                            if session_handlers::handle_command(cmd, self.port, &live_stream_sender, &recording_session, &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, &mut is_playing, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, &socket, &finished_tx, &mut known_target, &endpoint, &self.call_id).await { break; }
                         }
                     }
                 },
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
-                    last_rtp_received = Instant::now();
+                    last_rtp_received = Instant::now(); // [KRİTİK]: Warmer'ı sustur.
 
-                    if endpoint.latch(addr) { 
-                        info!("🔒 [LATCH] Tunnel Established with {}", addr);
-                    }
+                    if endpoint.latch(addr) { info!("🔒 [LATCH] Path Established: {}", addr); }
 
                     if loopback_mode_active {
-                        // [ECHO PLUS]: Gelen paketi yansıt ama SSRC ve SEQ'i düzenle (RFC 3550 uyumu)
-                        let mut resp_pkt = data.clone();
-                        // Kendi SSRC'mizi basarak NAT firewall'lardan pürüzsüz geçiş sağla
-                        resp_pkt[8..12].copy_from_slice(&rtp_ssrc.to_be_bytes());
-                        let _ = socket.send_to(&resp_pkt, addr).await;
+                        // [v2.6 FIX]: BIT-PERFECT REFLEX
+                        // Gelen paketi HİÇ değiştirmeden geri yolla (SSRC manipülasyonu kaldırıldı).
+                        // Bu, Baresip'in jitter buffer'ının bozulmasını engeller.
+                        let _ = socket.send_to(&data, addr).await;
                         continue; 
                     }
 
-                    // STT/Recording...
+                    // AI Processing (STT)
                     let pt = data[1] & 0x7F;
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(pt) {
                         audio_processor.update_codec(codec.to_core_type());
@@ -196,4 +182,10 @@ impl RtpSession {
         *seq = seq.wrapping_add(1);
         *ts = ts.wrapping_add(160);
     }
+}
+
+fn generate_diag_sample(tick: u64) -> u8 {
+    let freq = 440.0;
+    let t = tick as f32 / (8000.0 / freq);
+    if (t * 2.0 * std::f32::consts::PI).sin() > 0.0 { 0x80 } else { 0xD5 }
 }
