@@ -14,7 +14,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::Instant;
-use tracing::{info, instrument, warn, debug};
+use tracing::{info, instrument, warn}; // [v0.4.4 Fix]: removed unused debug
 
 use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer};
 
@@ -56,7 +56,7 @@ impl RtpSession {
         let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
         
         let mut loopback_mode_active = false;
-        let mut active_pulse_counter: u64 = 0; 
+        let mut warmer_counter: u64 = 0; 
 
         let rtp_ssrc: u32 = rand::random();
         let mut rtp_seq: u16 = rand::random();
@@ -68,7 +68,6 @@ impl RtpSession {
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
 
-        // RTP Packet Receiver Task
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(512);
         let _reader_handle = tokio::spawn({
             let socket = socket.clone();
@@ -84,26 +83,22 @@ impl RtpSession {
         let mut last_activity = Instant::now();
 
         loop {
-            pacer.wait(); // 20ms Precision Timing
+            pacer.wait();
 
-            // [PROD-REQUIREMENT]: Session Timeout (60s)
             if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
-                warn!("Oturum zaman aşımına uğradı, kaynaklar temizleniyor.");
+                warn!("Session inactivity timeout. Releasing port {}", self.port);
                 break;
             }
 
-            // [MİMARİ]: ACTIVE HEARTBEAT / COMFORT NOISE
-            // Eğer Echo modu aktifse, tüneli açık tutmak için 0x80 (PCMU Silence) gönder.
             if loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     let silence_payload = vec![0x80; 160];
                     Self::send_raw_rtp(&socket, target, silence_payload, &mut rtp_seq, &mut rtp_ts, rtp_ssrc, CodecType::PCMU).await;
-                    last_activity = Instant::now(); // Heartbeat aktivite sayılır
+                    last_activity = Instant::now();
                 }
             }
-            active_pulse_counter = active_pulse_counter.wrapping_add(1);
+            warmer_counter = warmer_counter.wrapping_add(1);
 
-            // Outbound Stream (TTS/Media)
             if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
@@ -138,15 +133,13 @@ impl RtpSession {
                                 cmd, self.port, &live_stream_sender, &recording_session, 
                                 &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, 
                                 &mut is_playing, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, 
-                                &socket, &finished_tx, &mut known_target, &endpoint
+                                &socket, &finished_tx, &mut known_target, &endpoint, &self.call_id
                             ).await { break; }
                         }
                     }
                 },
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
-                    
-                    // [v1.3.0 LATCH]: Gelen paketin adresine kilitlen (Symmetric RTP)
                     if endpoint.latch(addr) { 
                         info!("🔒 [LATCH] Media path confirmed with {}", addr);
                     }
@@ -156,7 +149,6 @@ impl RtpSession {
                         continue; 
                     }
 
-                    // Audio Processing for STT
                     let pt = data[1] & 0x7F;
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(pt) {
                         audio_processor.update_codec(codec.to_core_type());
@@ -174,13 +166,12 @@ impl RtpSession {
                     is_playing = false;
                     if let Some(next) = playback_queue.pop_front() {
                         is_playing = true;
-                        session_handlers::start_playback(next, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, socket.clone(), finished_tx.clone()).await;
+                        session_handlers::start_playback(next, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, socket.clone(), finished_tx.clone(), &self.call_id).await;
                     }
                 }
             }
         }
 
-        // Cleanup
         endpoint.reset(); 
         if let Some(rec) = recording_session.lock().await.take() {
             let _ = finalize_and_save_recording(rec, self.app_state.clone()).await;
@@ -188,7 +179,7 @@ impl RtpSession {
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
-        info!("♻️ Session cleanup complete for port {}", self.port);
+        info!("♻️ Session cleanup complete.");
     }
 
     async fn send_raw_rtp(socket: &tokio::net::UdpSocket, target: SocketAddr, payload: Vec<u8>, seq: &mut u16, ts: &mut u32, ssrc: u32, codec: CodecType) {
