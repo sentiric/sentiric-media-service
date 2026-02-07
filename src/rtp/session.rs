@@ -46,7 +46,7 @@ impl RtpSession {
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!("🎧 Iron Core RTP v1.3.1 Active");
+        info!("🎧 Iron Core RTP Engine v1.3.2 Active");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
@@ -56,21 +56,15 @@ impl RtpSession {
         let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
         
         let mut loopback_mode_active = false;
-        let mut warmer_tick: u64 = 0; 
+        let mut warmer_counter: u64 = 0; 
         let mut last_rtp_received = Instant::now();
 
         let rtp_ssrc: u32 = rand::random();
         let mut rtp_seq: u16 = rand::random();
         let mut rtp_ts: u32 = rand::random();
 
-        let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
-        let mut is_streaming = false;
-        let mut playback_queue: VecDeque<PlaybackJob> = VecDeque::new();
-        let mut is_playing = false;
-        let (finished_tx, mut finished_rx) = mpsc::channel(1);
-
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(512);
-        let _reader_handle = tokio::spawn({
+        tokio::spawn({
             let socket = socket.clone();
             async move {
                 let mut buf = [0u8; 2048];
@@ -79,6 +73,12 @@ impl RtpSession {
                 }
             }
         });
+
+        let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
+        let mut is_streaming = false;
+        let mut playback_queue: VecDeque<PlaybackJob> = VecDeque::new();
+        let mut is_playing = false;
+        let (finished_tx, mut finished_rx) = mpsc::channel(1);
 
         let mut pacer = Pacer::new(20); 
         let mut last_activity = Instant::now();
@@ -90,18 +90,16 @@ impl RtpSession {
                 break;
             }
 
-            // [v2.6 MİMARİ]: SMART WARMER / SIGNATURE HUM
-            // Sadece Echo modu aktifse VE dışarıdan ses gelmiyorsa (sessizlik anı) tüneli 'ısıt'.
-            if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(150) && warmer_tick % 25 == 0 {
+            // [WARMER & SIGNATURE]: Echo mode aktifse tüneli taze tut.
+            if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(150) && warmer_counter % 25 == 0 {
                 if let Some(target) = endpoint.get_target().or(known_target) {
-                    // Sentiric Signature: Düşük frekanslı diagnostic tone (440Hz)
-                    let tone = generate_diag_sample(warmer_tick);
-                    Self::send_raw_rtp(&socket, target, vec![tone; 160], &mut rtp_seq, &mut rtp_ts, rtp_ssrc, CodecType::PCMU).await;
+                    let hum = if warmer_counter % 50 == 0 { 0x80 } else { 0xD5 };
+                    Self::send_raw_rtp(&socket, target, vec![hum; 160], &mut rtp_seq, &mut rtp_ts, rtp_ssrc, CodecType::PCMU).await;
                 }
             }
-            warmer_tick = warmer_tick.wrapping_add(1);
+            warmer_counter = warmer_counter.wrapping_add(1);
 
-            // Normal Outbound (AI Response)
+            // [AI PIPELINE]: TTS'ten gelen sesi çal
             if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
@@ -119,7 +117,7 @@ impl RtpSession {
                 Some(cmd) = command_rx.recv() => {
                     last_activity = Instant::now();
                     match cmd {
-                        RtpCommand::EnableEchoTest => { loopback_mode_active = true; info!("🔊 Sentiric Echo Plus ENABLED."); },
+                        RtpCommand::EnableEchoTest => { loopback_mode_active = true; info!("🔊 Echo Mode Enabled"); },
                         RtpCommand::DisableEchoTest => loopback_mode_active = false,
                         RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
                         _ => {
@@ -129,27 +127,26 @@ impl RtpSession {
                 },
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
-                    last_rtp_received = Instant::now(); // [KRİTİK]: Warmer'ı sustur.
+                    last_rtp_received = Instant::now();
 
-                    if endpoint.latch(addr) { info!("🔒 [LATCH] Path Established: {}", addr); }
+                    if endpoint.latch(addr) { info!("🔒 [LATCH] Internal media established with {}", addr); }
 
                     if loopback_mode_active {
-                        // [v2.6 FIX]: BIT-PERFECT REFLEX
-                        // Gelen paketi HİÇ değiştirmeden geri yolla (SSRC manipülasyonu kaldırıldı).
-                        // Bu, Baresip'in jitter buffer'ının bozulmasını engeller.
-                        let _ = socket.send_to(&data, addr).await;
+                        // [ECHO PLUS]: SSRC'yi yansıtarak geri gönder
+                        let mut resp = data.clone();
+                        resp[8..12].copy_from_slice(&rtp_ssrc.to_be_bytes());
+                        let _ = socket.send_to(&resp, addr).await;
                         continue; 
                     }
 
-                    // AI Processing (STT)
+                    // Feed AI STT Pipeline
                     let pt = data[1] & 0x7F;
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(pt) {
                         audio_processor.update_codec(codec.to_core_type());
                         if let Ok(pcm) = crate::rtp::codecs::decode_rtp_to_lpcm16(&data[12..], codec) {
                             if let Some(tx) = &*live_stream_sender.lock().await { 
-                                let mut bytes = Vec::new();
-                                for s in &pcm { bytes.extend_from_slice(&s.to_le_bytes()); }
-                                let _ = tx.try_send(Ok(AudioFrame{data: bytes.into(), media_type: "audio/L16;rate=16000".into()}));
+                                let mut b = Vec::new(); for s in &pcm { b.extend_from_slice(&s.to_le_bytes()); }
+                                let _ = tx.try_send(Ok(AudioFrame{data: b.into(), media_type: "audio/L16;rate=16000".into()}));
                             }
                             if let Some(rec) = &mut *recording_session.lock().await { rec.mixed_samples_16khz.extend_from_slice(&pcm); }
                         }
@@ -164,11 +161,8 @@ impl RtpSession {
                 }
             }
         }
-
         endpoint.reset(); 
-        if let Some(rec) = recording_session.lock().await.take() {
-            let _ = finalize_and_save_recording(rec, self.app_state.clone()).await;
-        }
+        if let Some(rec) = recording_session.lock().await.take() { let _ = finalize_and_save_recording(rec, self.app_state.clone()).await; }
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
@@ -179,13 +173,13 @@ impl RtpSession {
         let header = RtpHeader::new(pt, *seq, *ts, ssrc);
         let packet = RtpPacket { header, payload };
         let _ = socket.send_to(&packet.to_bytes(), target).await;
+        
         *seq = seq.wrapping_add(1);
-        *ts = ts.wrapping_add(160);
+        
+        // [v2.7 DİNAMİK TIMESTAMP]: Örnekleme hızına göre zaman damgasını ayarla
+        // 8000Hz (PCMA/U) için paket başı +160 (20ms)
+        // 16000Hz (G.722/LPCM) için paket başı +320 (20ms)
+        let increment = if codec.sample_rate() == 16000 { 320 } else { 160 };
+        *ts = ts.wrapping_add(increment);
     }
-}
-
-fn generate_diag_sample(tick: u64) -> u8 {
-    let freq = 440.0;
-    let t = tick as f32 / (8000.0 / freq);
-    if (t * 2.0 * std::f32::consts::PI).sin() > 0.0 { 0x80 } else { 0xD5 }
 }
