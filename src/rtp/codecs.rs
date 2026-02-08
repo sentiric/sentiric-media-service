@@ -49,14 +49,22 @@ pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16
     let samples = decoder.decode(payload);
     
     // G.711 (8k) -> AI (16k)
-    // Her örneği iki kere yazarak frekansı ikiye katlıyoruz.
+    // Lineer İnterpolasyon ile Upsampling (Daha yumuşak geçiş için)
     if codec.to_core_type().sample_rate() == 8000 {
         let mut samples_16k = Vec::with_capacity(samples.len() * 2);
-        for s in &samples {
-            samples_16k.push(*s); 
-            samples_16k.push(*s);
+        for i in 0..samples.len() {
+            let current = samples[i];
+            samples_16k.push(current);
+            
+            // Bir sonraki örnekle şimdiki örneğin ortalamasını al (Smoothing)
+            if i + 1 < samples.len() {
+                let next = samples[i+1];
+                let avg = ((current as i32 + next as i32) / 2) as i16;
+                samples_16k.push(avg);
+            } else {
+                samples_16k.push(current);
+            }
         }
-        // trace!("Upsampled {} samples to {} samples (8k->16k)", samples.len(), samples_16k.len());
         Ok(samples_16k)
     } else {
         Ok(samples)
@@ -68,20 +76,26 @@ pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16
 pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
     let target_rate = target_codec.to_core_type().sample_rate();
     
-    // [CRITICAL FIX]: Deep Voice Sorunu Çözümü
-    // Eğer hedef kodek 8000Hz ise (PCMA/PCMU/G729), ama elimizdeki veri 16000Hz ise,
-    // veriyi yarıya indirmeliyiz (Downsampling / Decimation).
-    // Aksi takdirde ses yarı hızda ve kalın çıkar.
     let samples_to_encode = if target_rate == 8000 {
-        // !!! CRITICAL FIX: DEEP VOICE / SLOW MOTION AUDIO !!!
-        // 16kHz veriyi 8kHz hatta basarsak ses yarı hızda (kalın) çıkar.
-        // Çözüm: Downsampling (Decimation). Her 2 örnekten 1'ini al.
-        // Örn: [A, B, C, D] -> [A, C]        
-        let downsampled: Vec<i16> = samples_16k.iter().step_by(2).cloned().collect();
-        trace!("Downsampled {} samples to {} samples (16k->8k)", samples_16k.len(), downsampled.len());
+        // [CRITICAL AUDIO FIX]: Averaging Downsampling
+        // Önceki kod (step_by(2)) örnek atlıyordu, bu da "Aliasing" (cızırtı) yapıyordu.
+        // Yeni kod: Her iki örneğin ortalamasını alarak 8k'ya düşürüyor.
+        // Bu, yüksek frekanslı gürültüyü filtreler (Low-pass filter etkisi).
+        
+        let mut downsampled = Vec::with_capacity(samples_16k.len() / 2);
+        for chunk in samples_16k.chunks(2) {
+            if chunk.len() == 2 {
+                // (Sample1 + Sample2) / 2 -> Daha yumuşak ses
+                let avg = ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16;
+                downsampled.push(avg);
+            } else if chunk.len() == 1 {
+                downsampled.push(chunk[0]);
+            }
+        }
+        
+        trace!("Downsampled (Avg) {} samples to {} samples (16k->8k)", samples_16k.len(), downsampled.len());
         downsampled
     } else {
-        // G.722 gibi 16k destekleyen kodekler için olduğu gibi bırak
         samples_16k.to_vec()
     };
     
