@@ -1,4 +1,5 @@
 // sentiric-media-service/src/rtp/session_handlers.rs
+
 use super::command::{RtpCommand, AudioFrame, RecordingSession};
 use super::session_utils::load_and_resample_samples_from_uri; 
 use super::stream::send_rtp_stream;
@@ -9,6 +10,11 @@ use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{info, error, debug};
 use lapin::{options::BasicPublishOptions, BasicProperties};
+
+// [FIX]: Protobuf ve Zaman kütüphaneleri eklendi
+use sentiric_contracts::sentiric::event::v1::GenericEvent;
+use prost::Message;
+use std::time::SystemTime;
 
 #[derive(Debug)]
 pub struct PlaybackJob {
@@ -33,11 +39,12 @@ pub async fn handle_command(
     finished_tx: &mpsc::Sender<()>,
     known_target: &mut Option<SocketAddr>,
     endpoint: &sentiric_rtp_core::RtpEndpoint,
-    call_id: &str, // Added call_id for reporting
+    call_id: &str, 
 ) -> bool {
     match command {
         RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
             let target = endpoint.get_target().or(*known_target).unwrap_or(candidate_target_addr);
+            // NAT Warmer paketi
             let _ = socket.send_to(&[0x80; 12], target).await;
             
             let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
@@ -52,7 +59,6 @@ pub async fn handle_command(
         RtpCommand::EnableEchoTest => {
             info!("🔊 Native Echo Reflex ENABLED. Sending aggressive warmer.");
             if let Some(target) = endpoint.get_target().or(*known_target) {
-                // [AGGRESSIVE HOLE PUNCHING]: 3 paket göndererek tüneli zorla aç
                 for _ in 0..3 {
                     let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target).await;
                 }
@@ -94,25 +100,35 @@ pub async fn start_playback(
     match load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
         Ok(samples) => {
             tokio::spawn(async move {
+                // RTP akışını başlat (PCMU olarak)
                 let res = send_rtp_stream(&socket, job.target_addr, &samples, job.cancellation_token, crate::rtp::codecs::AudioCodec::Pcmu).await;
                 
-                // [PROFESYONEL PBX ÖZELLİĞİ]: Oynatma bittiğinde RabbitMQ'ya olay fırlat
                 if res.is_ok() {
+                    // [FIX]: Oynatma bittiğinde Protobuf Event gönder
                     if let Some(channel) = &app_state.rabbitmq_publisher {
-                        let payload = serde_json::json!({
-                            "eventType": "call.media.playback.finished",
+                        
+                        // JSON Payload'ı Protobuf içindeki string alana gömüyoruz
+                        let json_payload = serde_json::json!({
                             "callId": call_id_owned,
                             "uri": uri
                         }).to_string();
+
+                        let event = GenericEvent {
+                            event_type: "call.media.playback.finished".to_string(),
+                            trace_id: call_id_owned.clone(), 
+                            timestamp: Some(prost_types::Timestamp::from(SystemTime::now())),
+                            tenant_id: "system".to_string(),
+                            payload_json: json_payload,
+                        };
                         
                         let _ = channel.basic_publish(
                             rabbitmq::EXCHANGE_NAME,
-                            "call.media.playback.finished",
+                            "call.media.playback.finished", // Routing Key
                             BasicPublishOptions::default(),
-                            payload.as_bytes(),
+                            &event.encode_to_vec(), // Protobuf Binary
                             BasicProperties::default(),
                         ).await;
-                        debug!("📢 Sent PlaybackFinished event for {}", call_id_owned);
+                        debug!("📢 Sent PlaybackFinished event (Protobuf) for {}", call_id_owned);
                     }
                 }
 

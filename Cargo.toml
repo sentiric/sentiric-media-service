@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-media-service"
-version = "0.4.5" # Versiyon artırıldı (Contracts v1.16.0 + Deep Voice Fix)
+version = "0.4.7"
 edition = "2021"
 
 [dependencies]
