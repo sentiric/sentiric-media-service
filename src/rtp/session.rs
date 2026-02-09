@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, instrument, warn, debug};
+use tracing::{info, instrument, warn, debug, trace}; // Trace eklendi
 
 use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer};
 
@@ -46,10 +46,7 @@ impl RtpSession {
     }
 
     fn parse_rtp_packet(data: Vec<u8>) -> Option<RtpPacket> {
-        if data.len() < 12 { 
-            // warn!("⚠️ [RTP] Packet too short: {} bytes", data.len());
-            return None; 
-        }
+        if data.len() < 12 { return None; }
         
         let first_byte = data[0];
         let payload_type = data[1] & 0x7F;
@@ -96,8 +93,7 @@ impl RtpSession {
 
         let mut packets_received = 0;
         let mut packets_sent = 0;
-        let mut jitter_drops = 0;
-
+        
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(512);
         
         // UDP Okuyucu
@@ -106,7 +102,6 @@ impl RtpSession {
             async move {
                 let mut buf = [0u8; 2048];
                 while let Ok((len, addr)) = socket.recv_from(&mut buf).await {
-                    // Min RTP Header 12 byte
                     if len >= 12 { 
                         let _ = rtp_packet_tx.send((buf[..len].to_vec(), addr)).await; 
                     }
@@ -125,7 +120,7 @@ impl RtpSession {
         let mut log_ticker = tokio::time::interval(Duration::from_secs(5));
 
         loop {
-            // PACER: Her 20ms'de bir uyanır.
+            // PACER
             pacer.wait();
 
             if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
@@ -133,12 +128,13 @@ impl RtpSession {
                 break;
             }
 
-            // --- 1. JITTER BUFFER POP & PROCESS (INBOUND) ---
+            // --- 1. JITTER BUFFER & PROCESS ---
             if let Some(packet) = jitter_buffer.pop() {
                 if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                     audio_processor.update_codec(codec.to_core_type());
                     
                     if let Ok(pcm) = crate::rtp::codecs::decode_rtp_to_lpcm16(&packet.payload, codec) {
+                        // Canlı Dinleme (STT)
                         if let Some(tx) = &*live_stream_sender.lock().await { 
                             let mut b = Vec::new(); 
                             for s in &pcm { b.extend_from_slice(&s.to_le_bytes()); }
@@ -147,6 +143,7 @@ impl RtpSession {
                                 media_type: "audio/L16;rate=16000".into()
                             }));
                         }
+                        // Kayıt
                         if let Some(rec) = &mut *recording_session.lock().await { 
                             rec.mixed_samples_16khz.extend_from_slice(&pcm); 
                         }
@@ -154,7 +151,7 @@ impl RtpSession {
                 }
             }
 
-            // --- 2. OUTBOUND STREAMING (TTS / FILE) ---
+            // --- 2. OUTBOUND STREAMING ---
             if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
@@ -169,7 +166,7 @@ impl RtpSession {
                 }
             }
 
-            // [WARMER]: Keep-alive
+            // [WARMER]
             if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(150) && warmer_counter % 25 == 0 {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     let hum = if warmer_counter % 50 == 0 { 0x80 } else { 0xD5 };
@@ -179,60 +176,57 @@ impl RtpSession {
             warmer_counter = warmer_counter.wrapping_add(1);
 
             tokio::select! {
-                // İstatistik Loglama
                 _ = log_ticker.tick() => {
-                    // Sadece aktifse logla
                     if packets_received > 0 || packets_sent > 0 {
-                        debug!("📊 Stats: Rx: {} | Tx: {} | Drops: {} | Active: {}", packets_received, packets_sent, jitter_drops, !endpoint.get_target().is_none());
+                        debug!("📊 Stats: Rx: {} | Tx: {}", packets_received, packets_sent);
                     }
                 },
 
-                // Gelen Paketler (Option döner)
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
                     last_rtp_received = Instant::now();
                     packets_received += 1;
 
-                    if endpoint.latch(addr) { info!("🔒 [LATCH] Internal media established with {}", addr); }
+                    if endpoint.latch(addr) { info!("🔒 [LATCH] Media locked to {}", addr); }
 
-                    // [ECHO FIX] Jitter Buffer'ı BYPASS et!
-                    // Echo testi "Sesi aldım, hemen geri yolluyorum" mantığıdır. Buffer gecikme yaratır.
                     if loopback_mode_active {
                         let mut resp = data.clone();
-                        // SSRC'yi sunucunun SSRC'si ile değiştir ki "dönen" paket olduğu anlaşılsın
-                        // (İlk 12 byte header'dır. SSRC 8. byte'tan başlar)
-                        if resp.len() >= 12 {
-                             resp[8..12].copy_from_slice(&rtp_ssrc.to_be_bytes());
-                        }
-                        // Geri gönder
+                        if resp.len() >= 12 { resp[8..12].copy_from_slice(&rtp_ssrc.to_be_bytes()); }
                         let _ = socket.send_to(&resp, addr).await;
                     } else {
-                        // Normal akış: Jitter Buffer'a koy
                         if let Some(packet) = Self::parse_rtp_packet(data) {
+                            // [CRITICAL FIX]: DTMF (101) ve Bilinmeyen Payload Kontrolü
+                            let pt = packet.header.payload_type;
+                            
+                            if pt == 101 {
+                                trace!("⌨️ [DTMF] Event packet received (ignored in audio path)");
+                                continue;
+                            }
+
+                            // Sadece G.729 (18) ve PCMU (0) kabul et
+                            if pt != 18 && pt != 0 {
+                                // Uyarıyı log kirliliği yapmaması için trace seviyesinde tutuyoruz
+                                trace!("🗑️ [RTP] Dropping unsupported payload type: {}", pt);
+                                continue;
+                            }
+
                             jitter_buffer.push(packet);
-                        } else {
-                            jitter_drops += 1;
                         }
                     }
                 },
                 
-                // Komutlar
                 Some(cmd) = command_rx.recv() => {
                      last_activity = Instant::now();
                      match cmd {
                         RtpCommand::EnableEchoTest => { loopback_mode_active = true; info!("🔊 Echo Mode Enabled"); },
                         RtpCommand::DisableEchoTest => loopback_mode_active = false,
-                        RtpCommand::SetTargetAddress { target } => { 
-                            known_target = Some(target); 
-                            info!("🎯 Target address explicitly set: {}", target);
-                        },
+                        RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
                         _ => {
                             if session_handlers::handle_command(cmd, self.port, &live_stream_sender, &recording_session, &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, &mut is_playing, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, &socket, &finished_tx, &mut known_target, &endpoint, &self.call_id).await { break; }
                         }
                     }
                 },
 
-                // Playback Bitti Sinyali
                 Some(_) = finished_rx.recv() => {
                      is_playing = false;
                      if let Some(next) = playback_queue.pop_front() {
