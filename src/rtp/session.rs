@@ -15,7 +15,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, instrument, warn, debug, trace}; // Trace eklendi
+use tracing::{info, instrument, warn, debug};
 
 use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer};
 
@@ -195,18 +195,15 @@ impl RtpSession {
                         let _ = socket.send_to(&resp, addr).await;
                     } else {
                         if let Some(packet) = Self::parse_rtp_packet(data) {
-                            // [CRITICAL FIX]: DTMF (101) ve Bilinmeyen Payload Kontrolü
                             let pt = packet.header.payload_type;
                             
                             if pt == 101 {
-                                trace!("⌨️ [DTMF] Event packet received (ignored in audio path)");
+                                info!("⌨️ [DTMF] Event packet received (ignored in audio path)");
                                 continue;
                             }
 
-                            // Sadece G.729 (18) ve PCMU (0) kabul et
-                            if pt != 18 && pt != 0 {
-                                // Uyarıyı log kirliliği yapmaması için trace seviyesinde tutuyoruz
-                                trace!("🗑️ [RTP] Dropping unsupported payload type: {}", pt);
+                            if pt != 18 && pt != 0 && pt != 8 {
+                                info!("🗑️ [RTP] Dropping unsupported payload type: {}", pt);
                                 continue;
                             }
 
@@ -246,7 +243,15 @@ impl RtpSession {
     }
 
     async fn send_raw_rtp(socket: &tokio::net::UdpSocket, target: SocketAddr, payload: Vec<u8>, seq: &mut u16, ts: &mut u32, ssrc: u32, codec: CodecType) {
-        let pt = match codec { CodecType::PCMU => 0, CodecType::PCMA => 8, CodecType::G729 => 18, CodecType::G722 => 9 };
+        // [CRITICAL FIX]: G.722 (9) removed
+        let pt = match codec { 
+            CodecType::G729 => 18,
+            CodecType::PCMU => 0, 
+            // cızırtılı
+            CodecType::PCMA => 8
+
+        };
+        
         let header = RtpHeader::new(pt, *seq, *ts, ssrc);
         let packet = RtpPacket { header, payload };
         
@@ -255,7 +260,7 @@ impl RtpSession {
         }
         
         *seq = seq.wrapping_add(1);
-        let increment = if codec.sample_rate() == 16000 { 320 } else { 160 };
+        let increment = 160; // Artık sadece 8kHz destekliyoruz (160 samples = 20ms)
         *ts = ts.wrapping_add(increment);
     }
 }

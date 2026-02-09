@@ -6,38 +6,55 @@ use tracing::trace;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AudioCodec {
-    Pcmu,
-    Pcma,
     G729,
-    G722,
+    Pcmu,
+
+    Pcma,
+    // G722 removed for stability
 }
+
+
+// ============================================================================
+// !!! PRODUCTION READY CODECS !!!
+// 
+// [STABLE] G.729: Düşük bant genişliği, yüksek kararlılık.
+// [STABLE] PCMU: Yüksek kalite, kayıpsız.
+// [STABLE] PCMA: Cızırtılı
+// ============================================================================
+
+// rtp core benzer işlemler yapıyoruz????
+// Kendimizi tekrar mı ediyoruz?
 
 impl AudioCodec {
     pub fn from_rtp_payload_type(payload_type: u8) -> Result<Self> {
         match payload_type {
-            0 => Ok(AudioCodec::Pcmu),
-            8 => Ok(AudioCodec::Pcma),
-            9 => Ok(AudioCodec::G722),
             18 => Ok(AudioCodec::G729),
+            0 => Ok(AudioCodec::Pcmu),
+
+            8 => Ok(AudioCodec::Pcma),
+            // 9 => Ok(AudioCodec::G722), // Removed
+
             _ => Err(anyhow!("Unsupported RTP payload type: {}", payload_type)),
         }
     }
 
     pub fn to_core_type(&self) -> CodecType {
         match self {
-            AudioCodec::Pcmu => CodecType::PCMU,
-            AudioCodec::Pcma => CodecType::PCMA,
             AudioCodec::G729 => CodecType::G729,
-            AudioCodec::G722 => CodecType::G722,
+            AudioCodec::Pcmu => CodecType::PCMU,
+            //
+            AudioCodec::Pcma => CodecType::PCMA,
+
         }
     }
     
     pub fn to_payload_type(&self) -> u8 {
         match self {
-            AudioCodec::Pcmu => 0,
-            AudioCodec::Pcma => 8,
-            AudioCodec::G722 => 9,
             AudioCodec::G729 => 18,
+            AudioCodec::Pcmu => 0,
+
+            AudioCodec::Pcma => 8,
+  
         }
     }
 }
@@ -48,7 +65,7 @@ pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16
     let mut decoder = CodecFactory::create_decoder(codec.to_core_type());
     let samples = decoder.decode(payload);
     
-    // G.711 (8k) -> AI (16k)
+    // G.711/G.729 (8k) -> AI (16k)
     // Lineer İnterpolasyon ile Upsampling (Daha yumuşak geçiş için)
     if codec.to_core_type().sample_rate() == 8000 {
         let mut samples_16k = Vec::with_capacity(samples.len() * 2);
@@ -78,10 +95,6 @@ pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Re
     
     let samples_to_encode = if target_rate == 8000 {
         // [CRITICAL AUDIO FIX]: Averaging Downsampling
-        // Önceki kod (step_by(2)) örnek atlıyordu, bu da "Aliasing" (cızırtı) yapıyordu.
-        // Yeni kod: Her iki örneğin ortalamasını alarak 8k'ya düşürüyor.
-        // Bu, yüksek frekanslı gürültüyü filtreler (Low-pass filter etkisi).
-        
         let mut downsampled = Vec::with_capacity(samples_16k.len() / 2);
         for chunk in samples_16k.chunks(2) {
             if chunk.len() == 2 {

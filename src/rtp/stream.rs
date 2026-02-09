@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, debug};
 
-// CORE v1.3.0
+// CORE v1.3.5
 use sentiric_rtp_core::{Pacer, RtpHeader, RtpPacket};
 
 pub async fn send_rtp_stream(
@@ -21,17 +21,17 @@ pub async fn send_rtp_stream(
     
     info!(target = %target_addr, "🚀 Precision stream starting.");
 
-    // KRİTİK DÜZELTME: ThreadRng nesnesi saklanmıyor, asenkron sınırları geçebilir.
     let ssrc: u32 = rand::random();
     let mut sequence_number: u16 = rand::random();
     let mut timestamp: u32 = rand::random();
     
     let rtp_payload_type = target_codec.to_payload_type();
 
+    // [CRITICAL FIX]: G.722 removed
     let (packet_chunk_size, samples_per_packet) = match target_codec {
         AudioCodec::G729 => (10, 80),
-        AudioCodec::G722 => (160, 320),
-        _ => (160, 160),
+        // AudioCodec::G722 => (160, 320), // REMOVED
+        _ => (160, 160), // PCMA/PCMU
     };
 
     let mut pacer = Pacer::new(20);
@@ -44,7 +44,6 @@ pub async fn send_rtp_stream(
         let header = RtpHeader::new(rtp_payload_type, sequence_number, timestamp, ssrc);
         let packet = RtpPacket { header, payload: chunk.to_vec() };
         
-        // KRİTİK DÜZELTME: .await sırasında rng değişkeni canlı değil.
         if let Err(e) = sock.send_to(&packet.to_bytes(), target_addr).await {
             debug!(error = %e, "RTP send fail");
         }
