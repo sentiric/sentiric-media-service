@@ -1,15 +1,13 @@
 // sentiric-media-service/src/rtp/processing.rs
 
-use crate::rtp::codecs;
 use sentiric_rtp_core::{CodecFactory, CodecType, Encoder, AudioResampler};
-use tracing::{info, warn, error};
+use tracing::{info, warn}; // 'error' ve 'codecs' kaldırıldı
 
 /// AudioProcessor: AI Pipeline (16kHz) ile RTP (8kHz) arasındaki köprüdür.
 pub struct AudioProcessor {
     encoder: Box<dyn Encoder>,
     accumulator: Vec<i16>, 
     current_codec: CodecType,
-    // YENİ: Stateful Resampler (16k -> 8k)
     resampler: AudioResampler,
 }
 
@@ -20,7 +18,6 @@ impl AudioProcessor {
             encoder: CodecFactory::create_encoder(initial_codec),
             accumulator: Vec::with_capacity(8192), 
             current_codec: initial_codec,
-            // 16k input, 8k output, chunk size dinamik olabilir ama başlangıç için 320 veriyoruz
             resampler: AudioResampler::new(16000, 8000, 320),
         }
     }
@@ -47,8 +44,6 @@ impl AudioProcessor {
     }
 
     pub async fn process_frame(&mut self) -> Option<Vec<Vec<u8>>> {
-        // AI'dan gelen 16kHz veriyi 20ms'lik bloklar halinde işle
-        // 20ms @ 16kHz = 320 samples
         const FRAME_SIZE_16K: usize = 320; 
         
         if self.accumulator.len() < FRAME_SIZE_16K {
@@ -61,10 +56,8 @@ impl AudioProcessor {
         let frame_8k = self.resampler.process(&frame_16k).await;
         
         // 2. Encoding (8k -> RTP Payload)
-        // Blocking çağrıya gerek yok, encode işlemi çok hafif
         let encoded = self.encoder.encode(&frame_8k);
 
-        // RTP paket boyutlarına böl (G.711: 160 byte, G.729: 10 byte)
         let payload_size = if self.current_codec == CodecType::G729 { 10 } else { 160 };
         
         if encoded.is_empty() {

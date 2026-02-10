@@ -7,8 +7,7 @@ use crate::rabbitmq;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot, Mutex};
-// use tokio::net::UdpSocket; // [CLEANUP] Bu import kaldırıldı.
-use tokio::net::UdpSocket; // Socket tipini bilmesi için gerekli
+// use tokio::net::UdpSocket; // <-- TEMİZLENDİ
 use tracing::{info, error, debug};
 use lapin::{options::BasicPublishOptions, BasicProperties};
 
@@ -44,7 +43,7 @@ pub async fn handle_command(
     endpoint: &sentiric_rtp_core::RtpEndpoint,
     call_id: &str, 
 ) -> bool {
-    // Bu fonksiyonun içeriği aynı kalıyor.
+    // ... (İçerik aynı, sadece import temizlendiği için dosya yeniden yazılmalı)
     match command {
         RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
             let target = endpoint.get_target().or(*known_target).unwrap_or(candidate_target_addr);

@@ -8,6 +8,12 @@ use crate::rtp::processing::AudioProcessor;
 use crate::rtp::session_utils::finalize_and_save_recording;
 use crate::state::AppState;
 use crate::config::AppConfig;
+// YENİ: RabbitMQ için
+use crate::rabbitmq;
+use lapin::{options::BasicPublishOptions, BasicProperties};
+use sentiric_contracts::sentiric::event::v1::GenericEvent;
+use prost::Message;
+use std::time::SystemTime;
 
 use metrics::gauge;
 use std::collections::VecDeque;
@@ -67,6 +73,17 @@ impl RtpSession {
 
         let payload = data[12..].to_vec();
         Some(RtpPacket { header, payload })
+    }
+
+    // YENİ: DTMF Event ID -> Karakter Dönüşümü
+    fn dtmf_id_to_char(id: u8) -> char {
+        match id {
+            0..=9 => (b'0' + id) as char,
+            10 => '*',
+            11 => '#',
+            12 => 'A', 13 => 'B', 14 => 'C', 15 => 'D',
+            _ => '?',
+        }
     }
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
@@ -145,7 +162,6 @@ impl RtpSession {
                             if let Some(tx) = &*live_stream_sender.lock().await { 
                                 let mut b = Vec::new(); 
                                 for s in &pcm { b.extend_from_slice(&s.to_le_bytes()); }
-                                // [DYNAMIC MEDIA TYPE] Artık hard-coded değil.
                                 let media_type = format!("audio/L16;rate={}", stt_stream_sample_rate);
                                 let _ = tx.try_send(Ok(AudioFrame{
                                     data: b.into(), 
@@ -202,8 +218,49 @@ impl RtpSession {
                         let _ = socket.send_to(&resp, addr).await;
                     } else {
                         if let Some(packet) = Self::parse_rtp_packet(data) {
+                            // YENİ: DTMF Detection
                             if packet.header.payload_type == CodecType::TelephoneEvent as u8 {
-                                info!("⌨️ [DTMF] Event packet received (ignored in audio path)");
+                                if packet.payload.len() >= 4 {
+                                    let event_id = packet.payload[0];
+                                    let end_bit = (packet.payload[1] & 0x80) != 0; // Bit 7: End Bit
+                                    let duration = u16::from_be_bytes([packet.payload[2], packet.payload[3]]);
+                                    
+                                    // Sadece E (End) biti 1 olduğunda olayı işle (Spam engelleme)
+                                    if end_bit {
+                                        let digit = Self::dtmf_id_to_char(event_id);
+                                        info!("⌨️ [DTMF] Detected Digit: '{}' (Duration: {})", digit, duration);
+                                        
+                                        // RabbitMQ Event Publish
+                                        if let Some(channel) = &self.app_state.rabbitmq_publisher {
+                                            let json_payload = serde_json::json!({
+                                                "callId": self.call_id,
+                                                "digit": digit.to_string(),
+                                                "durationMs": duration,
+                                                "event": "dtmf_received"
+                                            }).to_string();
+                                            
+                                            let event = GenericEvent {
+                                                event_type: "call.dtmf.received".to_string(),
+                                                trace_id: self.call_id.clone(), 
+                                                timestamp: Some(prost_types::Timestamp::from(SystemTime::now())),
+                                                tenant_id: "system".to_string(),
+                                                payload_json: json_payload,
+                                            };
+                                            
+                                            let publish_res = channel.basic_publish(
+                                                rabbitmq::EXCHANGE_NAME, 
+                                                "call.dtmf.received", 
+                                                BasicPublishOptions::default(), 
+                                                &event.encode_to_vec(), 
+                                                BasicProperties::default()
+                                            ).await;
+                                            
+                                            if let Err(e) = publish_res {
+                                                warn!("❌ Failed to publish DTMF event: {}", e);
+                                            }
+                                        }
+                                    }
+                                }
                                 continue;
                             }
                             jitter_buffer.push(packet);
@@ -217,7 +274,6 @@ impl RtpSession {
                         RtpCommand::EnableEchoTest => { loopback_mode_active = true; info!("🔊 Echo Mode Enabled"); },
                         RtpCommand::DisableEchoTest => loopback_mode_active = false,
                         RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
-                        // [FIX] `target_sample_rate`'i yakala
                         RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate } => { 
                             let mut guard = live_stream_sender.lock().await; 
                             *guard = Some(stream_sender);
