@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, debug};
 
-// CORE v1.3.5
+// CORE v1.3.6
 use sentiric_rtp_core::{Pacer, RtpHeader, RtpPacket};
 
 pub async fn send_rtp_stream(
@@ -19,7 +19,7 @@ pub async fn send_rtp_stream(
 ) -> Result<()> {
     let encoded_payload = codecs::encode_lpcm16_to_rtp(samples_16khz, target_codec)?;
     
-    info!(target = %target_addr, "🚀 Precision stream starting.");
+    info!(target = %target_addr, "🚀 Precision stream starting. Codec: {:?}", target_codec);
 
     let ssrc: u32 = rand::random();
     let mut sequence_number: u16 = rand::random();
@@ -27,13 +27,18 @@ pub async fn send_rtp_stream(
     
     let rtp_payload_type = target_codec.to_payload_type();
 
-    // [CRITICAL FIX]: G.722 removed
+    // [TELECOM COMPLIANCE]: Packetization Time (ptime) Alignment
+    // SIP Core artık SDP'de varsayılan olarak "a=ptime:20" gönderiyor.
+    // RTP stream'i buna kesinlikle uymalıdır.
+    // G.729: 1 frame = 10ms (10 bytes). 20ms = 2 frames (20 bytes).
+    // PCMA/U: 1 sample = 0.125ms. 20ms = 160 samples (160 bytes).
+    
     let (packet_chunk_size, samples_per_packet) = match target_codec {
-        AudioCodec::G729 => (10, 80),
-        // AudioCodec::G722 => (160, 320), // REMOVED
-        _ => (160, 160), // PCMA/PCMU
+        AudioCodec::G729 => (20, 160), // FIXED: Was (10, 80). Now 20ms standard.
+        _ => (160, 160),               // PCMA/PCMU 20ms standard.
     };
 
+    // Pacer 20ms'ye ayarlı
     let mut pacer = Pacer::new(20);
 
     for chunk in encoded_payload.chunks(packet_chunk_size) {
