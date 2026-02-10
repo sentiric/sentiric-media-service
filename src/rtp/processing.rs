@@ -1,15 +1,16 @@
 // sentiric-media-service/src/rtp/processing.rs
 
 use crate::rtp::codecs;
-use sentiric_rtp_core::{CodecFactory, CodecType, Encoder};
+use sentiric_rtp_core::{CodecFactory, CodecType, Encoder, AudioResampler};
 use tracing::{info, warn, error};
 
 /// AudioProcessor: AI Pipeline (16kHz) ile RTP (8kHz) arasındaki köprüdür.
-/// Resampling ve Buffering işlemlerini yönetir.
 pub struct AudioProcessor {
     encoder: Box<dyn Encoder>,
     accumulator: Vec<i16>, 
     current_codec: CodecType,
+    // YENİ: Stateful Resampler (16k -> 8k)
+    resampler: AudioResampler,
 }
 
 impl AudioProcessor {
@@ -17,12 +18,13 @@ impl AudioProcessor {
         info!("🎛️ Audio Processor Initialized for Codec: {:?}", initial_codec);
         Self {
             encoder: CodecFactory::create_encoder(initial_codec),
-            accumulator: Vec::with_capacity(8192), // 500ms+ buffer safety
+            accumulator: Vec::with_capacity(8192), 
             current_codec: initial_codec,
+            // 16k input, 8k output, chunk size dinamik olabilir ama başlangıç için 320 veriyoruz
+            resampler: AudioResampler::new(16000, 8000, 320),
         }
     }
 
-    /// update_codec: Çağrı sırasında kodek değişirse (re-invite) işlemciyi günceller.
     pub fn update_codec(&mut self, new_codec: CodecType) {
         if self.current_codec != new_codec {
             info!("🔄 Switching Processor Codec: {:?} -> {:?}", self.current_codec, new_codec);
@@ -31,7 +33,6 @@ impl AudioProcessor {
         }
     }
 
-    /// push_data: AI Pipeline'dan (TTS) gelen 16kHz LPCM verisini biriktirir.
     pub fn push_data(&mut self, data: Vec<u8>) {
         if data.len() % 2 != 0 {
             warn!("⚠️ Malformed audio chunk received (odd length)");
@@ -45,51 +46,39 @@ impl AudioProcessor {
         self.accumulator.extend(samples);
     }
 
-    /// process_frame: Biriktirilen veriyi 20ms'lik paketlere (frames) böler ve kodlar.
     pub async fn process_frame(&mut self) -> Option<Vec<Vec<u8>>> {
-        // 16kHz'de 20ms = 320 örnek (samples)
+        // AI'dan gelen 16kHz veriyi 20ms'lik bloklar halinde işle
+        // 20ms @ 16kHz = 320 samples
         const FRAME_SIZE_16K: usize = 320; 
         
         if self.accumulator.len() < FRAME_SIZE_16K {
             return None;
         }
 
-        // 20ms'lik dilimi al
-        let frame_in: Vec<i16> = self.accumulator.drain(0..FRAME_SIZE_16K).collect();
-        let encoder_type = self.current_codec;
+        let frame_16k: Vec<i16> = self.accumulator.drain(0..FRAME_SIZE_16K).collect();
         
-        // Ağır kodlama işlemini CPU thread pool'a gönder
-        let encoded_res = tokio::task::spawn_blocking(move || {
-             codecs::encode_lpcm16_to_rtp(
-                 &frame_in, 
-                 codecs::AudioCodec::from_rtp_payload_type(encoder_type as u8).unwrap_or(codecs::AudioCodec::Pcmu)
-             )
-        }).await;
+        // 1. Resampling (16k -> 8k) - Stateful
+        let frame_8k = self.resampler.process(&frame_16k).await;
+        
+        // 2. Encoding (8k -> RTP Payload)
+        // Blocking çağrıya gerek yok, encode işlemi çok hafif
+        let encoded = self.encoder.encode(&frame_8k);
 
-        match encoded_res {
-            Ok(Ok(encoded)) => {
-                // Kodlanmış veriyi RTP paket boyutlarına (örn: G.711 için 160 byte) böl
-                let payload_size = if self.current_codec == CodecType::G729 { 10 } else { 160 };
-                Some(encoded.chunks(payload_size).map(|c| c.to_vec()).collect())
-            },
-            Ok(Err(e)) => {
-                error!("❌ Encoding error in processor: {}", e);
-                None
-            },
-            Err(e) => {
-                error!("❌ Processor thread panic: {}", e);
-                None
-            }
+        // RTP paket boyutlarına böl (G.711: 160 byte, G.729: 10 byte)
+        let payload_size = if self.current_codec == CodecType::G729 { 10 } else { 160 };
+        
+        if encoded.is_empty() {
+            return None;
         }
+
+        Some(encoded.chunks(payload_size).map(|c| c.to_vec()).collect())
     }
 
     pub fn get_current_codec(&self) -> CodecType {
         self.current_codec
     }
 
-    /// generate_silence: Konuşma olmadığında jitter buffer'ı beslemek için sessizlik üretir.
     pub fn generate_silence(&mut self) -> Vec<u8> {
-        // G.711 için sessizlik değeri (0x80 veya 0xFF) encoder tarafından üretilir.
         self.encoder.encode(&vec![0i16; 160])
     }
 }

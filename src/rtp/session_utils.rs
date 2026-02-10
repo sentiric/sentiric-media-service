@@ -10,12 +10,13 @@ use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine};
 use hound::WavWriter;
 use lapin::{options::BasicPublishOptions, BasicProperties};
-use rubato::{Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction};
+// DÜZELTME: rubato kaldırıldı, simple_resample eklendi
+use sentiric_rtp_core::simple_resample; 
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::task::spawn_blocking;
-use tracing::{instrument, warn}; // [CLEANUP] unused error ve info kaldırıldı.
+use tracing::{instrument, warn};
 
 #[instrument(skip_all, fields(uri = %session.output_uri, call_id = %session.call_id))]
 pub async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
@@ -30,15 +31,10 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
     let mixed_samples = session.mixed_samples_16khz;
     let spec = session.spec;
 
+    // Resampling (16k -> 8k) - Artık Iron Core kullanıyor
     let downsampled = spawn_blocking(move || -> Result<Vec<i16>> {
-        let pcm_f32: Vec<f32> = mixed_samples.iter().map(|s| *s as f32 / 32768.0).collect();
-        let params = SincInterpolationParameters {
-            sinc_len: 256, f_cutoff: 0.95, interpolation: SincInterpolationType::Linear,
-            oversampling_factor: 256, window: WindowFunction::BlackmanHarris2,
-        };
-        let mut resampler = SincFixedIn::<f32>::new(8000.0 / 16000.0, 2.0, params, pcm_f32.len(), 1)?;
-        let mut resampled = resampler.process(&[pcm_f32], None)?;
-        Ok(resampled.remove(0).into_iter().map(|s| (s * 32767.0) as i16).collect())
+        // Cubic interpolation ile temiz ve hızlı dönüşüm
+        Ok(simple_resample(&mixed_samples, 16000, 8000))
     }).await.context("Resampling task failed")??;
 
     let wav_data = spawn_blocking(move || -> Result<Vec<u8>> {
@@ -73,9 +69,8 @@ pub async fn load_and_resample_samples_from_uri(
         let samples_8k = load_or_get_from_cache(&app_state.audio_cache, &final_path).await?;
         
         let samples_16k = spawn_blocking(move || {
-            let mut out = Vec::with_capacity(samples_8k.len() * 2);
-            for s in samples_8k.iter() { out.push(*s); out.push(*s); }
-            out
+            // 8k -> 16k Upsample (Iron Core)
+            simple_resample(&samples_8k, 8000, 16000)
         }).await?;
         
         return Ok(Arc::new(samples_16k));
