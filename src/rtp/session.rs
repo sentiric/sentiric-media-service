@@ -143,6 +143,9 @@ impl RtpSession {
         // Media sunucunun durumune yeniden planlamamız gerektiği ortaya çıkıyor
         // Media servis kendi sorumluluklarına odaklanmalı! 
         // Bu servis içinde kendi sorumluluğunda dışında başka durumlar da bu planlama ile gözden geçirilmeli.
+        
+        // Çözüm: O değişkenin adı outbound_stream_sample_rate olmalı ve media-service sadece "Subscriber" mantığıyla çalışmalı.
+        
         let mut stt_stream_sample_rate: u32 = 16000;
 
         loop {
