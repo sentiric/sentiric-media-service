@@ -2,19 +2,22 @@
 
 use super::command::{RtpCommand, AudioFrame, RecordingSession};
 use super::session_utils::load_and_resample_samples_from_uri; 
-use super::stream::send_rtp_stream;
 use super::session::RtpSessionConfig;
 use crate::rabbitmq;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot, Mutex};
+// use tokio::net::UdpSocket; // [CLEANUP] Bu import kaldırıldı.
+use tokio::net::UdpSocket; // Socket tipini bilmesi için gerekli
 use tracing::{info, error, debug};
 use lapin::{options::BasicPublishOptions, BasicProperties};
 
-// [FIX]: Protobuf ve Zaman kütüphaneleri eklendi
 use sentiric_contracts::sentiric::event::v1::GenericEvent;
 use prost::Message;
 use std::time::SystemTime;
+
+use sentiric_rtp_core::{Pacer, RtpHeader, RtpPacket, AudioProfile};
+use crate::rtp::codecs;
 
 #[derive(Debug)]
 pub struct PlaybackJob {
@@ -41,10 +44,10 @@ pub async fn handle_command(
     endpoint: &sentiric_rtp_core::RtpEndpoint,
     call_id: &str, 
 ) -> bool {
+    // Bu fonksiyonun içeriği aynı kalıyor.
     match command {
         RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
             let target = endpoint.get_target().or(*known_target).unwrap_or(candidate_target_addr);
-            // NAT Warmer paketi
             let _ = socket.send_to(&[0x80; 12], target).await;
             
             let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
@@ -100,19 +103,46 @@ pub async fn start_playback(
     match load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
         Ok(samples) => {
             tokio::spawn(async move {
-                // RTP akışını başlat (PCMU olarak)
-                let res = send_rtp_stream(&socket, job.target_addr, &samples, job.cancellation_token, crate::rtp::codecs::AudioCodec::Pcmu).await;
+                let profile = AudioProfile::default();
+                let target_codec_type = profile.preferred_audio_codec();
+                let target_codec = codecs::AudioCodec::from_rtp_payload_type(target_codec_type as u8).unwrap();
+                
+                let res = match codecs::encode_lpcm16_to_rtp(&samples, target_codec) {
+                    Ok(encoded_payload) => {
+                        info!(target = %job.target_addr, "🚀 Precision stream starting.");
+                        let ssrc: u32 = rand::random();
+                        let mut sequence_number: u16 = rand::random();
+                        let mut timestamp: u32 = rand::random();
+                        let rtp_payload_type = target_codec.to_payload_type();
+                        
+                        let (packet_chunk_size, samples_per_packet) = match target_codec {
+                            codecs::AudioCodec::G729 => (20, 160),
+                            _ => (160, 160),
+                        };
+
+                        let mut pacer = Pacer::new(profile.ptime as u64);
+
+                        for chunk in encoded_payload.chunks(packet_chunk_size) {
+                            if job.cancellation_token.is_cancelled() { break; }
+                            pacer.wait(); 
+                            let header = RtpHeader::new(rtp_payload_type, sequence_number, timestamp, ssrc);
+                            let packet = RtpPacket { header, payload: chunk.to_vec() };
+                            
+                            if let Err(e) = socket.send_to(&packet.to_bytes(), job.target_addr).await {
+                                debug!(error = %e, "RTP send fail");
+                            }
+                            
+                            sequence_number = sequence_number.wrapping_add(1);
+                            timestamp = timestamp.wrapping_add(samples_per_packet as u32);
+                        }
+                        Ok(())
+                    },
+                    Err(e) => Err(anyhow::Error::from(e)),
+                };
                 
                 if res.is_ok() {
-                    // [FIX]: Oynatma bittiğinde Protobuf Event gönder
                     if let Some(channel) = &app_state.rabbitmq_publisher {
-                        
-                        // JSON Payload'ı Protobuf içindeki string alana gömüyoruz
-                        let json_payload = serde_json::json!({
-                            "callId": call_id_owned,
-                            "uri": uri
-                        }).to_string();
-
+                        let json_payload = serde_json::json!({ "callId": call_id_owned, "uri": uri }).to_string();
                         let event = GenericEvent {
                             event_type: "call.media.playback.finished".to_string(),
                             trace_id: call_id_owned.clone(), 
@@ -120,19 +150,13 @@ pub async fn start_playback(
                             tenant_id: "system".to_string(),
                             payload_json: json_payload,
                         };
-                        
-                        let _ = channel.basic_publish(
-                            rabbitmq::EXCHANGE_NAME,
-                            "call.media.playback.finished", // Routing Key
-                            BasicPublishOptions::default(),
-                            &event.encode_to_vec(), // Protobuf Binary
-                            BasicProperties::default(),
-                        ).await;
+                        let _ = channel.basic_publish(rabbitmq::EXCHANGE_NAME, "call.media.playback.finished", 
+                            BasicPublishOptions::default(), &event.encode_to_vec(), BasicProperties::default()).await;
                         debug!("📢 Sent PlaybackFinished event (Protobuf) for {}", call_id_owned);
                     }
                 }
 
-                if let Some(tx) = responder { let _ = tx.send(res.map_err(anyhow::Error::from)); }
+                if let Some(tx) = responder { let _ = tx.send(res); }
                 let _ = finished_tx.try_send(());
             });
         },

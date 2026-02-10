@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-media-service"
-version = "0.4.9"
+version = "0.5.0"
 edition = "2021"
 
 [dependencies]
@@ -44,7 +44,7 @@ aws-credential-types = "1.1"
 lapin = "2.3"
 rustls = { version = "0.23", features = ["ring"] }
 
-# --- THE IRON CORE ---
-sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.6" }
+# --- THE IRON CORE (STABLE) ---
+sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.3.8" }
 sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.3" }
 sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.16.0" }

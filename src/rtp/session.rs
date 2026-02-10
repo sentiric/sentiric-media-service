@@ -16,8 +16,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
 use tracing::{info, instrument, warn, debug};
-
-use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer};
+use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer, AudioProfile};
 
 #[derive(Clone)]
 pub struct RtpSessionConfig {
@@ -79,7 +78,11 @@ impl RtpSession {
         
         let endpoint = RtpEndpoint::new(None);
         let mut known_target: Option<SocketAddr> = None;
-        let mut audio_processor = AudioProcessor::new(CodecType::PCMU);
+        
+        let profile = AudioProfile::default();
+        let mut audio_processor = AudioProcessor::new(profile.preferred_audio_codec());
+        
+        info!("🎛️ Audio Processor Initialized with preferred codec: {:?}", profile.preferred_audio_codec());
         
         let mut jitter_buffer = JitterBuffer::new(50, 60);
 
@@ -96,7 +99,6 @@ impl RtpSession {
         
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(512);
         
-        // UDP Okuyucu
         tokio::spawn({
             let socket = socket.clone();
             async move {
@@ -118,9 +120,15 @@ impl RtpSession {
         let mut pacer = Pacer::new(20); 
         let mut last_activity = Instant::now();
         let mut log_ticker = tokio::time::interval(Duration::from_secs(5));
+        
+        // [FIX] STT Stream için örnekleme hızını sakla
+        // Note: Media servisinin stt yi biliyor olması sakıncalı!
+        // Media sunucunun durumune yeniden planlamamız gerektiği ortaya çıkıyor
+        // Media servis kendi sorumluluklarına odaklanmalı! 
+        // Bu servis içinde kendi sorumluluğunda dışında başka durumlar da bu planlama ile gözden geçirilmeli.
+        let mut stt_stream_sample_rate: u32 = 16000;
 
         loop {
-            // PACER
             pacer.wait();
 
             if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
@@ -128,30 +136,30 @@ impl RtpSession {
                 break;
             }
 
-            // --- 1. JITTER BUFFER & PROCESS ---
             if let Some(packet) = jitter_buffer.pop() {
                 if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                     audio_processor.update_codec(codec.to_core_type());
                     
                     if let Ok(pcm) = crate::rtp::codecs::decode_rtp_to_lpcm16(&packet.payload, codec) {
-                        // Canlı Dinleme (STT)
-                        if let Some(tx) = &*live_stream_sender.lock().await { 
-                            let mut b = Vec::new(); 
-                            for s in &pcm { b.extend_from_slice(&s.to_le_bytes()); }
-                            let _ = tx.try_send(Ok(AudioFrame{
-                                data: b.into(), 
-                                media_type: "audio/L16;rate=16000".into()
-                            }));
-                        }
-                        // Kayıt
-                        if let Some(rec) = &mut *recording_session.lock().await { 
-                            rec.mixed_samples_16khz.extend_from_slice(&pcm); 
+                        if !pcm.is_empty() {
+                            if let Some(tx) = &*live_stream_sender.lock().await { 
+                                let mut b = Vec::new(); 
+                                for s in &pcm { b.extend_from_slice(&s.to_le_bytes()); }
+                                // [DYNAMIC MEDIA TYPE] Artık hard-coded değil.
+                                let media_type = format!("audio/L16;rate={}", stt_stream_sample_rate);
+                                let _ = tx.try_send(Ok(AudioFrame{
+                                    data: b.into(), 
+                                    media_type: media_type.into()
+                                }));
+                            }
+                            if let Some(rec) = &mut *recording_session.lock().await { 
+                                rec.mixed_samples_16khz.extend_from_slice(&pcm); 
+                            }
                         }
                     }
                 }
             }
 
-            // --- 2. OUTBOUND STREAMING ---
             if is_streaming && !loopback_mode_active {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     if let Some(rx) = &mut outbound_stream_rx {
@@ -166,7 +174,6 @@ impl RtpSession {
                 }
             }
 
-            // [WARMER]
             if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(150) && warmer_counter % 25 == 0 {
                 if let Some(target) = endpoint.get_target().or(known_target) {
                     let hum = if warmer_counter % 50 == 0 { 0x80 } else { 0xD5 };
@@ -195,18 +202,10 @@ impl RtpSession {
                         let _ = socket.send_to(&resp, addr).await;
                     } else {
                         if let Some(packet) = Self::parse_rtp_packet(data) {
-                            let pt = packet.header.payload_type;
-                            
-                            if pt == 101 {
+                            if packet.header.payload_type == CodecType::TelephoneEvent as u8 {
                                 info!("⌨️ [DTMF] Event packet received (ignored in audio path)");
                                 continue;
                             }
-
-                            if pt != 18 && pt != 0 && pt != 8 {
-                                info!("🗑️ [RTP] Dropping unsupported payload type: {}", pt);
-                                continue;
-                            }
-
                             jitter_buffer.push(packet);
                         }
                     }
@@ -218,6 +217,14 @@ impl RtpSession {
                         RtpCommand::EnableEchoTest => { loopback_mode_active = true; info!("🔊 Echo Mode Enabled"); },
                         RtpCommand::DisableEchoTest => loopback_mode_active = false,
                         RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
+                        // [FIX] `target_sample_rate`'i yakala
+                        RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate } => { 
+                            let mut guard = live_stream_sender.lock().await; 
+                            *guard = Some(stream_sender);
+                            if let Some(sr) = target_sample_rate {
+                                stt_stream_sample_rate = sr;
+                            }
+                        },
                         _ => {
                             if session_handlers::handle_command(cmd, self.port, &live_stream_sender, &recording_session, &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, &mut is_playing, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, &socket, &finished_tx, &mut known_target, &endpoint, &self.call_id).await { break; }
                         }
@@ -243,15 +250,7 @@ impl RtpSession {
     }
 
     async fn send_raw_rtp(socket: &tokio::net::UdpSocket, target: SocketAddr, payload: Vec<u8>, seq: &mut u16, ts: &mut u32, ssrc: u32, codec: CodecType) {
-        // [CRITICAL FIX]: G.722 (9) removed
-        let pt = match codec { 
-            CodecType::G729 => 18,
-            CodecType::PCMU => 0, 
-            // cızırtılı
-            CodecType::PCMA => 8
-
-        };
-        
+        let pt = codec as u8;
         let header = RtpHeader::new(pt, *seq, *ts, ssrc);
         let packet = RtpPacket { header, payload };
         
@@ -260,7 +259,7 @@ impl RtpSession {
         }
         
         *seq = seq.wrapping_add(1);
-        let increment = 160; // Artık sadece 8kHz destekliyoruz (160 samples = 20ms)
+        let increment = 160;
         *ts = ts.wrapping_add(increment);
     }
 }
