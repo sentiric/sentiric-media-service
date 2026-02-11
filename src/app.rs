@@ -84,9 +84,18 @@ impl App {
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client = Self::create_s3_client(config.clone()).await?;
         let rabbit_channel = Self::create_rabbitmq_channel(config.clone()).await?;
-        
         let port_manager = PortManager::new(config.rtp_port_min, config.rtp_port_max, config.clone());
-        Ok(AppState::new(port_manager, s3_client, rabbit_channel))
+        
+        let app_state = AppState::new(port_manager, s3_client, rabbit_channel);
+        
+        // 🚀 Background Persistence Worker başlatılıyor
+        let worker_state = app_state.clone();
+        tokio::spawn(async move {
+            let worker = crate::persistence::worker::UploadWorker::new(worker_state);
+            worker.run().await;
+        });
+
+        Ok(app_state)
     }
 
     async fn create_s3_client(config: Arc<AppConfig>) -> Result<Option<Arc<S3Client>>> {

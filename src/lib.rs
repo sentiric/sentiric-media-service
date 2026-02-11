@@ -9,4 +9,5 @@ pub mod audio;
 pub mod tls;
 pub mod metrics;
 pub mod rabbitmq;
-pub mod utils; // YENİ SATIR
+pub mod utils;
+pub mod persistence; // YENİ: Persistence modülü eklendi
