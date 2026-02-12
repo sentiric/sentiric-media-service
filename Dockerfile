@@ -1,5 +1,7 @@
 # --- STAGE 1: Builder ---
-FROM rust:1.88-slim-bookworm AS builder
+# [KRİTİK GÜNCELLEME]: Rust versiyonu 1.88'den güncel bir kararlı sürüme yükseltildi.
+# Bu, yerel ve CI ortamları arasındaki tutarlılığı sağlar.
+FROM rust:1.93-slim-bookworm AS builder
 
 # Gerekli derleme araçlarını kur
 RUN apt-get update && \
@@ -21,10 +23,10 @@ ARG SERVICE_VERSION
 
 WORKDIR /app
 
-# [YENİ]: Cargo.lock dosyasını da kopyala
+# Cargo.lock dosyasını kopyala
 COPY Cargo.toml Cargo.lock ./
 
-# [YENİ]: Bağımlılıkları önceden indir
+# Bağımlılıkları önceden indir ve derle
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     cargo build --release --quiet && \
@@ -38,7 +40,7 @@ ENV GIT_COMMIT=${GIT_COMMIT}
 ENV BUILD_DATE=${BUILD_DATE}
 ENV SERVICE_VERSION=${SERVICE_VERSION}
 
-# Derlemeyi yap (artık daha hızlı olacak)
+# Derlemeyi yap
 RUN cargo build --release
 
 # --- STAGE 2: Final (Minimal) Image ---
