@@ -23,24 +23,19 @@ ARG SERVICE_VERSION
 
 WORKDIR /app
 
-# Cargo.lock dosyasını kopyala
 COPY Cargo.toml Cargo.lock ./
 
-# Bağımlılıkları önceden indir ve derle
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
     cargo build --release --quiet && \
     rm -rf src target/release/deps/sentiric_media_service*
 
-# Kaynak kodunun geri kalanını kopyala
 COPY . .
 
-# Build-time environment değişkenlerini ayarla
 ENV GIT_COMMIT=${GIT_COMMIT}
 ENV BUILD_DATE=${BUILD_DATE}
 ENV SERVICE_VERSION=${SERVICE_VERSION}
 
-# Derlemeyi yap
 RUN cargo build --release
 
 # --- STAGE 2: Final (Minimal) Image ---
@@ -65,15 +60,17 @@ ENV SERVICE_VERSION=${SERVICE_VERSION}
 
 WORKDIR /app
 
-# Dosyaları kopyala ve sahipliği yeni kullanıcıya ver
-COPY --from=builder /app/target/release/sentiric-media-service .
-RUN chown appuser:appgroup ./sentiric-media-service
-
-# GÜVENLİK: Root olmayan bir kullanıcı oluştur
+# [DÜZELTME]: Komutlar yeniden sıralandı.
+# 1. Önce kullanıcıyı oluştur.
 RUN addgroup --system --gid 1001 appgroup && \
     adduser --system --no-create-home --uid 1001 --ingroup appgroup appuser
 
-# GÜVENLİK: Kullanıcıyı değiştir
+# 2. Dosyaları kopyala VE kopyalarken doğru sahibi ata (--chown).
+COPY --from=builder --chown=appuser:appgroup /app/target/release/sentiric-media-service .
+
+# 3. Artık 'RUN chown' komutuna gerek yok.
+
+# 4. Kullanıcıyı değiştir.
 USER appuser
 
 ENTRYPOINT ["./sentiric-media-service"]
