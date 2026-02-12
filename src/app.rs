@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
 use tracing::{info, warn};
+use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
 pub struct App {
     config: Arc<AppConfig>,
@@ -35,9 +36,15 @@ impl App {
             .unwrap_or_else(|_| "info,h2=warn,hyper=warn,tower=warn,rustls=warn,lapin=warn".to_string());
         
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
-        let subscriber = Registry::default().with(env_filter).with(fmt::layer().json());
+        let subscriber = Registry::default().with(env_filter);
         
-        tracing::subscriber::set_global_default(subscriber).ok();
+        // [DEĞİŞİKLİK] Ortama göre log formatı
+        if config.env == "production" {
+            subscriber.with(fmt::layer().json()).init();
+        } else {
+            // Development: Pretty Print (Renkli ve Okunabilir)
+            subscriber.with(fmt::layer().compact()).init();
+        }
 
         // Metrik sunucusunu başlat
         let metrics_addr = format!("0.0.0.0:{}", config.metrics_port).parse()?;
@@ -81,6 +88,7 @@ impl App {
         Ok(())
     }
 
+    // 
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client = Self::create_s3_client(config.clone()).await?;
         let rabbit_channel = Self::create_rabbitmq_channel(config.clone()).await?;
@@ -88,7 +96,6 @@ impl App {
         
         let app_state = AppState::new(port_manager, s3_client, rabbit_channel);
         
-        // 🚀 Background Persistence Worker başlatılıyor
         let worker_state = app_state.clone();
         tokio::spawn(async move {
             let worker = crate::persistence::worker::UploadWorker::new(worker_state);
@@ -123,6 +130,3 @@ impl App {
         Ok(None)
     }
 }
-
-// KRİTİK: Importlar sadece üstte tutulur
-use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
