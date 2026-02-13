@@ -1,6 +1,6 @@
 [package]
 name = "sentiric-media-service"
-version = "0.5.1" # Patch bump
+version = "0.5.2" # Patch bump for core upgrade
 edition = "2021"
 
 [dependencies]
@@ -34,8 +34,6 @@ async-trait = "0.1"
 # Media Processing
 hound = "3.5"
 bytes = "1.6"
-# rubato = "0.14" <-- SİLİNDİ (Artık rtp-core içinde)
-# symphonia = ... <-- SİLİNDİ
 
 # Infrastructure
 aws-config = "1.1"
@@ -44,7 +42,7 @@ aws-credential-types = "1.1"
 lapin = "2.3"
 rustls = { version = "0.23", features = ["ring"] }
 
-# --- THE IRON CORE (UPDATED) ---
-sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.4.1" }
-sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.4.3" }
-sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.16.0" }
+# --- THE IRON CORE (STANDARD v2.0) ---
+sentiric-rtp-core = { git = "https://github.com/sentiric/sentiric-rtp-core.git", tag = "v1.5.0" }
+sentiric-sip-core = { git = "https://github.com/sentiric/sentiric-sip-core.git", tag = "v1.5.1" }
+sentiric-contracts = { git = "https://github.com/sentiric/sentiric-contracts.git", tag = "v1.17.0" }

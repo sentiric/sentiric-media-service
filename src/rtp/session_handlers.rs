@@ -7,7 +7,6 @@ use crate::rabbitmq;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot, Mutex};
-// use tokio::net::UdpSocket; // <-- TEMİZLENDİ
 use tracing::{info, error, debug};
 use lapin::{options::BasicPublishOptions, BasicProperties};
 
@@ -43,10 +42,10 @@ pub async fn handle_command(
     endpoint: &sentiric_rtp_core::RtpEndpoint,
     call_id: &str, 
 ) -> bool {
-    // ... (İçerik aynı, sadece import temizlendiği için dosya yeniden yazılmalı)
     match command {
         RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
             let target = endpoint.get_target().or(*known_target).unwrap_or(candidate_target_addr);
+            // Warmer packet
             let _ = socket.send_to(&[0x80; 12], target).await;
             
             let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
@@ -62,6 +61,7 @@ pub async fn handle_command(
             info!("🔊 Native Echo Reflex ENABLED. Sending aggressive warmer.");
             if let Some(target) = endpoint.get_target().or(*known_target) {
                 for _ in 0..3 {
+                    // Silence/Comfort Noise
                     let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target).await;
                 }
             }
@@ -104,26 +104,30 @@ pub async fn start_playback(
             tokio::spawn(async move {
                 let profile = AudioProfile::default();
                 let target_codec_type = profile.preferred_audio_codec();
+                
+                // AudioCodec dönüşümü
                 let target_codec = codecs::AudioCodec::from_rtp_payload_type(target_codec_type as u8).unwrap();
                 
                 let res = match codecs::encode_lpcm16_to_rtp(&samples, target_codec) {
                     Ok(encoded_payload) => {
                         info!(target = %job.target_addr, "🚀 Precision stream starting.");
+                        
                         let ssrc: u32 = rand::random();
                         let mut sequence_number: u16 = rand::random();
                         let mut timestamp: u32 = rand::random();
                         let rtp_payload_type = target_codec.to_payload_type();
                         
-                        let (packet_chunk_size, samples_per_packet) = match target_codec {
-                            codecs::AudioCodec::G729 => (20, 160),
-                            _ => (160, 160),
-                        };
+                        // [CRITICAL FIX]: Paket boyutunu ve sample artışını rtp-core'dan al.
+                        let ptime = profile.ptime;
+                        let packet_chunk_size = target_codec_type.payload_size_bytes(ptime);
+                        let samples_per_frame = target_codec_type.samples_per_frame(ptime);
 
-                        let mut pacer = Pacer::new(profile.ptime as u64);
+                        let mut pacer = Pacer::new(ptime as u64);
 
                         for chunk in encoded_payload.chunks(packet_chunk_size) {
                             if job.cancellation_token.is_cancelled() { break; }
                             pacer.wait(); 
+                            
                             let header = RtpHeader::new(rtp_payload_type, sequence_number, timestamp, ssrc);
                             let packet = RtpPacket { header, payload: chunk.to_vec() };
                             
@@ -132,7 +136,7 @@ pub async fn start_playback(
                             }
                             
                             sequence_number = sequence_number.wrapping_add(1);
-                            timestamp = timestamp.wrapping_add(samples_per_packet as u32);
+                            timestamp = timestamp.wrapping_add(samples_per_frame as u32);
                         }
                         Ok(())
                     },
@@ -140,6 +144,7 @@ pub async fn start_playback(
                 };
                 
                 if res.is_ok() {
+                    // RabbitMQ Event
                     if let Some(channel) = &app_state.rabbitmq_publisher {
                         let json_payload = serde_json::json!({ "callId": call_id_owned, "uri": uri }).to_string();
                         let event = GenericEvent {
@@ -151,7 +156,7 @@ pub async fn start_playback(
                         };
                         let _ = channel.basic_publish(rabbitmq::EXCHANGE_NAME, "call.media.playback.finished", 
                             BasicPublishOptions::default(), &event.encode_to_vec(), BasicProperties::default()).await;
-                        debug!("📢 Sent PlaybackFinished event (Protobuf) for {}", call_id_owned);
+                        debug!("📢 Sent PlaybackFinished event for {}", call_id_owned);
                     }
                 }
 

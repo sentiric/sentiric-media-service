@@ -37,9 +37,6 @@ impl AudioCodec {
     }
 }
 
-/// RTP -> LPCM (16kHz). 
-/// Not: Bu statik fonksiyon artık `simple_resample` kullanıyor.
-/// Canlı akışlar için `AudioProcessor` (stateful) kullanılmalıdır.
 pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16>> {
     if codec == AudioCodec::TelephoneEvent {
         return Ok(vec![]); 
@@ -52,7 +49,6 @@ pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16
     Ok(simple_resample(&samples_8k, 8000, 16000))
 }
 
-/// LPCM (16kHz) -> RTP.
 pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
     if target_codec == AudioCodec::TelephoneEvent {
         return Ok(vec![]);
