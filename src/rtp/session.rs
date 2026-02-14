@@ -1,29 +1,23 @@
 // sentiric-media-service/src/rtp/session.rs
 
-use crate::metrics::ACTIVE_SESSIONS;
+use crate::metrics::{ACTIVE_SESSIONS};
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
-use crate::rtp::session_handlers::{self, PlaybackJob}; 
+use crate::rtp::session_handlers; 
 use crate::rtp::processing::AudioProcessor;
 use crate::rtp::session_utils::finalize_and_save_recording;
 use crate::state::AppState;
-use crate::config::AppConfig;
-// YENİ: RabbitMQ için
-use crate::rabbitmq;
-use lapin::{options::BasicPublishOptions, BasicProperties};
-use sentiric_contracts::sentiric::event::v1::GenericEvent;
-use prost::Message;
-use std::time::SystemTime;
-
-use metrics::gauge;
+use crate::config::AppConfig; // Eklendi
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, instrument, warn, debug};
-use sentiric_rtp_core::{CodecType, RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer, AudioProfile};
+use tracing::{info, instrument, warn};
+use metrics::gauge;
+use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer, AudioProfile};
 
+// [FIX]: Bu struct artık public ve tanımlı. Handlers bunu kullanacak.
 #[derive(Clone)]
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -52,273 +46,151 @@ impl RtpSession {
 
     fn parse_rtp_packet(data: Vec<u8>) -> Option<RtpPacket> {
         if data.len() < 12 { return None; }
-        
-        let first_byte = data[0];
-        let payload_type = data[1] & 0x7F;
-        let sequence_number = u16::from_be_bytes([data[2], data[3]]);
-        let timestamp = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        let ssrc = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-
         let header = RtpHeader {
-            version: (first_byte >> 6) & 0x03,
-            padding: (first_byte >> 5) & 0x01 != 0,
-            extension: (first_byte >> 4) & 0x01 != 0,
-            csrc_count: first_byte & 0x0F,
+            version: (data[0] >> 6) & 0x03,
+            padding: (data[0] >> 5) & 0x01 != 0,
+            extension: (data[0] >> 4) & 0x01 != 0,
+            csrc_count: data[0] & 0x0F,
             marker: (data[1] >> 7) & 0x01 != 0,
-            payload_type,
-            sequence_number,
-            timestamp,
-            ssrc,
+            payload_type: data[1] & 0x7F,
+            sequence_number: u16::from_be_bytes([data[2], data[3]]),
+            timestamp: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
+            ssrc: u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
         };
-
         let payload = data[12..].to_vec();
         Some(RtpPacket { header, payload })
     }
 
-    // YENİ: DTMF Event ID -> Karakter Dönüşümü
-    fn dtmf_id_to_char(id: u8) -> char {
-        match id {
-            0..=9 => (b'0' + id) as char,
-            10 => '*',
-            11 => '#',
-            12 => 'A', 13 => 'B', 14 => 'C', 15 => 'D',
-            _ => '?',
-        }
-    }
-
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!("🎧 RTP Session Started | JitterBuffer: ON (50pkt/60ms)");
+        info!("🎧 RTP Session QoS Monitor Active.");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
-        
         let endpoint = RtpEndpoint::new(None);
-        let mut known_target: Option<SocketAddr> = None;
-        
-        let profile = AudioProfile::default();
-        let mut audio_processor = AudioProcessor::new(profile.preferred_audio_codec());
-        
-        info!("🎛️ Audio Processor Initialized with preferred codec: {:?}", profile.preferred_audio_codec());
-        
+        let _audio_processor = AudioProcessor::new(AudioProfile::default().preferred_audio_codec());
         let mut jitter_buffer = JitterBuffer::new(50, 60);
 
-        let mut loopback_mode_active = false;
-        let mut warmer_counter: u64 = 0; 
-        let mut last_rtp_received = Instant::now();
+        let mut last_seq: Option<u16> = None;
+        let mut packet_loss_count = 0u64;
+        let mut total_packets_rx = 0u64;
+        let mut jitter_acc = 0.0f64;
+        let mut last_arrival = Instant::now();
 
-        let rtp_ssrc: u32 = rand::random();
-        let mut rtp_seq: u16 = rand::random();
-        let mut rtp_ts: u32 = rand::random();
-
-        let mut packets_received = 0;
-        let mut packets_sent = 0;
-        
-        let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(512);
-        
+        let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1024);
         tokio::spawn({
             let socket = socket.clone();
             async move {
                 let mut buf = [0u8; 2048];
                 while let Ok((len, addr)) = socket.recv_from(&mut buf).await {
-                    if len >= 12 { 
-                        let _ = rtp_packet_tx.send((buf[..len].to_vec(), addr)).await; 
-                    }
+                    let _ = rtp_packet_tx.send((buf[..len].to_vec(), addr)).await; 
                 }
             }
         });
 
         let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
         let mut is_streaming = false;
-        let mut playback_queue: VecDeque<PlaybackJob> = VecDeque::new();
+        let mut playback_queue: VecDeque<session_handlers::PlaybackJob> = VecDeque::new();
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
-
         let mut pacer = Pacer::new(20); 
+        let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
         let mut last_activity = Instant::now();
-        let mut log_ticker = tokio::time::interval(Duration::from_secs(5));
-        
-        // [FIX] STT Stream için örnekleme hızını sakla
-        // Note: Media servisinin stt yi biliyor olması sakıncalı!
-        // Media sunucunun durumune yeniden planlamamız gerektiği ortaya çıkıyor
-        // Media servis kendi sorumluluklarına odaklanmalı! 
-        // Bu servis içinde kendi sorumluluğunda dışında başka durumlar da bu planlama ile gözden geçirilmeli.
-        
-        // Çözüm: O değişkenin adı outbound_stream_sample_rate olmalı ve media-service sadece "Subscriber" mantığıyla çalışmalı.
-        
-        let mut stt_stream_sample_rate: u32 = 16000;
+
+        // Config nesnesini oluştur (Handlers için)
+        let session_config = RtpSessionConfig {
+            app_state: self.app_state.clone(),
+            app_config: self.app_state.port_manager.config.clone(),
+            port: self.port,
+        };
 
         loop {
             pacer.wait();
 
-            if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
-                warn!("⚠️ Session timed out due to inactivity. Closing.");
+            if last_activity.elapsed() > Duration::from_secs(60) {
+                warn!("⚠️ Session inactivity timeout. Closing.");
                 break;
             }
 
             if let Some(packet) = jitter_buffer.pop() {
                 if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
-                    audio_processor.update_codec(codec.to_core_type());
-                    
                     if let Ok(pcm) = crate::rtp::codecs::decode_rtp_to_lpcm16(&packet.payload, codec) {
-                        if !pcm.is_empty() {
-                            if let Some(tx) = &*live_stream_sender.lock().await { 
-                                let mut b = Vec::new(); 
-                                for s in &pcm { b.extend_from_slice(&s.to_le_bytes()); }
-                                let media_type = format!("audio/L16;rate={}", stt_stream_sample_rate);
-                                let _ = tx.try_send(Ok(AudioFrame{
-                                    data: b.into(), 
-                                    media_type: media_type.into()
-                                }));
-                            }
-                            if let Some(rec) = &mut *recording_session.lock().await { 
-                                rec.mixed_samples_16khz.extend_from_slice(&pcm); 
-                            }
+                        if let Some(tx) = &*live_stream_sender.lock().await { 
+                            let mut b = Vec::new(); 
+                            for s in &pcm { b.extend_from_slice(&s.to_le_bytes()); }
+                            let _ = tx.try_send(Ok(AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
+                        }
+                        if let Some(rec) = &mut *recording_session.lock().await { 
+                            rec.mixed_samples_16khz.extend_from_slice(&pcm); 
                         }
                     }
                 }
             }
-
-            if is_streaming && !loopback_mode_active {
-                if let Some(target) = endpoint.get_target().or(known_target) {
-                    if let Some(rx) = &mut outbound_stream_rx {
-                        while let Ok(chunk) = rx.try_recv() { audio_processor.push_data(chunk); }
-                    }
-                    if let Some(packets) = audio_processor.process_frame().await {
-                        for p in packets { 
-                            Self::send_raw_rtp(&socket, target, p, &mut rtp_seq, &mut rtp_ts, rtp_ssrc, audio_processor.get_current_codec()).await; 
-                            packets_sent += 1;
-                        }
-                    }
-                }
-            }
-
-            if loopback_mode_active && last_rtp_received.elapsed() > Duration::from_millis(150) && warmer_counter % 25 == 0 {
-                if let Some(target) = endpoint.get_target().or(known_target) {
-                    let hum = if warmer_counter % 50 == 0 { 0x80 } else { 0xD5 };
-                    Self::send_raw_rtp(&socket, target, vec![hum; 160], &mut rtp_seq, &mut rtp_ts, rtp_ssrc, CodecType::PCMU).await;
-                }
-            }
-            warmer_counter = warmer_counter.wrapping_add(1);
 
             tokio::select! {
-                _ = log_ticker.tick() => {
-                    if packets_received > 0 || packets_sent > 0 {
-                        debug!("📊 Stats: Rx: {} | Tx: {}", packets_received, packets_sent);
-                    }
+                _ = stats_ticker.tick() => {
+                    let loss_rate = if total_packets_rx > 0 { 
+                        (packet_loss_count as f64 / (total_packets_rx + packet_loss_count) as f64) * 100.0 
+                    } else { 0.0 };
+                    let avg_jitter = if total_packets_rx > 0 { jitter_acc / total_packets_rx as f64 } else { 0.0 };
+                    
+                    // Observer bu logu parse edip UI'a basacak
+                    info!("📊 QoS Report | Loss: {:.2}%, Jitter: {:.2}ms, Rx: {}", loss_rate, avg_jitter, total_packets_rx);
                 },
 
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
-                    last_rtp_received = Instant::now();
-                    packets_received += 1;
+                    total_packets_rx += 1;
+                    if endpoint.latch(addr) { info!("🔒 Media Latched: {}", addr); }
 
-                    if endpoint.latch(addr) { info!("🔒 [LATCH] Media locked to {}", addr); }
+                    if let Some(packet) = Self::parse_rtp_packet(data) {
+                        let now = Instant::now();
+                        let delta = now.duration_since(last_arrival).as_millis() as f64;
+                        jitter_acc += (delta - 20.0).abs();
+                        last_arrival = now;
 
-                    if loopback_mode_active {
-                        let mut resp = data.clone();
-                        if resp.len() >= 12 { resp[8..12].copy_from_slice(&rtp_ssrc.to_be_bytes()); }
-                        let _ = socket.send_to(&resp, addr).await;
-                    } else {
-                        if let Some(packet) = Self::parse_rtp_packet(data) {
-                            // YENİ: DTMF Detection
-                            if packet.header.payload_type == CodecType::TelephoneEvent as u8 {
-                                if packet.payload.len() >= 4 {
-                                    let event_id = packet.payload[0];
-                                    let end_bit = (packet.payload[1] & 0x80) != 0; // Bit 7: End Bit
-                                    let duration = u16::from_be_bytes([packet.payload[2], packet.payload[3]]);
-                                    
-                                    // Sadece E (End) biti 1 olduğunda olayı işle (Spam engelleme)
-                                    if end_bit {
-                                        let digit = Self::dtmf_id_to_char(event_id);
-                                        info!("⌨️ [DTMF] Detected Digit: '{}' (Duration: {})", digit, duration);
-                                        
-                                        // RabbitMQ Event Publish
-                                        if let Some(channel) = &self.app_state.rabbitmq_publisher {
-                                            let json_payload = serde_json::json!({
-                                                "callId": self.call_id,
-                                                "digit": digit.to_string(),
-                                                "durationMs": duration,
-                                                "event": "dtmf_received"
-                                            }).to_string();
-                                            
-                                            let event = GenericEvent {
-                                                event_type: "call.dtmf.received".to_string(),
-                                                trace_id: self.call_id.clone(), 
-                                                timestamp: Some(prost_types::Timestamp::from(SystemTime::now())),
-                                                tenant_id: "system".to_string(),
-                                                payload_json: json_payload,
-                                            };
-                                            
-                                            let publish_res = channel.basic_publish(
-                                                rabbitmq::EXCHANGE_NAME, 
-                                                "call.dtmf.received", 
-                                                BasicPublishOptions::default(), 
-                                                &event.encode_to_vec(), 
-                                                BasicProperties::default()
-                                            ).await;
-                                            
-                                            if let Err(e) = publish_res {
-                                                warn!("❌ Failed to publish DTMF event: {}", e);
-                                            }
-                                        }
-                                    }
-                                }
-                                continue;
+                        if let Some(prev) = last_seq {
+                            let expected = prev.wrapping_add(1);
+                            if packet.header.sequence_number != expected {
+                                packet_loss_count += packet.header.sequence_number.wrapping_sub(expected) as u64;
                             }
-                            jitter_buffer.push(packet);
                         }
+                        last_seq = Some(packet.header.sequence_number);
+                        jitter_buffer.push(packet);
                     }
                 },
                 
                 Some(cmd) = command_rx.recv() => {
                      last_activity = Instant::now();
-                     match cmd {
-                        RtpCommand::EnableEchoTest => { loopback_mode_active = true; info!("🔊 Echo Mode Enabled"); },
-                        RtpCommand::DisableEchoTest => loopback_mode_active = false,
-                        RtpCommand::SetTargetAddress { target } => { known_target = Some(target); },
-                        RtpCommand::StartLiveAudioStream { stream_sender, target_sample_rate } => { 
-                            let mut guard = live_stream_sender.lock().await; 
-                            *guard = Some(stream_sender);
-                            if let Some(sr) = target_sample_rate {
-                                stt_stream_sample_rate = sr;
-                            }
-                        },
-                        _ => {
-                            if session_handlers::handle_command(cmd, self.port, &live_stream_sender, &recording_session, &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, &mut is_playing, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, &socket, &finished_tx, &mut known_target, &endpoint, &self.call_id).await { break; }
-                        }
-                    }
+                     if matches!(cmd, RtpCommand::Shutdown) { break; }
+                     
+                     // [FIX]: session_config nesnesini geçiriyoruz
+                     if session_handlers::handle_command(
+                         cmd, self.port, &live_stream_sender, &recording_session, 
+                         &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, 
+                         &mut is_playing, 
+                         &session_config, 
+                         &socket, &finished_tx, &mut None, &endpoint, &self.call_id
+                     ).await { break; }
                 },
 
                 Some(_) = finished_rx.recv() => {
                      is_playing = false;
                      if let Some(next) = playback_queue.pop_front() {
                          is_playing = true;
-                         session_handlers::start_playback(next, &RtpSessionConfig{app_state: self.app_state.clone(), app_config: self.app_state.port_manager.config.clone(), port: self.port}, socket.clone(), finished_tx.clone(), &self.call_id).await;
+                         // [FIX]: session_config nesnesini geçiriyoruz
+                         session_handlers::start_playback(next, &session_config, socket.clone(), finished_tx.clone(), &self.call_id).await;
                      }
                 }
             }
         }
         
-        endpoint.reset(); 
-        if let Some(rec) = recording_session.lock().await.take() { let _ = finalize_and_save_recording(rec, self.app_state.clone()).await; }
+        if let Some(rec) = recording_session.lock().await.take() { 
+            let _ = finalize_and_save_recording(rec, self.app_state.clone()).await; 
+        }
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
         info!("🛑 RTP Session Terminated.");
-    }
-
-    async fn send_raw_rtp(socket: &tokio::net::UdpSocket, target: SocketAddr, payload: Vec<u8>, seq: &mut u16, ts: &mut u32, ssrc: u32, codec: CodecType) {
-        let pt = codec as u8;
-        let header = RtpHeader::new(pt, *seq, *ts, ssrc);
-        let packet = RtpPacket { header, payload };
-        
-        if let Err(e) = socket.send_to(&packet.to_bytes(), target).await {
-            warn!("RTP send error: {}", e);
-        }
-        
-        *seq = seq.wrapping_add(1);
-        let increment = 160;
-        *ts = ts.wrapping_add(increment);
     }
 }

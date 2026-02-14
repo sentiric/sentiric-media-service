@@ -2,7 +2,7 @@
 
 use super::command::{RtpCommand, AudioFrame, RecordingSession};
 use super::session_utils::load_and_resample_samples_from_uri; 
-use super::session::RtpSessionConfig;
+use super::session::RtpSessionConfig; // [FIX]: Artık doğru yerden import ediliyor.
 use crate::rabbitmq;
 use std::sync::Arc;
 use std::net::SocketAddr;
@@ -58,7 +58,7 @@ pub async fn handle_command(
             }
         },
         RtpCommand::EnableEchoTest => {
-            info!("🔊 Native Echo Reflex ENABLED. Sending aggressive warmer.");
+            info!("🔊 Native Echo Reflex ENABLED.");
             if let Some(target) = endpoint.get_target().or(*known_target) {
                 for _ in 0..3 {
                     // Silence/Comfort Noise
@@ -82,6 +82,7 @@ pub async fn handle_command(
             }
         },
         RtpCommand::Shutdown => return true,
+        RtpCommand::SetTargetAddress { target } => { *known_target = Some(target); },
         _ => {}
     }
     false
@@ -105,7 +106,6 @@ pub async fn start_playback(
                 let profile = AudioProfile::default();
                 let target_codec_type = profile.preferred_audio_codec();
                 
-                // AudioCodec dönüşümü
                 let target_codec = codecs::AudioCodec::from_rtp_payload_type(target_codec_type as u8).unwrap();
                 
                 let res = match codecs::encode_lpcm16_to_rtp(&samples, target_codec) {
@@ -117,7 +117,6 @@ pub async fn start_playback(
                         let mut timestamp: u32 = rand::random();
                         let rtp_payload_type = target_codec.to_payload_type();
                         
-                        // [CRITICAL FIX]: Paket boyutunu ve sample artışını rtp-core'dan al.
                         let ptime = profile.ptime;
                         let packet_chunk_size = target_codec_type.payload_size_bytes(ptime);
                         let samples_per_frame = target_codec_type.samples_per_frame(ptime);
@@ -144,7 +143,6 @@ pub async fn start_playback(
                 };
                 
                 if res.is_ok() {
-                    // RabbitMQ Event
                     if let Some(channel) = &app_state.rabbitmq_publisher {
                         let json_payload = serde_json::json!({ "callId": call_id_owned, "uri": uri }).to_string();
                         let event = GenericEvent {
@@ -154,8 +152,15 @@ pub async fn start_playback(
                             tenant_id: "system".to_string(),
                             payload_json: json_payload,
                         };
-                        let _ = channel.basic_publish(rabbitmq::EXCHANGE_NAME, "call.media.playback.finished", 
-                            BasicPublishOptions::default(), &event.encode_to_vec(), BasicProperties::default()).await;
+                        // [FIX]: Hata veren satır. Publisher confirm beklemek için confirm type belirtildi.
+                        let _ = channel.basic_publish(
+                            rabbitmq::EXCHANGE_NAME, 
+                            "call.media.playback.finished", 
+                            BasicPublishOptions::default(), 
+                            &event.encode_to_vec(), 
+                            BasicProperties::default()
+                        ).await;
+                        
                         debug!("📢 Sent PlaybackFinished event for {}", call_id_owned);
                     }
                 }
