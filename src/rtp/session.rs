@@ -61,6 +61,7 @@ impl RtpSession {
         Some(RtpPacket { header, payload })
     }
 
+
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
         info!("🎧 RTP Session QoS Monitor Active.");
@@ -134,8 +135,16 @@ impl RtpSession {
                     } else { 0.0 };
                     let avg_jitter = if total_packets_rx > 0 { jitter_acc / total_packets_rx as f64 } else { 0.0 };
                     
-                    // Observer bu logu parse edip UI'a basacak
-                    info!("📊 QoS Report | Loss: {:.2}%, Jitter: {:.2}ms, Rx: {}", loss_rate, avg_jitter, total_packets_rx);
+                    // [GÜNCELLENDİ] Structured Logging
+                    // Metin: "📊 QoS Report | Loss: {:.2}%, Jitter: {:.2}ms" yerine
+                    // JSON: { "event": "RTP_QOS", "loss_rate": 0.0, "jitter": 1.2, ... }
+                    info!(
+                        event = "RTP_QOS",
+                        packet_loss_percent = loss_rate,
+                        jitter_ms = avg_jitter,
+                        packets_received = total_packets_rx,
+                        "RTP Quality Report"
+                    );
                 },
 
                 Some((data, addr)) = rtp_packet_rx.recv() => {

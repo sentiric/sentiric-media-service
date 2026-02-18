@@ -29,13 +29,14 @@ pub struct AppConfig {
     pub assets_base_path: String,
     pub env: String,
     pub rust_log: String,
+    pub log_format: String, // [YENİ]
     pub metrics_port: u16,
     pub s3_config: Option<S3Config>,
     pub rtp_session_inactivity_timeout: Duration,
     pub rtp_command_channel_buffer: usize,
     pub live_audio_stream_buffer: usize,
     pub rabbitmq_url: Option<String>,
-    pub media_engine_mode: MediaEngineMode, // [YENİ]
+    pub media_engine_mode: MediaEngineMode,
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
@@ -69,12 +70,11 @@ impl AppConfig {
         
         let rabbitmq_url = env::var("RABBITMQ_URL").ok();
 
-        // [YENİ] Mod Belirleme
         let mode_str = env::var("MEDIA_ENGINE_MODE").unwrap_or_else(|_| "HEADLESS".to_string());
         let media_engine_mode = if mode_str.to_uppercase() == "HARDWARE" {
             MediaEngineMode::Hardware
         } else {
-            MediaEngineMode::Headless // Varsayılan
+            MediaEngineMode::Headless
         };
 
         Ok(AppConfig {
@@ -86,6 +86,7 @@ impl AppConfig {
             rtp_port_quarantine_duration: Duration::from_secs(quarantine_seconds),
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()), // [YENİ]
             metrics_port,
             s3_config,
             rabbitmq_url,

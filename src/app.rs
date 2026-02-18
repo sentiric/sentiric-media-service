@@ -38,11 +38,10 @@ impl App {
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        // [DEĞİŞİKLİK] Ortama göre log formatı
-        if config.env == "production" {
-            subscriber.with(fmt::layer().json()).init();
+        // [GÜNCELLENDİ] JSON Format Desteği
+        if config.log_format == "json" {
+            subscriber.with(fmt::layer().json().flatten_event(true)).init();
         } else {
-            // Development: Pretty Print (Renkli ve Okunabilir)
             subscriber.with(fmt::layer().compact()).init();
         }
 
@@ -88,7 +87,7 @@ impl App {
         Ok(())
     }
 
-    // 
+
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client = Self::create_s3_client(config.clone()).await?;
         let rabbit_channel = Self::create_rabbitmq_channel(config.clone()).await?;
