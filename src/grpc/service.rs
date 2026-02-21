@@ -1,3 +1,4 @@
+// src/grpc/service.rs
 use crate::grpc::error::ServiceError;
 use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
 use crate::rtp::command::{RtpCommand, RecordingSession};
@@ -32,6 +33,7 @@ impl MyMediaService {
         Self { app_state, config }
     }
 
+    // Helper: Metadata'dan trace_id okur
     fn extract_trace_id<T>(req: &Request<T>) -> String {
         req.metadata().get("x-trace-id")
             .and_then(|v| v.to_str().ok())
@@ -90,7 +92,7 @@ impl MediaService for MyMediaService {
             Ok(socket) => {
                 gauge!(ACTIVE_SESSIONS).increment(1.0);
                 
-                // [GÜNCELLEME]: RtpSession artık trace_id'yi de alıyor
+                // [KRİTİK]: RtpSession'a trace_id'yi de paslıyoruz.
                 let session = RtpSession::new(
                     trace_id.clone(),
                     call_id.clone(), 

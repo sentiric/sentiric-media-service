@@ -1,3 +1,4 @@
+// src/rtp/session.rs
 use crate::metrics::{ACTIVE_SESSIONS};
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
@@ -23,14 +24,14 @@ pub struct RtpSessionConfig {
 
 pub struct RtpSession {
     pub call_id: String,
-    pub trace_id: String, // EKLENDİ
+    pub trace_id: String, // [YENİ]
     pub port: u16,
     command_tx: mpsc::Sender<RtpCommand>,
     app_state: AppState,
 }
 
 impl RtpSession {
-    // İMZA DEĞİŞTİ: trace_id parametresi eklendi
+    // İMZA GÜNCELLENDİ: trace_id eklendi
     pub fn new(trace_id: String, call_id: String, port: u16, socket: Arc<tokio::net::UdpSocket>, app_state: AppState) -> Arc<Self> {
         let (command_tx, command_rx) = mpsc::channel(128);
         let session = Arc::new(Self { 

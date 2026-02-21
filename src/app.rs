@@ -1,10 +1,11 @@
+// src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyMediaService;
 use crate::metrics::start_metrics_server;
 use crate::rabbitmq;
 use crate::state::{AppState, PortManager};
 use crate::tls::load_server_tls_config;
-use crate::telemetry::SutsFormatter; // YENİ
+use crate::telemetry::SutsFormatter;
 use sentiric_contracts::sentiric::media::v1::media_service_server::MediaServiceServer;
 
 use anyhow::{Context, Result};
@@ -16,7 +17,7 @@ use std::env;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
-use tracing::{info, warn, error}; // error eklendi
+use tracing::{info, warn, error};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
 pub struct App {
@@ -27,16 +28,16 @@ impl App {
     pub async fn bootstrap() -> Result<Self> {
         let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
         if let Err(_) = dotenvy::from_filename(&env_file) {
-            // Sessiz devam et (opsiyonel)
+            // Sessiz devam et
         }
 
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
+        // --- SUTS v4.0 LOGGING SETUP ---
         let rust_log_env = env::var("RUST_LOG").unwrap_or_else(|_| config.rust_log.clone());
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        // --- SUTS v4.0 LOGGING ---
         if config.log_format == "json" {
             let suts_formatter = SutsFormatter::new(
                 "media-service".to_string(),
@@ -48,9 +49,8 @@ impl App {
         } else {
             subscriber.with(fmt::layer().compact()).init();
         }
-        // -------------------------
+        // -------------------------------
 
-        // Metrik sunucusunu başlat
         let metrics_addr = format!("0.0.0.0:{}", config.metrics_port).parse()?;
         start_metrics_server(metrics_addr);
         
@@ -73,6 +73,7 @@ impl App {
             let app_state = Self::setup_dependencies(app_config.clone()).await?;
             let reclamation_manager = app_state.port_manager.clone();
             let quarantine_duration = app_config.rtp_port_quarantine_duration;
+            
             tokio::spawn(async move {
                 reclamation_manager.run_reclamation_task(quarantine_duration).await;
             });
@@ -81,13 +82,14 @@ impl App {
             
             let media_service = MyMediaService::new(app_config.clone(), app_state);
             let server_addr = app_config.grpc_listen_addr;
-            info!(address = %server_addr, "🚀 Secured gRPC server starting...");
+            info!(event="GRPC_SERVER_START", address = %server_addr, "Güvenli gRPC sunucusu başlatılıyor...");
 
             let server = Server::builder()
                 .tls_config(tls_config)?
                 .add_service(MediaServiceServer::new(media_service))
                 .serve_with_shutdown(server_addr, async {
                     shutdown_rx.recv().await;
+                    info!(event="GRPC_SHUTDOWN_SIGNAL", "gRPC sunucusu kapanıyor.");
                 });
             
             server.await.context("gRPC sunucusu hatayla sonlandı")
@@ -95,7 +97,7 @@ impl App {
 
         tokio::select! {
             res = server_handle => { 
-                if let Err(e) = res { error!("Server Error: {}", e); } 
+                if let Err(e) = res { error!(event="SERVER_ERROR", error=%e, "Sunucu hatası"); } 
             },
             _ = tokio::signal::ctrl_c() => {
                 warn!(event="SIGINT", "Kapatma sinyali alındı.");
@@ -108,7 +110,6 @@ impl App {
         Ok(())
     }
 
-    // (Helper fonksiyonlar aynı kalacak, sadece yeniden import etmeye gerek yok)
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client = Self::create_s3_client(config.clone()).await?;
         let rabbit_channel = Self::create_rabbitmq_channel(config.clone()).await?;
@@ -136,6 +137,7 @@ impl App {
                 )).load().await;
             
             let s3_client_config = S3ConfigBuilder::from(&sdk_config).force_path_style(true).build();
+            info!(event="S3_CONNECTED", bucket=%s3_config.bucket_name, "S3 istemcisi hazır.");
             return Ok(Some(Arc::new(S3Client::from_conf(s3_client_config))));
         }
         Ok(None)
