@@ -1,10 +1,10 @@
-// sentiric-media-service/src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyMediaService;
 use crate::metrics::start_metrics_server;
 use crate::rabbitmq;
 use crate::state::{AppState, PortManager};
 use crate::tls::load_server_tls_config;
+use crate::telemetry::SutsFormatter; // YENİ
 use sentiric_contracts::sentiric::media::v1::media_service_server::MediaServiceServer;
 
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ use std::env;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
-use tracing::{info, warn};
+use tracing::{info, warn, error}; // error eklendi
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
 pub struct App {
@@ -27,27 +27,40 @@ impl App {
     pub async fn bootstrap() -> Result<Self> {
         let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
         if let Err(_) = dotenvy::from_filename(&env_file) {
-            warn!(file = %env_file, "Environment file not found, continuing with system env.");
+            // Sessiz devam et (opsiyonel)
         }
 
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
-        let rust_log_env = env::var("RUST_LOG")
-            .unwrap_or_else(|_| "info,h2=warn,hyper=warn,tower=warn,rustls=warn,lapin=warn".to_string());
-        
+        let rust_log_env = env::var("RUST_LOG").unwrap_or_else(|_| config.rust_log.clone());
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
         
-        // [GÜNCELLENDİ] JSON Format Desteği
+        // --- SUTS v4.0 LOGGING ---
         if config.log_format == "json" {
-            subscriber.with(fmt::layer().json().flatten_event(true)).init();
+            let suts_formatter = SutsFormatter::new(
+                "media-service".to_string(),
+                config.service_version.clone(),
+                config.env.clone(),
+                config.node_hostname.clone(),
+            );
+            subscriber.with(fmt::layer().event_format(suts_formatter)).init();
         } else {
             subscriber.with(fmt::layer().compact()).init();
         }
+        // -------------------------
 
         // Metrik sunucusunu başlat
         let metrics_addr = format!("0.0.0.0:{}", config.metrics_port).parse()?;
         start_metrics_server(metrics_addr);
+        
+        info!(
+            event = "SYSTEM_STARTUP",
+            service_name = "sentiric-media-service",
+            version = %config.service_version,
+            profile = %config.env,
+            "🚀 Media Servisi Başlatılıyor (SUTS v4.0)"
+        );
 
         Ok(Self { config })
     }
@@ -56,7 +69,7 @@ impl App {
         let (shutdown_tx, mut shutdown_rx) = mpsc::channel(1);
         let app_config = self.config.clone();
 
-        let _server_handle = tokio::spawn(async move {
+        let server_handle = tokio::spawn(async move {
             let app_state = Self::setup_dependencies(app_config.clone()).await?;
             let reclamation_manager = app_state.port_manager.clone();
             let quarantine_duration = app_config.rtp_port_quarantine_duration;
@@ -80,14 +93,22 @@ impl App {
             server.await.context("gRPC sunucusu hatayla sonlandı")
         });
 
-        tokio::signal::ctrl_c().await.ok();
-        warn!("Graceful shutdown initiated...");
+        tokio::select! {
+            res = server_handle => { 
+                if let Err(e) = res { error!("Server Error: {}", e); } 
+            },
+            _ = tokio::signal::ctrl_c() => {
+                warn!(event="SIGINT", "Kapatma sinyali alındı.");
+            }
+        }
+
         let _ = shutdown_tx.send(()).await;
+        info!(event="SYSTEM_STOPPED", "Servis durduruldu.");
         
         Ok(())
     }
 
-
+    // (Helper fonksiyonlar aynı kalacak, sadece yeniden import etmeye gerek yok)
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client = Self::create_s3_client(config.clone()).await?;
         let rabbit_channel = Self::create_rabbitmq_channel(config.clone()).await?;

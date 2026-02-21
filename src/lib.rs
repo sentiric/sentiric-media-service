@@ -1,5 +1,3 @@
-// sentiric-media-service/src/lib.rs
-
 pub mod app;
 pub mod config;
 pub mod state;
@@ -10,4 +8,5 @@ pub mod tls;
 pub mod metrics;
 pub mod rabbitmq;
 pub mod utils;
-pub mod persistence; // YENİ: Persistence modülü eklendi
+pub mod persistence;
+pub mod telemetry; // YENİ EKLENDİ

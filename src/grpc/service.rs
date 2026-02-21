@@ -1,5 +1,3 @@
-// sentiric-media-service/src/grpc/service.rs
-
 use crate::grpc::error::ServiceError;
 use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
 use crate::rtp::command::{RtpCommand, RecordingSession};
@@ -60,7 +58,6 @@ impl MediaService for MyMediaService {
 
         let call_id = first_msg.call_id.clone();
         
-        // [FIX]: Added .await to resolve the Future before calling ok_or_else
         let session = self.app_state.port_manager.get_session_by_call_id(&call_id).await
             .ok_or_else(|| Status::not_found("Session not found"))?;
 
@@ -81,7 +78,9 @@ impl MediaService for MyMediaService {
     
     #[instrument(skip(self, request), fields(call_id = %request.get_ref().call_id, trace_id))]
     async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
-        let _trace_id = Self::extract_trace_id(&request);
+        let trace_id = Self::extract_trace_id(&request);
+        Span::current().record("trace_id", &trace_id);
+        
         let call_id = request.get_ref().call_id.clone();
         counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
 
@@ -90,8 +89,26 @@ impl MediaService for MyMediaService {
         match UdpSocket::bind(format!("{}:{}", self.config.rtp_host, port)).await {
             Ok(socket) => {
                 gauge!(ACTIVE_SESSIONS).increment(1.0);
-                let session = RtpSession::new(call_id.clone(), port, Arc::new(socket), self.app_state.clone());
+                
+                // [GÜNCELLEME]: RtpSession artık trace_id'yi de alıyor
+                let session = RtpSession::new(
+                    trace_id.clone(),
+                    call_id.clone(), 
+                    port, 
+                    Arc::new(socket), 
+                    self.app_state.clone()
+                );
+                
                 self.app_state.port_manager.add_session(port, session).await;
+                
+                info!(
+                    event = "MEDIA_PORT_ALLOCATED",
+                    trace_id = %trace_id,
+                    call_id = %call_id,
+                    rtp.port = port,
+                    "RTP Port Allocated"
+                );
+                
                 Ok(Response::new(AllocatePortResponse { rtp_port: port as u32 }))
             }
             Err(_) => {
@@ -103,32 +120,44 @@ impl MediaService for MyMediaService {
 
     #[instrument(skip(self, request), fields(port = %request.get_ref().rtp_port, trace_id))]
     async fn release_port(&self, request: Request<ReleasePortRequest>) -> Result<Response<ReleasePortResponse>, Status> {
-        let _trace_id = Self::extract_trace_id(&request);
+        let trace_id = Self::extract_trace_id(&request);
+        Span::current().record("trace_id", &trace_id);
+        
         let port = request.into_inner().rtp_port as u16;
         if let Some(session) = self.app_state.port_manager.get_session(port).await {
             let _ = session.send_command(RtpCommand::Shutdown).await;
+            info!(
+                event = "MEDIA_PORT_RELEASED",
+                trace_id = %trace_id,
+                rtp.port = port,
+                "RTP Port Released"
+            );
         }
         Ok(Response::new(ReleasePortResponse { success: true }))
     }
 
     #[instrument(skip(self, request), fields(port = %request.get_ref().server_rtp_port, trace_id))]
     async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
-        let _trace_id = Self::extract_trace_id(&request);
+        let trace_id = Self::extract_trace_id(&request);
+        Span::current().record("trace_id", &trace_id);
+        
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
         let session = self.app_state.port_manager.get_session(rtp_port).await.ok_or(ServiceError::SessionNotFound { port: rtp_port })?;
 
-        // [MİMARİ DÜZELTME]: Hedef adresi her zaman kaydetmeliyiz. 
-        // control:// olsa bile 'rtp_target_addr' bilgisini session'a geçmeliyiz ki 'warmer' çalışsın.
         let target_addr: SocketAddr = req.rtp_target_addr.parse().map_err(|e| ServiceError::InvalidTargetAddress { addr: req.rtp_target_addr, source: e })?;
         let _ = session.send_command(RtpCommand::SetTargetAddress { target: target_addr }).await;
 
-        // --- NATIVE PBX CONTROL SCHEME ---
         if req.audio_uri.starts_with("control://") {
             let cmd = req.audio_uri.strip_prefix("control://").unwrap();
             match cmd {
                 "enable_echo" => {
-                    info!("🔊 Native Echo Reflex ENABLED for address: {}", target_addr);
+                    info!(
+                        event = "NATIVE_ECHO_ENABLED",
+                        trace_id = %trace_id,
+                        target = %target_addr,
+                        "🔊 Native Echo Reflex ENABLED"
+                    );
                     let _ = session.send_command(RtpCommand::EnableEchoTest).await;
                     return Ok(Response::new(PlayAudioResponse { success: true, message: "Echo On".into() }));
                 }
@@ -140,7 +169,6 @@ impl MediaService for MyMediaService {
             }
         }
 
-        // Normal dosya çalma mantığı devam ediyor...
         let (tx, rx) = oneshot::channel();
         session.send_command(RtpCommand::PlayAudioUri {
             audio_uri: req.audio_uri,

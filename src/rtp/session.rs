@@ -1,5 +1,3 @@
-// sentiric-media-service/src/rtp/session.rs
-
 use crate::metrics::{ACTIVE_SESSIONS};
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
@@ -7,8 +5,7 @@ use crate::rtp::session_handlers;
 use crate::rtp::processing::AudioProcessor;
 use crate::rtp::session_utils::finalize_and_save_recording;
 use crate::state::AppState;
-use crate::config::AppConfig; // Eklendi
-use std::collections::VecDeque;
+use crate::config::AppConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
@@ -17,7 +14,6 @@ use tracing::{info, instrument, warn};
 use metrics::gauge;
 use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer, AudioProfile};
 
-// [FIX]: Bu struct artık public ve tanımlı. Handlers bunu kullanacak.
 #[derive(Clone)]
 pub struct RtpSessionConfig {
     pub app_state: AppState,
@@ -27,15 +23,23 @@ pub struct RtpSessionConfig {
 
 pub struct RtpSession {
     pub call_id: String,
+    pub trace_id: String, // EKLENDİ
     pub port: u16,
     command_tx: mpsc::Sender<RtpCommand>,
     app_state: AppState,
 }
 
 impl RtpSession {
-    pub fn new(call_id: String, port: u16, socket: Arc<tokio::net::UdpSocket>, app_state: AppState) -> Arc<Self> {
+    // İMZA DEĞİŞTİ: trace_id parametresi eklendi
+    pub fn new(trace_id: String, call_id: String, port: u16, socket: Arc<tokio::net::UdpSocket>, app_state: AppState) -> Arc<Self> {
         let (command_tx, command_rx) = mpsc::channel(128);
-        let session = Arc::new(Self { call_id, port, command_tx, app_state: app_state.clone() });
+        let session = Arc::new(Self { 
+            call_id, 
+            trace_id, 
+            port, 
+            command_tx, 
+            app_state: app_state.clone() 
+        });
         tokio::spawn(Self::run(session.clone(), socket, command_rx));
         session
     }
@@ -61,10 +65,14 @@ impl RtpSession {
         Some(RtpPacket { header, payload })
     }
 
-
-    #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id))]
+    #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!("🎧 RTP Session QoS Monitor Active.");
+        info!(
+            event = "RTP_SESSION_START",
+            trace_id = %self.trace_id,
+            call_id = %self.call_id,
+            "🎧 RTP Session Started"
+        );
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
@@ -91,14 +99,13 @@ impl RtpSession {
 
         let mut outbound_stream_rx: Option<mpsc::Receiver<Vec<u8>>> = None;
         let mut is_streaming = false;
-        let mut playback_queue: VecDeque<session_handlers::PlaybackJob> = VecDeque::new();
+        let mut playback_queue: std::collections::VecDeque<session_handlers::PlaybackJob> = std::collections::VecDeque::new();
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
         let mut pacer = Pacer::new(20); 
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
         let mut last_activity = Instant::now();
 
-        // Config nesnesini oluştur (Handlers için)
         let session_config = RtpSessionConfig {
             app_state: self.app_state.clone(),
             app_config: self.app_state.port_manager.config.clone(),
@@ -108,8 +115,12 @@ impl RtpSession {
         loop {
             pacer.wait();
 
-            if last_activity.elapsed() > Duration::from_secs(60) {
-                warn!("⚠️ Session inactivity timeout. Closing.");
+            if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
+                warn!(
+                    event = "RTP_TIMEOUT",
+                    trace_id = %self.trace_id,
+                    "⚠️ Session inactivity timeout. Closing."
+                );
                 break;
             }
 
@@ -135,11 +146,11 @@ impl RtpSession {
                     } else { 0.0 };
                     let avg_jitter = if total_packets_rx > 0 { jitter_acc / total_packets_rx as f64 } else { 0.0 };
                     
-                    // [GÜNCELLENDİ] Structured Logging
-                    // Metin: "📊 QoS Report | Loss: {:.2}%, Jitter: {:.2}ms" yerine
-                    // JSON: { "event": "RTP_QOS", "loss_rate": 0.0, "jitter": 1.2, ... }
+                    // [SUTS v4.0]: Zenginleştirilmiş QoS Raporu
                     info!(
                         event = "RTP_QOS",
+                        trace_id = %self.trace_id,
+                        call_id = %self.call_id,
                         packet_loss_percent = loss_rate,
                         jitter_ms = avg_jitter,
                         packets_received = total_packets_rx,
@@ -150,7 +161,15 @@ impl RtpSession {
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
                     total_packets_rx += 1;
-                    if endpoint.latch(addr) { info!("🔒 Media Latched: {}", addr); }
+                    if endpoint.latch(addr) { 
+                        info!(
+                            event = "RTP_LATCH",
+                            trace_id = %self.trace_id,
+                            peer.ip = %addr.ip(),
+                            peer.port = addr.port(),
+                            "🔒 Media Latched"
+                        ); 
+                    }
 
                     if let Some(packet) = Self::parse_rtp_packet(data) {
                         let now = Instant::now();
@@ -173,7 +192,6 @@ impl RtpSession {
                      last_activity = Instant::now();
                      if matches!(cmd, RtpCommand::Shutdown) { break; }
                      
-                     // [FIX]: session_config nesnesini geçiriyoruz
                      if session_handlers::handle_command(
                          cmd, self.port, &live_stream_sender, &recording_session, 
                          &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, 
@@ -187,7 +205,6 @@ impl RtpSession {
                      is_playing = false;
                      if let Some(next) = playback_queue.pop_front() {
                          is_playing = true;
-                         // [FIX]: session_config nesnesini geçiriyoruz
                          session_handlers::start_playback(next, &session_config, socket.clone(), finished_tx.clone(), &self.call_id).await;
                      }
                 }
@@ -200,6 +217,11 @@ impl RtpSession {
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
-        info!("🛑 RTP Session Terminated.");
+        
+        info!(
+            event = "RTP_SESSION_END",
+            trace_id = %self.trace_id,
+            "🛑 RTP Session Terminated."
+        );
     }
 }

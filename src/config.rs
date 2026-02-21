@@ -1,4 +1,3 @@
-// sentiric-media-service/src/config.rs
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -6,8 +5,8 @@ use anyhow::{Result, Context, bail};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MediaEngineMode {
-    Headless, // Sunucu modu (Ses kartı yok)
-    Hardware, // Masaüstü/Lokal mod (Ses kartı var)
+    Headless, 
+    Hardware, 
 }
 
 #[derive(Debug, Clone)]
@@ -29,7 +28,7 @@ pub struct AppConfig {
     pub assets_base_path: String,
     pub env: String,
     pub rust_log: String,
-    pub log_format: String, // [YENİ]
+    pub log_format: String,
     pub metrics_port: u16,
     pub s3_config: Option<S3Config>,
     pub rtp_session_inactivity_timeout: Duration,
@@ -37,6 +36,8 @@ pub struct AppConfig {
     pub live_audio_stream_buffer: usize,
     pub rabbitmq_url: Option<String>,
     pub media_engine_mode: MediaEngineMode,
+    pub service_version: String,
+    pub node_hostname: String, // YENİ
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
@@ -55,9 +56,6 @@ impl AppConfig {
         let quarantine_seconds: u64 = env::var("RTP_SERVICE_PORT_QUARANTINE_SECONDS").unwrap_or_else(|_| "5".to_string()).parse()?;
         let inactivity_seconds: u64 = env::var("RTP_SESSION_INACTIVITY_TIMEOUT_SECONDS").unwrap_or_else(|_| "30".to_string()).parse()?;
         
-        let command_buffer: usize = 32;
-        let stream_buffer: usize = 64;
-
         let s3_config = if env::var("BUCKET_ENDPOINT_URL").is_ok() {
             Some(S3Config {
                 endpoint_url: env::var("BUCKET_ENDPOINT_URL")?,
@@ -86,13 +84,17 @@ impl AppConfig {
             rtp_port_quarantine_duration: Duration::from_secs(quarantine_seconds),
             env: env::var("ENV").unwrap_or_else(|_| "production".to_string()),
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
-            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "text".to_string()), // [YENİ]
+            log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
+            service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "0.5.3".to_string()),
+            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()), // YENİ
             metrics_port,
             s3_config,
             rabbitmq_url,
             rtp_session_inactivity_timeout: Duration::from_secs(inactivity_seconds),
-            rtp_command_channel_buffer: command_buffer,
-            live_audio_stream_buffer: stream_buffer,
+            // Bu tanımları neden sabit buraya girdik
+            rtp_command_channel_buffer: 32,
+            // environment den almak ek fayda sağlar  mı?
+            live_audio_stream_buffer: 64,
             media_engine_mode,
             cert_path: env::var("MEDIA_SERVICE_CERT_PATH")?,
             key_path: env::var("MEDIA_SERVICE_KEY_PATH")?,
