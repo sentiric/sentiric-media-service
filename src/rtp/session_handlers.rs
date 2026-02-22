@@ -1,13 +1,12 @@
 // sentiric-media-service/src/rtp/session_handlers.rs
-
 use super::command::{RtpCommand, AudioFrame, RecordingSession};
 use super::session_utils::load_and_resample_samples_from_uri; 
-use super::session::RtpSessionConfig; // [FIX]: Artık doğru yerden import ediliyor.
+use super::session::RtpSessionConfig;
 use crate::rabbitmq;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{info, error, debug};
+use tracing::{info, error, debug, Instrument}; // [HATA 3 ÇÖZÜMÜ]: Instrument eklendi
 use lapin::{options::BasicPublishOptions, BasicProperties};
 
 use sentiric_contracts::sentiric::event::v1::GenericEvent;
@@ -45,7 +44,6 @@ pub async fn handle_command(
     match command {
         RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
             let target = endpoint.get_target().or(*known_target).unwrap_or(candidate_target_addr);
-            // Warmer packet
             let _ = socket.send_to(&[0x80; 12], target).await;
             
             let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
@@ -61,7 +59,6 @@ pub async fn handle_command(
             info!("🔊 Native Echo Reflex ENABLED.");
             if let Some(target) = endpoint.get_target().or(*known_target) {
                 for _ in 0..3 {
-                    // Silence/Comfort Noise
                     let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target).await;
                 }
             }
@@ -75,10 +72,11 @@ pub async fn handle_command(
             let mut guard = recording_session.lock().await;
             if let Some(session) = guard.take() {
                 let app_state = config.app_state.clone();
+                let span = tracing::Span::current();
                 tokio::spawn(async move {
                     let res = crate::rtp::session_utils::finalize_and_save_recording(session, app_state).await;
                     let _ = responder.send(res.map(|_| "Success".to_string()).map_err(|e| e.to_string()));
-                });
+                }.instrument(span));
             }
         },
         RtpCommand::Shutdown => return true,
@@ -99,6 +97,9 @@ pub async fn start_playback(
     let uri = job.audio_uri.clone();
     let call_id_owned = call_id.to_string();
     let app_state = config.app_state.clone();
+
+    // [HATA 3 ÇÖZÜMÜ]: Ana thread'in span'ini alıp arka plan thread'ine aktarıyoruz. (Trace ID kaybolmayacak)
+    let span = tracing::Span::current();
 
     match load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
         Ok(samples) => {
@@ -152,7 +153,6 @@ pub async fn start_playback(
                             tenant_id: "system".to_string(),
                             payload_json: json_payload,
                         };
-                        // [FIX]: Hata veren satır. Publisher confirm beklemek için confirm type belirtildi.
                         let _ = channel.basic_publish(
                             rabbitmq::EXCHANGE_NAME, 
                             "call.media.playback.finished", 
@@ -167,7 +167,7 @@ pub async fn start_playback(
 
                 if let Some(tx) = responder { let _ = tx.send(res); }
                 let _ = finished_tx.try_send(());
-            });
+            }.instrument(span)); // [HATA 3 ÇÖZÜMÜ]: Span içeri aktarıldı
         },
         Err(e) => {
             error!("Playback error: {}", e);
