@@ -22,7 +22,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
 // [CRITICAL FIX]: 'instrument' makrosunun ihtiyaç duyduğu 'field' modülü import edildi.
-use tracing::{info, instrument, Span, field};
+use tracing::{info, warn, instrument, Span, field};
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -82,10 +82,24 @@ impl MediaService for MyMediaService {
     
     #[instrument(skip(self, request), fields(call_id = %request.get_ref().call_id, trace_id))]
     async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
-        let trace_id = Self::extract_trace_id(&request);
+        let mut trace_id = Self::extract_trace_id(&request);
+        
+        // [FIX]: Eğer trace_id yoksa, null bırakma, yeni bir tane üret ve uyar.
+        if trace_id == "unknown" {
+            let new_id = uuid::Uuid::new_v4().to_string();
+            warn!(
+                event = "MISSING_TRACE_ID", 
+                call_id = %request.get_ref().call_id,
+                assigned_id = %new_id,
+                "Trace ID header eksik. Otomatik ID atandı."
+            );
+            trace_id = format!("orphaned-{}", new_id);
+        }
+
         Span::current().record("trace_id", &trace_id);
         
         let call_id = request.get_ref().call_id.clone();
+
         counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
 
         let port = self.app_state.port_manager.get_available_port().await.ok_or(ServiceError::PortPoolExhausted)?;
@@ -94,7 +108,9 @@ impl MediaService for MyMediaService {
             Ok(socket) => {
                 gauge!(ACTIVE_SESSIONS).increment(1.0);
                 
-                let session = RtpSession::new(trace_id, call_id, port, Arc::new(socket), self.app_state.clone());
+                // RtpSession oluştururken bu trace_id'yi kullan.
+                let session = RtpSession::new(trace_id.clone(), call_id.clone(), port, Arc::new(socket), self.app_state.clone());
+
                 
                 self.app_state.port_manager.add_session(port, session).await;
                 
