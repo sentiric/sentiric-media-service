@@ -21,7 +21,8 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{info, instrument, Span};
+// [CRITICAL FIX]: 'instrument' makrosunun ihtiyaç duyduğu 'field' modülü import edildi.
+use tracing::{info, instrument, Span, field};
 
 pub struct MyMediaService {
     app_state: AppState,
@@ -33,7 +34,6 @@ impl MyMediaService {
         Self { app_state, config }
     }
 
-    // Helper: Metadata'dan trace_id okur
     fn extract_trace_id<T>(req: &Request<T>) -> String {
         req.metadata().get("x-trace-id")
             .and_then(|v| v.to_str().ok())
@@ -46,20 +46,22 @@ impl MyMediaService {
 impl MediaService for MyMediaService {
     type StreamAudioToCallStream = Pin<Box<dyn Stream<Item = Result<StreamAudioToCallResponse, Status>> + Send>>;
 
-    #[instrument(skip(self, request), fields(trace_id))]
+    #[instrument(skip(self, request), fields(call_id = field::Empty, trace_id))]
     async fn stream_audio_to_call(
         &self,
         request: Request<Streaming<StreamAudioToCallRequest>>,
     ) -> Result<Response<Self::StreamAudioToCallStream>, Status> {
         let trace_id = Self::extract_trace_id(&request);
         Span::current().record("trace_id", &trace_id);
-        counter!(GRPC_REQUESTS_TOTAL, "method" => "stream_audio_to_call").increment(1);
-
+        
         let mut in_stream = request.into_inner();
         let first_msg = in_stream.message().await?.ok_or_else(|| Status::invalid_argument("Stream empty"))?;
 
         let call_id = first_msg.call_id.clone();
+        Span::current().record("call_id", &call_id);
         
+        counter!(GRPC_REQUESTS_TOTAL, "method" => "stream_audio_to_call").increment(1);
+
         let session = self.app_state.port_manager.get_session_by_call_id(&call_id).await
             .ok_or_else(|| Status::not_found("Session not found"))?;
 
@@ -92,24 +94,11 @@ impl MediaService for MyMediaService {
             Ok(socket) => {
                 gauge!(ACTIVE_SESSIONS).increment(1.0);
                 
-                // [KRİTİK]: RtpSession'a trace_id'yi de paslıyoruz.
-                let session = RtpSession::new(
-                    trace_id.clone(),
-                    call_id.clone(), 
-                    port, 
-                    Arc::new(socket), 
-                    self.app_state.clone()
-                );
+                let session = RtpSession::new(trace_id, call_id, port, Arc::new(socket), self.app_state.clone());
                 
                 self.app_state.port_manager.add_session(port, session).await;
                 
-                info!(
-                    event = "MEDIA_PORT_ALLOCATED",
-                    trace_id = %trace_id,
-                    call_id = %call_id,
-                    rtp.port = port,
-                    "RTP Port Allocated"
-                );
+                info!(event = "MEDIA_PORT_ALLOCATED", rtp.port = port, "RTP Port Allocated");
                 
                 Ok(Response::new(AllocatePortResponse { rtp_port: port as u32 }))
             }
@@ -128,12 +117,7 @@ impl MediaService for MyMediaService {
         let port = request.into_inner().rtp_port as u16;
         if let Some(session) = self.app_state.port_manager.get_session(port).await {
             let _ = session.send_command(RtpCommand::Shutdown).await;
-            info!(
-                event = "MEDIA_PORT_RELEASED",
-                trace_id = %trace_id,
-                rtp.port = port,
-                "RTP Port Released"
-            );
+            info!(event = "MEDIA_PORT_RELEASED", "RTP Port Released");
         }
         Ok(Response::new(ReleasePortResponse { success: true }))
     }
@@ -154,12 +138,7 @@ impl MediaService for MyMediaService {
             let cmd = req.audio_uri.strip_prefix("control://").unwrap();
             match cmd {
                 "enable_echo" => {
-                    info!(
-                        event = "NATIVE_ECHO_ENABLED",
-                        trace_id = %trace_id,
-                        target = %target_addr,
-                        "🔊 Native Echo Reflex ENABLED"
-                    );
+                    info!(event = "NATIVE_ECHO_ENABLED", target = %target_addr, "🔊 Native Echo Reflex ENABLED");
                     let _ = session.send_command(RtpCommand::EnableEchoTest).await;
                     return Ok(Response::new(PlayAudioResponse { success: true, message: "Echo On".into() }));
                 }
@@ -184,7 +163,7 @@ impl MediaService for MyMediaService {
             _ => Err(Status::internal("Playback failed"))
         }
     }
-
+    
     type RecordAudioStream = Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
     async fn record_audio(&self, request: Request<RecordAudioRequest>) -> Result<Response<Self::RecordAudioStream>, Status> {
         let req = request.into_inner();

@@ -24,14 +24,13 @@ pub struct RtpSessionConfig {
 
 pub struct RtpSession {
     pub call_id: String,
-    pub trace_id: String, // [YENİ]
+    pub trace_id: String,
     pub port: u16,
     command_tx: mpsc::Sender<RtpCommand>,
     app_state: AppState,
 }
 
 impl RtpSession {
-    // İMZA GÜNCELLENDİ: trace_id eklendi
     pub fn new(trace_id: String, call_id: String, port: u16, socket: Arc<tokio::net::UdpSocket>, app_state: AppState) -> Arc<Self> {
         let (command_tx, command_rx) = mpsc::channel(128);
         let session = Arc::new(Self { 
@@ -66,14 +65,11 @@ impl RtpSession {
         Some(RtpPacket { header, payload })
     }
 
+    // [CRITICAL FIX]: 'instrument' makrosu ile bu fonksiyonun tüm loglarına trace_id ve call_id ekleniyor.
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        info!(
-            event = "RTP_SESSION_START",
-            trace_id = %self.trace_id,
-            call_id = %self.call_id,
-            "🎧 RTP Session Started"
-        );
+        // Bu log artık otomatik olarak trace_id ve call_id içerecek.
+        info!(event = "RTP_SESSION_START", "🎧 RTP Session Started");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
@@ -117,11 +113,7 @@ impl RtpSession {
             pacer.wait();
 
             if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
-                warn!(
-                    event = "RTP_TIMEOUT",
-                    trace_id = %self.trace_id,
-                    "⚠️ Session inactivity timeout. Closing."
-                );
+                warn!(event = "RTP_TIMEOUT", "⚠️ Session inactivity timeout. Closing.");
                 break;
             }
 
@@ -142,16 +134,11 @@ impl RtpSession {
 
             tokio::select! {
                 _ = stats_ticker.tick() => {
-                    let loss_rate = if total_packets_rx > 0 { 
-                        (packet_loss_count as f64 / (total_packets_rx + packet_loss_count) as f64) * 100.0 
-                    } else { 0.0 };
+                    let loss_rate = if total_packets_rx > 0 { (packet_loss_count as f64 / (total_packets_rx + packet_loss_count) as f64) * 100.0 } else { 0.0 };
                     let avg_jitter = if total_packets_rx > 0 { jitter_acc / total_packets_rx as f64 } else { 0.0 };
                     
-                    // [SUTS v4.0]: Zenginleştirilmiş QoS Raporu
                     info!(
                         event = "RTP_QOS",
-                        trace_id = %self.trace_id,
-                        call_id = %self.call_id,
                         packet_loss_percent = loss_rate,
                         jitter_ms = avg_jitter,
                         packets_received = total_packets_rx,
@@ -163,13 +150,7 @@ impl RtpSession {
                     last_activity = Instant::now();
                     total_packets_rx += 1;
                     if endpoint.latch(addr) { 
-                        info!(
-                            event = "RTP_LATCH",
-                            trace_id = %self.trace_id,
-                            peer.ip = %addr.ip(),
-                            peer.port = addr.port(),
-                            "🔒 Media Latched"
-                        ); 
+                        info!(event = "RTP_LATCH", peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Media Latched"); 
                     }
 
                     if let Some(packet) = Self::parse_rtp_packet(data) {
@@ -219,10 +200,6 @@ impl RtpSession {
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
         
-        info!(
-            event = "RTP_SESSION_END",
-            trace_id = %self.trace_id,
-            "🛑 RTP Session Terminated."
-        );
+        info!(event = "RTP_SESSION_END", "🛑 RTP Session Terminated.");
     }
 }
