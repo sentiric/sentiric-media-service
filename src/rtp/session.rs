@@ -1,4 +1,4 @@
-// src/rtp/session.rs
+// sentiric-media-service/src/rtp/session.rs
 use crate::metrics::{ACTIVE_SESSIONS};
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
@@ -11,7 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, instrument, warn};
+use tracing::{info, instrument, warn, debug};
 use metrics::gauge;
 use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer, AudioProfile};
 
@@ -65,11 +65,9 @@ impl RtpSession {
         Some(RtpPacket { header, payload })
     }
 
-    // [CRITICAL FIX]: 'instrument' makrosu ile bu fonksiyonun tüm loglarına trace_id ve call_id ekleniyor.
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        // Bu log artık otomatik olarak trace_id ve call_id içerecek.
-        info!(event = "RTP_SESSION_START", "🎧 RTP Session Started");
+        info!(event = "RTP_SESSION_START", "🎧 RTP Oturumu Başlatıldı");
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
@@ -82,6 +80,10 @@ impl RtpSession {
         let mut total_packets_rx = 0u64;
         let mut jitter_acc = 0.0f64;
         let mut last_arrival = Instant::now();
+        
+        // [KRİTİK EKLENTİ]: Echo Test State ve Metrikleri
+        let mut echo_mode = false;
+        let mut echo_tx_count = 0u64;
 
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1024);
         tokio::spawn({
@@ -112,8 +114,16 @@ impl RtpSession {
         loop {
             pacer.wait();
 
-            if last_activity.elapsed() > self.app_state.port_manager.config.rtp_session_inactivity_timeout {
-                warn!(event = "RTP_TIMEOUT", "⚠️ Session inactivity timeout. Closing.");
+            let timeout = self.app_state.port_manager.config.rtp_session_inactivity_timeout;
+
+            // [KRİTİK EKLENTİ]: Oturum Hareketsizlik Zaman Aşımı Kontrolü [ 15 saniye varsayılan ]
+            if last_activity.elapsed() > timeout {
+                warn!(
+                    event = "RTP_TIMEOUT",
+                    timeout_secs = timeout.as_secs(),
+                    "⚠️ Oturum hareketsizlik zaman aşımı ({} saniye veri yok). Kapatılıyor.",
+                    timeout.as_secs()
+                );
                 break;
             }
 
@@ -137,12 +147,14 @@ impl RtpSession {
                     let loss_rate = if total_packets_rx > 0 { (packet_loss_count as f64 / (total_packets_rx + packet_loss_count) as f64) * 100.0 } else { 0.0 };
                     let avg_jitter = if total_packets_rx > 0 { jitter_acc / total_packets_rx as f64 } else { 0.0 };
                     
+                    // [ZENGİNLEŞTİRME]: Echo trafiği metriği eklendi
                     info!(
                         event = "RTP_QOS",
                         packet_loss_percent = loss_rate,
                         jitter_ms = avg_jitter,
                         packets_received = total_packets_rx,
-                        "RTP Quality Report"
+                        echo_packets_sent = echo_tx_count,
+                        "RTP Kalite Raporu"
                     );
                 },
 
@@ -150,7 +162,19 @@ impl RtpSession {
                     last_activity = Instant::now();
                     total_packets_rx += 1;
                     if endpoint.latch(addr) { 
-                        info!(event = "RTP_LATCH", peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Media Latched"); 
+                        info!(event = "RTP_LATCH", peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Medya Kilitlendi"); 
+                    }
+                    
+                    // [KRİTİK EKLENTİ: GERÇEK ECHO DÖNGÜSÜ]
+                    // Eğer Echo Modu açıksa, gelen data'yı hiçbir işlemden geçirmeden aynen geri bas.
+                    if echo_mode {
+                        if let Some(target) = endpoint.get_target() {
+                            if let Err(e) = socket.send_to(&data, target).await {
+                                debug!(event="ECHO_SEND_FAIL", error=%e, "Echo paketi gönderilemedi");
+                            } else {
+                                echo_tx_count += 1; // Başarıyla geri atılan paketleri say
+                            }
+                        }
                     }
 
                     if let Some(packet) = Self::parse_rtp_packet(data) {
@@ -174,11 +198,11 @@ impl RtpSession {
                      last_activity = Instant::now();
                      if matches!(cmd, RtpCommand::Shutdown) { break; }
                      
+                     // [KRİTİK EKLENTİ]: &mut echo_mode değişkenini handler'a paslıyoruz
                      if session_handlers::handle_command(
                          cmd, self.port, &live_stream_sender, &recording_session, 
                          &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, 
-                         &mut is_playing, 
-                         &session_config, 
+                         &mut is_playing, &mut echo_mode, &session_config, 
                          &socket, &finished_tx, &mut None, &endpoint, &self.call_id
                      ).await { break; }
                 },
@@ -200,6 +224,6 @@ impl RtpSession {
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
         
-        info!(event = "RTP_SESSION_END", "🛑 RTP Session Terminated.");
+        info!(event = "RTP_SESSION_END", "🛑 RTP Oturumu Sonlandırıldı.");
     }
 }

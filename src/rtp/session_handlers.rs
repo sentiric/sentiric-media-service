@@ -6,7 +6,7 @@ use crate::rabbitmq;
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{info, error, debug, Instrument}; // [HATA 3 ÇÖZÜMÜ]: Instrument eklendi
+use tracing::{info, error, debug, Instrument}; 
 use lapin::{options::BasicPublishOptions, BasicProperties};
 
 use sentiric_contracts::sentiric::event::v1::GenericEvent;
@@ -34,6 +34,7 @@ pub async fn handle_command(
     is_streaming: &mut bool,
     playback_queue: &mut std::collections::VecDeque<PlaybackJob>,
     is_playing: &mut bool,
+    echo_mode: &mut bool, // [KRİTİK EKLENTİ]: Echo state'ini ana döngüye taşımak için eklendi
     config: &RtpSessionConfig,
     socket: &Arc<tokio::net::UdpSocket>,
     finished_tx: &mpsc::Sender<()>,
@@ -44,6 +45,7 @@ pub async fn handle_command(
     match command {
         RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
             let target = endpoint.get_target().or(*known_target).unwrap_or(candidate_target_addr);
+            // NAT Warmer ping
             let _ = socket.send_to(&[0x80; 12], target).await;
             
             let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
@@ -56,12 +58,20 @@ pub async fn handle_command(
             }
         },
         RtpCommand::EnableEchoTest => {
-            info!("🔊 Native Echo Reflex ENABLED.");
+            // [KRİTİK DÜZELTME]: Sadece log basmıyoruz, state'i değiştiriyoruz.
+            info!(event = "ECHO_MODE_ENABLED", sip.call_id = %call_id, "🔊 Native Echo Reflex AKTİFLEŞTİRİLDİ. Loopback başlıyor.");
+            *echo_mode = true;
+            
+            // Hattı ısıtmak için ilk dummy paketler (NAT Hole Punching garantisi)
             if let Some(target) = endpoint.get_target().or(*known_target) {
                 for _ in 0..3 {
                     let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target).await;
                 }
             }
+        },
+        RtpCommand::DisableEchoTest => {
+            info!(event = "ECHO_MODE_DISABLED", sip.call_id = %call_id, "🔇 Native Echo Reflex KAPATILDI.");
+            *echo_mode = false;
         },
         RtpCommand::StartOutboundStream { audio_rx } => { *outbound_stream_rx = Some(audio_rx); *is_streaming = true; },
         RtpCommand::StopOutboundStream => { *is_streaming = false; *outbound_stream_rx = None; },
@@ -98,7 +108,6 @@ pub async fn start_playback(
     let call_id_owned = call_id.to_string();
     let app_state = config.app_state.clone();
 
-    // [HATA 3 ÇÖZÜMÜ]: Ana thread'in span'ini alıp arka plan thread'ine aktarıyoruz. (Trace ID kaybolmayacak)
     let span = tracing::Span::current();
 
     match load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
@@ -111,7 +120,7 @@ pub async fn start_playback(
                 
                 let res = match codecs::encode_lpcm16_to_rtp(&samples, target_codec) {
                     Ok(encoded_payload) => {
-                        info!(target = %job.target_addr, "🚀 Precision stream starting.");
+                        info!(event = "MEDIA_PLAYBACK_START", target = %job.target_addr, "🚀 Hassas akış başlatılıyor.");
                         
                         let ssrc: u32 = rand::random();
                         let mut sequence_number: u16 = rand::random();
@@ -132,7 +141,7 @@ pub async fn start_playback(
                             let packet = RtpPacket { header, payload: chunk.to_vec() };
                             
                             if let Err(e) = socket.send_to(&packet.to_bytes(), job.target_addr).await {
-                                debug!(error = %e, "RTP send fail");
+                                debug!(event = "RTP_SEND_ERROR", error = %e, "RTP gönderme hatası");
                             }
                             
                             sequence_number = sequence_number.wrapping_add(1);
@@ -161,16 +170,16 @@ pub async fn start_playback(
                             BasicProperties::default()
                         ).await;
                         
-                        debug!("📢 Sent PlaybackFinished event for {}", call_id_owned);
+                        debug!(event = "MEDIA_PLAYBACK_FINISHED", sip.call_id = %call_id_owned, "📢 'PlaybackFinished' olayı gönderildi.t");
                     }
                 }
 
                 if let Some(tx) = responder { let _ = tx.send(res); }
                 let _ = finished_tx.try_send(());
-            }.instrument(span)); // [HATA 3 ÇÖZÜMÜ]: Span içeri aktarıldı
+            }.instrument(span)); 
         },
         Err(e) => {
-            error!("Playback error: {}", e);
+            error!(event = "MEDIA_PLAYBACK_ERROR", error = %e, "Medya oynatma hatası");
             if let Some(tx) = responder { let _ = tx.send(Err(anyhow::anyhow!(e.to_string()))); }
             let _ = finished_tx.try_send(());
         }

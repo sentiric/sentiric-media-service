@@ -3297,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "sentiric-media-service"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "async-trait",
