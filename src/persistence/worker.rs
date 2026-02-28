@@ -15,13 +15,17 @@ pub struct UploadWorker {
 
 impl UploadWorker {
     pub fn new(app_state: App_State) -> Self {
+        // [DÜZELTME]: Path string'ini klonluyoruz. Böylece 'app_state' sahipliği serbest kalıyor.
+        let path = app_state.port_manager.config.media_recording_path.clone();
+        
         Self { 
             app_state, 
-            staging_dir: PathBuf::from("/tmp/sentiric/recordings") 
+            staging_dir: PathBuf::from(path) 
         }
     }
 
     pub async fn run(self) {
+        // Klasör yoksa oluştur
         let _ = fs::create_dir_all(&self.staging_dir).await;
         tracing::info!("🚀 S3 Upload Worker active. Target: {:?}", self.staging_dir);
 
@@ -41,8 +45,9 @@ impl UploadWorker {
 
     async fn process_file(&self, path: PathBuf) {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
+        // Dosya adı formatı: {call_id}_{trace_id}.wav
         let parts: Vec<&str> = file_name.trim_end_matches(".wav").split('_').collect();
-        if parts.len() < 1 { return; }
+        if parts.is_empty() { return; }
         
         let call_id = parts[0];
         let s3_uri = format!("s3://sentiric/recordings/{}.wav", call_id);

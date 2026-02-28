@@ -1,3 +1,4 @@
+// sentiric-media-service/src/config.rs
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -26,6 +27,8 @@ pub struct AppConfig {
     pub rtp_port_max: u16,
     pub rtp_port_quarantine_duration: Duration,
     pub assets_base_path: String,
+    // [YENİ]: Kayıtların geçici olarak tutulacağı disk yolu
+    pub media_recording_path: String, 
     pub env: String,
     pub rust_log: String,
     pub log_format: String,
@@ -37,7 +40,7 @@ pub struct AppConfig {
     pub rabbitmq_url: Option<String>,
     pub media_engine_mode: MediaEngineMode,
     pub service_version: String,
-    pub node_hostname: String, // YENİ
+    pub node_hostname: String,
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
@@ -79,6 +82,8 @@ impl AppConfig {
             grpc_listen_addr: format!("[::]:{}", grpc_port).parse()?,
             rtp_host: env::var("RTP_SERVICE_LISTEN_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string()),
             assets_base_path: env::var("ASSETS_BASE_PATH").unwrap_or_else(|_| "assets".to_string()),
+            // [YENİ]: Ortam değişkeninden oku veya varsayılanı kullan
+            media_recording_path: env::var("MEDIA_RECORDING_PATH").unwrap_or_else(|_| "/tmp/sentiric/recordings".to_string()),
             rtp_port_min,
             rtp_port_max,
             rtp_port_quarantine_duration: Duration::from_secs(quarantine_seconds),
@@ -86,14 +91,12 @@ impl AppConfig {
             rust_log: env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string()),
             log_format: env::var("LOG_FORMAT").unwrap_or_else(|_| "json".to_string()),
             service_version: env::var("SERVICE_VERSION").unwrap_or_else(|_| "0.5.3".to_string()),
-            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()), // YENİ
+            node_hostname: env::var("NODE_HOSTNAME").unwrap_or_else(|_| "localhost".to_string()),
             metrics_port,
             s3_config,
             rabbitmq_url,
             rtp_session_inactivity_timeout: Duration::from_secs(inactivity_seconds),
-            // Bu tanımları neden sabit buraya girdik
             rtp_command_channel_buffer: 32,
-            // environment den almak ek fayda sağlar  mı?
             live_audio_stream_buffer: 64,
             media_engine_mode,
             cert_path: env::var("MEDIA_SERVICE_CERT_PATH")?,

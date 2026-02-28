@@ -9,12 +9,13 @@ use tokio::task::spawn_blocking;
 use tracing::instrument;
 
 #[instrument(skip_all, fields(call_id = %session.call_id))]
-pub async fn finalize_and_save_recording(session: RecordingSession, _app_state: AppState) -> Result<()> {
+pub async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
     if session.mixed_samples_16khz.is_empty() {
         return Ok(());
     }
 
-    let recordings_dir = "/tmp/sentiric/recordings";
+    // [DÜZELTME]: Config'den doğru dizini alıyoruz.
+    let recordings_dir = &app_state.port_manager.config.media_recording_path;
     let staging_path = format!("{}/{}_{}.wav", recordings_dir, session.call_id, session.trace_id);
     let tmp_path = format!("{}.tmp", staging_path);
 
@@ -37,15 +38,19 @@ pub async fn finalize_and_save_recording(session: RecordingSession, _app_state: 
     }).await??;
 
     // 2. Diske Atomic Yazım
+    // Dizin yoksa oluştur (Garanti olsun)
     fs::create_dir_all(recordings_dir).await?;
+    
+    // Önce .tmp olarak yaz
     fs::write(&tmp_path, wav_data).await?;
-    fs::rename(&tmp_path, &staging_path).await?; // Atomic rename
+    // Sonra atomik olarak .wav yap (Worker bunu görecek)
+    fs::rename(&tmp_path, &staging_path).await?; 
 
-    tracing::info!(path = %staging_path, "💾 Recording staged for background upload.");
+    tracing::info!(path = %staging_path, "💾 Arka plana yüklenmek üzere kayıt yapıldı.");
     Ok(())
 }
 
-// Diğer kullanılmayan loader fonksiyonu (opsiyonel tutuldu)
+// Diğer kullanılmayan loader fonksiyonu (Mevcut haliyle kalabilir)
 pub async fn load_and_resample_samples_from_uri(
     uri: &str,
     app_state: &AppState,
@@ -63,5 +68,5 @@ pub async fn load_and_resample_samples_from_uri(
         }).await?;
         return Ok(std::sync::Arc::new(samples_16k));
     }
-    Err(anyhow::anyhow!("Unsupported URI scheme"))
+    Err(anyhow::anyhow!("Desteklenmeyen URI şeması: {}", uri))
 }
