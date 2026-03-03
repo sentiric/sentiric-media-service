@@ -14,12 +14,10 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         return Ok(());
     }
 
-    // [DÜZELTME]: Config'den doğru dizini alıyoruz.
     let recordings_dir = &app_state.port_manager.config.media_recording_path;
     let staging_path = format!("{}/{}_{}.wav", recordings_dir, session.call_id, session.trace_id);
     let tmp_path = format!("{}.tmp", staging_path);
 
-    // 1. WAV Encode (Sync Task)
     let spec = session.spec;
     let mixed_samples = session.mixed_samples_16khz;
     
@@ -27,30 +25,25 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         let mut buffer = Cursor::new(Vec::new());
         let mut writer = WavWriter::new(&mut buffer, spec)?;
         
-        // 16k -> 8k Downsampling (rtp-core kütüphanesinden)
         let downsampled = sentiric_rtp_core::simple_resample(&mixed_samples, 16000, 8000);
         
         for sample in downsampled {
-            writer.write_sample(sample)?;
+            // [SES YÜKSELTİCİ]: Diske yazılan ses genelde kısık kalır. 2.5 kat (Gain) uyguluyoruz.
+            let amplified = (sample as f32 * 2.5).clamp(-32768.0, 32767.0) as i16;
+            writer.write_sample(amplified)?;
         }
         writer.finalize()?;
         Ok(buffer.into_inner())
     }).await??;
 
-    // 2. Diske Atomic Yazım
-    // Dizin yoksa oluştur (Garanti olsun)
     fs::create_dir_all(recordings_dir).await?;
-    
-    // Önce .tmp olarak yaz
     fs::write(&tmp_path, wav_data).await?;
-    // Sonra atomik olarak .wav yap (Worker bunu görecek)
     fs::rename(&tmp_path, &staging_path).await?; 
 
     tracing::info!(path = %staging_path, "💾 Arka plana yüklenmek üzere kayıt yapıldı.");
     Ok(())
 }
 
-// Diğer kullanılmayan loader fonksiyonu (Mevcut haliyle kalabilir)
 pub async fn load_and_resample_samples_from_uri(
     uri: &str,
     app_state: &AppState,

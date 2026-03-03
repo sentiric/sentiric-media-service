@@ -85,7 +85,6 @@ impl RtpSession {
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
 
-        // [ECHO FIX]: Kendi Header verilerimiz
         let server_ssrc: u32 = rand::random();
         let mut echo_seq: u16 = rand::random();
         let mut echo_ts: u32 = rand::random();
@@ -109,7 +108,9 @@ impl RtpSession {
         let mut pacer = Pacer::new(20); 
         
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
-        let mut latch_ticker = tokio::time::interval(Duration::from_millis(500));
+        
+        // [HIZLI LATCHING]: Saniyede 10 kez (100ms) kapı çal ki ilk saniyede kilitlensin.
+        let mut latch_ticker = tokio::time::interval(Duration::from_millis(100));
         let mut last_activity = Instant::now();
 
         let session_config = RtpSessionConfig {
@@ -133,27 +134,29 @@ impl RtpSession {
                 break;
             }
 
-            // [KRİTİK ECHO DÜZELTMESİ BURADA]
-            // Gelen paketleri Jitter Buffer'dan sıralı ve temiz olarak alıyoruz.
             if let Some(packet) = jitter_buffer.pop() {
                 
-                // 1. EĞER ECHO MODUNDAYSAK (Sesi temiz Header ile geri gönder)
+                // [ECHO PARAZİT ÇÖZÜMÜ]: Timestamp'i gelen paketin boyutuna göre hesapla
                 if echo_mode {
                     if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
-                        // Kendi SSRC ve Sequence numaramızla YENİ bir paket oluşturuyoruz!
-                        // Bu sayede telefon kendi gönderdiği seq'i görüp kafası karışmıyor.
+                        
+                        let ts_increment = match packet.header.payload_type {
+                            18 => (packet.payload.len() as u32) * 8, // G729: 1 byte = 8 sample
+                            0 | 8 => packet.payload.len() as u32,    // G711: 1 byte = 1 sample
+                            _ => 160,
+                        };
+
                         let header = RtpHeader::new(packet.header.payload_type, echo_seq, echo_ts, server_ssrc);
                         let out_packet = RtpPacket { header, payload: packet.payload.clone() };
                         
                         let _ = socket.send_to(&out_packet.to_bytes(), target).await;
                         
                         echo_seq = echo_seq.wrapping_add(1);
-                        echo_ts = echo_ts.wrapping_add(160); // 8kHz için 20ms = 160 sample
+                        echo_ts = echo_ts.wrapping_add(ts_increment); 
                         echo_tx_count += 1;
                     }
                 }
 
-                // 2. KAYIT VE DİNLEME (AI) İÇİN DECODE ET
                 if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                     if let Ok(pcm) = crate::rtp::codecs::decode_rtp_to_lpcm16(&packet.payload, codec) {
                         if let Some(tx) = &*live_stream_sender.lock().await { 
@@ -203,8 +206,6 @@ impl RtpSession {
                     if endpoint.latch(addr) { 
                         info!(event = "RTP_LATCH", peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Medya Kilitlendi"); 
                     }
-                    
-                    // [ÖNEMLİ] Eski Echo kodunu buradan sildik. Artık yukarıda JitterBuffer sonrasında yapılıyor.
 
                     if let Some(packet) = Self::parse_rtp_packet(data) {
                         let now = Instant::now();
@@ -247,8 +248,8 @@ impl RtpSession {
         
         if let Some(rec) = recording_session.lock().await.take() { 
             match finalize_and_save_recording(rec, self.app_state.clone()).await {
-                Ok(_) => info!(event="RECORDING_SAVED", "Kayıt başarıyla diske işlendi."),
-                Err(e) => error!(event="RECORDING_FAIL", error=%e, "Kayıt diske yazılamadı!"),
+                Ok(_) => info!(event="RECORDING_SAVED", "Kayıt başarıyla diske/S3'e işlendi."),
+                Err(e) => error!(event="RECORDING_FAIL", error=%e, "Kayıt diske veya S3'e yazılamadı!"),
             }
         }
         

@@ -1,4 +1,4 @@
-// src/app.rs
+// sentiric-media-service/src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyMediaService;
 use crate::metrics::start_metrics_server;
@@ -27,13 +27,10 @@ pub struct App {
 impl App {
     pub async fn bootstrap() -> Result<Self> {
         let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
-        if let Err(_) = dotenvy::from_filename(&env_file) {
-            // Sessiz devam et
-        }
+        if let Err(_) = dotenvy::from_filename(&env_file) {}
 
         let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
-        // --- SUTS v4.0 LOGGING SETUP ---
         let rust_log_env = env::var("RUST_LOG").unwrap_or_else(|_| config.rust_log.clone());
         let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
@@ -49,7 +46,6 @@ impl App {
         } else {
             subscriber.with(fmt::layer().compact()).init();
         }
-        // -------------------------------
 
         let metrics_addr = format!("0.0.0.0:{}", config.metrics_port).parse()?;
         start_metrics_server(metrics_addr);
@@ -106,7 +102,6 @@ impl App {
 
         let _ = shutdown_tx.send(()).await;
         info!(event="SYSTEM_STOPPED", "Servis durduruldu.");
-        
         Ok(())
     }
 
@@ -137,8 +132,24 @@ impl App {
                 )).load().await;
             
             let s3_client_config = S3ConfigBuilder::from(&sdk_config).force_path_style(true).build();
-            info!(event="S3_CONNECTED", bucket=%s3_config.bucket_name, "S3 istemcisi hazır.");
-            return Ok(Some(Arc::new(S3Client::from_conf(s3_client_config))));
+            let client = S3Client::from_conf(s3_client_config);
+            
+            // [YENİ: BUCKET AUTO-CREATION] Bucket var mı kontrol et, yoksa oluştur!
+            match client.head_bucket().bucket(&s3_config.bucket_name).send().await {
+                Ok(_) => {
+                    info!(event="S3_BUCKET_READY", bucket=%s3_config.bucket_name, "S3 Bucket mevcut ve hazır.");
+                },
+                Err(_) => {
+                    warn!(event="S3_BUCKET_NOT_FOUND", bucket=%s3_config.bucket_name, "Bucket bulunamadı. Otomatik olarak oluşturuluyor...");
+                    if let Err(e) = client.create_bucket().bucket(&s3_config.bucket_name).send().await {
+                        error!(event="S3_BUCKET_CREATE_FAIL", error=?e, "Bucket oluşturulamadı!");
+                    } else {
+                        info!(event="S3_BUCKET_CREATED", bucket=%s3_config.bucket_name, "✅ S3 Bucket başarıyla oluşturuldu.");
+                    }
+                }
+            }
+            
+            return Ok(Some(Arc::new(client)));
         }
         Ok(None)
     }
