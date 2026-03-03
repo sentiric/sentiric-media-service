@@ -25,11 +25,13 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         let mut buffer = Cursor::new(Vec::new());
         let mut writer = WavWriter::new(&mut buffer, spec)?;
         
-        // [KALİTE DÜZELTMESİ]: 16kHz veriyi 8kHz'e düşürmüyoruz! Direkt 16kHz yazıyoruz.
-        // Ayrıca 2.5x olan parazitli gain kaldırıldı, pürüzsüz %20 artış (1.2x) eklendi.
-        for sample in mixed_samples {
-            let safe_sample = (sample as f32 * 1.2).clamp(-32768.0, 32767.0) as i16;
-            writer.write_sample(safe_sample)?;
+        // [TELECOM STANDARD FIX]: 16kHz olan AI stream verisini, disk tasarrufu ve 
+        // geleneksel oynatıcı uyumluluğu için 8kHz'e (Telekom Standardı) geri düşürüyoruz.
+        let downsampled = sentiric_rtp_core::simple_resample(&mixed_samples, 16000, 8000);
+        
+        for sample in downsampled {
+            // [GAIN REMOVED]: Dijital bozulmaları (robotik/parazit) önlemek için sesi ham bırakıyoruz.
+            writer.write_sample(sample)?;
         }
         
         writer.finalize()?;

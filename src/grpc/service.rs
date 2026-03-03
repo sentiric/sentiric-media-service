@@ -198,8 +198,8 @@ impl MediaService for MyMediaService {
         let session = self.app_state.port_manager.get_session(req.server_rtp_port as u16).await.ok_or(Status::not_found("No session"))?;
         session.send_command(RtpCommand::StartPermanentRecording(RecordingSession {
             output_uri: req.output_uri,
-            // [FIX]: 16000 Hz, AI standart kalitesinde kaydediyoruz.
-            spec: WavSpec { channels: 1, sample_rate: 16000, bits_per_sample: 16, sample_format: SampleFormat::Int },
+            // [TELECOM STANDARD FIX]: Kesinlikle 8000Hz olarak kayıt başlar.
+            spec: WavSpec { channels: 1, sample_rate: 8000, bits_per_sample: 16, sample_format: SampleFormat::Int },
             mixed_samples_16khz: Vec::new(),
             call_id: req.call_id,
             trace_id: req.trace_id,
