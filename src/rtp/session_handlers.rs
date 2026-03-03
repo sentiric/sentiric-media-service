@@ -34,7 +34,7 @@ pub async fn handle_command(
     is_streaming: &mut bool,
     playback_queue: &mut std::collections::VecDeque<PlaybackJob>,
     is_playing: &mut bool,
-    echo_mode: &mut bool, // [KRİTİK EKLENTİ]: Echo state'ini ana döngüye taşımak için eklendi
+    echo_mode: &mut bool,
     config: &RtpSessionConfig,
     socket: &Arc<tokio::net::UdpSocket>,
     finished_tx: &mpsc::Sender<()>,
@@ -44,9 +44,8 @@ pub async fn handle_command(
 ) -> bool {
     match command {
         RtpCommand::PlayAudioUri { audio_uri, candidate_target_addr, cancellation_token, responder } => {
+            *known_target = Some(candidate_target_addr);
             let target = endpoint.get_target().or(*known_target).unwrap_or(candidate_target_addr);
-            // NAT Warmer ping
-            let _ = socket.send_to(&[0x80; 12], target).await;
             
             let job = PlaybackJob { audio_uri, target_addr: target, cancellation_token, responder };
             
@@ -60,31 +59,6 @@ pub async fn handle_command(
         RtpCommand::EnableEchoTest => {
             info!(event = "ECHO_MODE_ENABLED", sip.call_id = %call_id, "🔊 Native Echo Reflex AKTİFLEŞTİRİLDİ. Loopback başlıyor.");
             *echo_mode = true;
-            
-            // [KRİTİK GÜNCELLEME]: Agresif Hole Punching
-            // Hem endpoint'ten gelen hedefe (eğer varsa) hem de `known_target`'a (PlayAudio ile set edilen) paket gönder.
-            // Bu, SBC'nin media-service'i "duymasını" ve latch olmasını sağlar.
-            
-            let targets = vec![endpoint.get_target(), *known_target];
-            
-            for target_opt in targets {
-                if let Some(target) = target_opt {
-                    info!(event="HOLE_PUNCH_BLAST", target=%target, "SBC/Client yönüne delme paketi gönderiliyor...");
-                    for _ in 0..10 { // Sayıyı artırdık
-                        // RTP Header ile geçerli bir sessizlik paketi gönder (Payload Type 0/8 veya CN)
-                        // Boş paket bazen routerlar tarafından düşürülür.
-                        // Minimal valid RTP header (12 byte) + 1 byte payload
-                        let dummy_rtp = vec![
-                            0x80, 0x00, 0x00, 0x01, // V=2, P=0, X=0, CC=0, M=0, PT=0 (PCMU), Seq=1
-                            0x00, 0x00, 0x00, 0x00, // TS=0
-                            0xDE, 0xAD, 0xBE, 0xEF, // SSRC
-                            0xFF                    // Payload (Silence)
-                        ];
-                        let _ = socket.send_to(&dummy_rtp, target).await;
-                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                    }
-                }
-            }
         },
         RtpCommand::DisableEchoTest => {
             info!(event = "ECHO_MODE_DISABLED", sip.call_id = %call_id, "🔇 Native Echo Reflex KAPATILDI.");
@@ -186,8 +160,6 @@ pub async fn start_playback(
                             &event.encode_to_vec(), 
                             BasicProperties::default()
                         ).await;
-                        
-                        debug!(event = "MEDIA_PLAYBACK_FINISHED", sip.call_id = %call_id_owned, "📢 'PlaybackFinished' olayı gönderildi.t");
                     }
                 }
 

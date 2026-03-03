@@ -1,5 +1,5 @@
 // sentiric-media-service/src/rtp/session.rs
-use crate::metrics::{ACTIVE_SESSIONS};
+use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
 use crate::rtp::session_handlers; 
@@ -81,9 +81,9 @@ impl RtpSession {
         let mut jitter_acc = 0.0f64;
         let mut last_arrival = Instant::now();
         
-        // [KRİTİK EKLENTİ]: Echo Test State ve Metrikleri
         let mut echo_mode = false;
         let mut echo_tx_count = 0u64;
+        let mut known_target: Option<SocketAddr> = None;
 
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1024);
         tokio::spawn({
@@ -102,7 +102,11 @@ impl RtpSession {
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
         let mut pacer = Pacer::new(20); 
+        
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
+        // [KRİTİK]: Latch Heartbeat (SBC Uyanana kadar saniyede 2 kez kapı çalar)
+        let mut latch_ticker = tokio::time::interval(Duration::from_millis(500));
+        
         let mut last_activity = Instant::now();
 
         let session_config = RtpSessionConfig {
@@ -116,7 +120,6 @@ impl RtpSession {
 
             let timeout = self.app_state.port_manager.config.rtp_session_inactivity_timeout;
 
-            // [KRİTİK EKLENTİ]: Oturum Hareketsizlik Zaman Aşımı Kontrolü [ 15 saniye varsayılan ]
             if last_activity.elapsed() > timeout {
                 warn!(
                     event = "RTP_TIMEOUT",
@@ -147,7 +150,6 @@ impl RtpSession {
                     let loss_rate = if total_packets_rx > 0 { (packet_loss_count as f64 / (total_packets_rx + packet_loss_count) as f64) * 100.0 } else { 0.0 };
                     let avg_jitter = if total_packets_rx > 0 { jitter_acc / total_packets_rx as f64 } else { 0.0 };
                     
-                    // [ZENGİNLEŞTİRME]: Echo trafiği metriği eklendi
                     info!(
                         event = "RTP_QOS",
                         packet_loss_percent = loss_rate,
@@ -158,6 +160,23 @@ impl RtpSession {
                     );
                 },
 
+                // [KRİTİK EKLENTİ]: SBC veya UAC uyanıp bize RTP gönderene kadar kapı çal (Hole Punch)
+                _ = latch_ticker.tick() => {
+                    // Eğer karşı taraftan hiç paket gelmediyse (is_latched = false) ve nereye atacağımızı biliyorsak:
+                    if endpoint.get_target().is_none() {
+                        if let Some(target) = known_target {
+                            let dummy_rtp = vec![
+                                0x80, 0x00, 0x00, 0x01, // V=2, P=0, X=0, CC=0, M=0, PT=0 (PCMU), Seq=1
+                                0x00, 0x00, 0x00, 0x00, // TS=0
+                                0xDE, 0xAD, 0xBE, 0xEF, // SSRC
+                                0xFF                    // Payload
+                            ];
+                            let _ = socket.send_to(&dummy_rtp, target).await;
+                            debug!(event="LATCH_HEARTBEAT", target=%target, "SBC'nin RTP başlatması bekleniyor (Dummy Paket Atıldı).");
+                        }
+                    }
+                },
+
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
                     total_packets_rx += 1;
@@ -165,14 +184,12 @@ impl RtpSession {
                         info!(event = "RTP_LATCH", peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Medya Kilitlendi"); 
                     }
                     
-                    // [KRİTİK EKLENTİ: GERÇEK ECHO DÖNGÜSÜ]
-                    // Eğer Echo Modu açıksa, gelen data'yı hiçbir işlemden geçirmeden aynen geri bas.
                     if echo_mode {
                         if let Some(target) = endpoint.get_target() {
                             if let Err(e) = socket.send_to(&data, target).await {
                                 debug!(event="ECHO_SEND_FAIL", error=%e, "Echo paketi gönderilemedi");
                             } else {
-                                echo_tx_count += 1; // Başarıyla geri atılan paketleri say
+                                echo_tx_count += 1; 
                             }
                         }
                     }
@@ -198,12 +215,11 @@ impl RtpSession {
                      last_activity = Instant::now();
                      if matches!(cmd, RtpCommand::Shutdown) { break; }
                      
-                     // [KRİTİK EKLENTİ]: &mut echo_mode değişkenini handler'a paslıyoruz
                      if session_handlers::handle_command(
                          cmd, self.port, &live_stream_sender, &recording_session, 
                          &mut outbound_stream_rx, &mut is_streaming, &mut playback_queue, 
                          &mut is_playing, &mut echo_mode, &session_config, 
-                         &socket, &finished_tx, &mut None, &endpoint, &self.call_id
+                         &socket, &finished_tx, &mut known_target, &endpoint, &self.call_id
                      ).await { break; }
                 },
 
