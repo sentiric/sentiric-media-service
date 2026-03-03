@@ -7,6 +7,7 @@ use crate::rtp::writers;
 use crate::rabbitmq;
 use lapin::{options::BasicPublishOptions, BasicProperties};
 use serde_json;
+use tracing::{info, error, warn, debug};
 
 pub struct UploadWorker {
     app_state: AppState,
@@ -15,9 +16,7 @@ pub struct UploadWorker {
 
 impl UploadWorker {
     pub fn new(app_state: App_State) -> Self {
-        // [DÜZELTME]: Path string'ini klonluyoruz. Böylece 'app_state' sahipliği serbest kalıyor.
         let path = app_state.port_manager.config.media_recording_path.clone();
-        
         Self { 
             app_state, 
             staging_dir: PathBuf::from(path) 
@@ -25,15 +24,17 @@ impl UploadWorker {
     }
 
     pub async fn run(self) {
-        // Klasör yoksa oluştur
         let _ = fs::create_dir_all(&self.staging_dir).await;
-        tracing::info!("🚀 S3 Upload Worker active. Target: {:?}", self.staging_dir);
+        info!(
+            event = "WORKER_STARTED", 
+            target_dir = %self.staging_dir.display(),
+            "🚀 S3 Upload Worker aktif. Klasör izleniyor..."
+        );
 
         loop {
             if let Ok(mut entries) = fs::read_dir(&self.staging_dir).await {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
-                    // Sadece .wav dosyalarını işle (.tmp olanları bekle)
                     if path.extension().and_then(|s| s.to_str()) == Some("wav") {
                         self.process_file(path).await;
                     }
@@ -45,28 +46,40 @@ impl UploadWorker {
 
     async fn process_file(&self, path: PathBuf) {
         let file_name = path.file_name().unwrap().to_str().unwrap().to_string();
-        // Dosya adı formatı: {call_id}_{trace_id}.wav
         let parts: Vec<&str> = file_name.trim_end_matches(".wav").split('_').collect();
         if parts.is_empty() { return; }
         
         let call_id = parts[0];
         let s3_uri = format!("s3://sentiric/recordings/{}.wav", call_id);
 
+        debug!(event = "WORKER_FILE_FOUND", file = %file_name, "İşlenecek dosya bulundu.");
+
         match fs::read(&path).await {
             Ok(data) => {
                 let writer_res = writers::from_uri(&s3_uri, &self.app_state, &self.app_state.port_manager.config).await;
                 match writer_res {
                     Ok(writer) => {
-                        if writer.write(data).await.is_ok() {
-                            tracing::info!("✅ S3 Persistence Success: {}", call_id);
+                        // Yazma işlemini dene
+                        if let Err(e) = writer.write(data).await {
+                            // [KRİTİK DÜZELTME]: S3 hatası aldıysak sonsuz döngüyü kırmak için dosyayı .failed yap.
+                            error!(event = "WORKER_S3_ERROR", error = %e, file = %file_name, "❌ S3'e yazılamadı! Dosya '.failed' olarak işaretleniyor.");
+                            let failed_path = path.with_extension("failed");
+                            let _ = fs::rename(&path, &failed_path).await;
+                        } else {
+                            // Başarılı
+                            info!(event = "WORKER_SUCCESS", call_id = %call_id, s3_uri = %s3_uri, "✅ Dosya başarıyla aktarıldı ve siliniyor.");
                             let _ = self.notify_rabbitmq(call_id, &s3_uri).await;
                             let _ = fs::remove_file(path).await;
                         }
                     },
-                    Err(e) => tracing::error!("Writer selection error: {}", e),
+                    Err(e) => {
+                        error!(event = "WORKER_WRITER_ERROR", error = %e, "S3 Writer oluşturulamadı. Ayarları kontrol edin.");
+                        let failed_path = path.with_extension("failed");
+                        let _ = fs::rename(&path, &failed_path).await;
+                    },
                 }
             }
-            Err(e) => tracing::error!("Failed to read staged file: {}", e),
+            Err(e) => error!(event = "WORKER_READ_ERROR", error = %e, "Dosya diskten okunamadı!"),
         }
     }
 
@@ -80,10 +93,11 @@ impl UploadWorker {
                 payload.as_bytes(),
                 BasicProperties::default(),
             ).await?;
+        } else {
+            warn!(event = "WORKER_MQ_WARN", "RabbitMQ Publisher kapalı, event atılamadı.");
         }
         Ok(())
     }
 }
 
-// AppState tipini persistence içinde kullanabilmek için takma ad
 use crate::state::AppState as App_State;

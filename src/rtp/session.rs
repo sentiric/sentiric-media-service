@@ -11,7 +11,6 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-// [KRİTİK DÜZELTME]: 'error' makrosu import edildi.
 use tracing::{info, error, instrument, warn, debug};
 use metrics::gauge;
 use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer, AudioProfile};
@@ -86,6 +85,11 @@ impl RtpSession {
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
 
+        // [ECHO FIX]: Kendi Header verilerimiz
+        let server_ssrc: u32 = rand::random();
+        let mut echo_seq: u16 = rand::random();
+        let mut echo_ts: u32 = rand::random();
+
         let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(1024);
         tokio::spawn({
             let socket = socket.clone();
@@ -105,8 +109,6 @@ impl RtpSession {
         let mut pacer = Pacer::new(20); 
         
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
-        
-        // [KRİTİK MİMARİ]: Latch Heartbeat (SBC Uyanana kadar saniyede 2 kez kapı çalar)
         let mut latch_ticker = tokio::time::interval(Duration::from_millis(500));
         let mut last_activity = Instant::now();
 
@@ -131,7 +133,27 @@ impl RtpSession {
                 break;
             }
 
+            // [KRİTİK ECHO DÜZELTMESİ BURADA]
+            // Gelen paketleri Jitter Buffer'dan sıralı ve temiz olarak alıyoruz.
             if let Some(packet) = jitter_buffer.pop() {
+                
+                // 1. EĞER ECHO MODUNDAYSAK (Sesi temiz Header ile geri gönder)
+                if echo_mode {
+                    if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
+                        // Kendi SSRC ve Sequence numaramızla YENİ bir paket oluşturuyoruz!
+                        // Bu sayede telefon kendi gönderdiği seq'i görüp kafası karışmıyor.
+                        let header = RtpHeader::new(packet.header.payload_type, echo_seq, echo_ts, server_ssrc);
+                        let out_packet = RtpPacket { header, payload: packet.payload.clone() };
+                        
+                        let _ = socket.send_to(&out_packet.to_bytes(), target).await;
+                        
+                        echo_seq = echo_seq.wrapping_add(1);
+                        echo_ts = echo_ts.wrapping_add(160); // 8kHz için 20ms = 160 sample
+                        echo_tx_count += 1;
+                    }
+                }
+
+                // 2. KAYIT VE DİNLEME (AI) İÇİN DECODE ET
                 if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                     if let Ok(pcm) = crate::rtp::codecs::decode_rtp_to_lpcm16(&packet.payload, codec) {
                         if let Some(tx) = &*live_stream_sender.lock().await { 
@@ -161,18 +183,16 @@ impl RtpSession {
                     );
                 },
 
-                // [HEARTBEAT LOGIC] SBC veya UAC uyanıp bize RTP gönderene kadar NAT deliğini açık tut.
                 _ = latch_ticker.tick() => {
                     if endpoint.get_target().is_none() {
                         if let Some(target) = known_target {
                             let dummy_rtp = vec![
-                                0x80, 0x00, 0x00, 0x01, // V=2, P=0, X=0, CC=0, M=0, PT=0 (PCMU), Seq=1
-                                0x00, 0x00, 0x00, 0x00, // TS=0
-                                0xDE, 0xAD, 0xBE, 0xEF, // SSRC
-                                0xFF                    // Payload
+                                0x80, 0x00, 0x00, 0x01, 
+                                0x00, 0x00, 0x00, 0x00, 
+                                0xDE, 0xAD, 0xBE, 0xEF, 
+                                0xFF                    
                             ];
                             let _ = socket.send_to(&dummy_rtp, target).await;
-                            debug!(event="LATCH_HEARTBEAT", target=%target, "SBC'nin RTP başlatması bekleniyor (Dummy Paket Atıldı).");
                         }
                     }
                 },
@@ -184,15 +204,7 @@ impl RtpSession {
                         info!(event = "RTP_LATCH", peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Medya Kilitlendi"); 
                     }
                     
-                    if echo_mode {
-                        if let Some(target) = endpoint.get_target() {
-                            if let Err(e) = socket.send_to(&data, target).await {
-                                debug!(event="ECHO_SEND_FAIL", error=%e, "Echo paketi gönderilemedi");
-                            } else {
-                                echo_tx_count += 1; 
-                            }
-                        }
-                    }
+                    // [ÖNEMLİ] Eski Echo kodunu buradan sildik. Artık yukarıda JitterBuffer sonrasında yapılıyor.
 
                     if let Some(packet) = Self::parse_rtp_packet(data) {
                         let now = Instant::now();
@@ -233,11 +245,10 @@ impl RtpSession {
             }
         }
         
-        // [GÖZLEMLENEBİLİRLİK FIX]: Kayıt işlemi sonucu loglanarak takip ediliyor.
         if let Some(rec) = recording_session.lock().await.take() { 
             match finalize_and_save_recording(rec, self.app_state.clone()).await {
-                Ok(_) => info!(event="RECORDING_SAVED", "Kayıt başarıyla diske/S3'e işlendi."),
-                Err(e) => error!(event="RECORDING_FAIL", error=%e, "Kayıt diske veya S3'e yazılamadı!"),
+                Ok(_) => info!(event="RECORDING_SAVED", "Kayıt başarıyla diske işlendi."),
+                Err(e) => error!(event="RECORDING_FAIL", error=%e, "Kayıt diske yazılamadı!"),
             }
         }
         
