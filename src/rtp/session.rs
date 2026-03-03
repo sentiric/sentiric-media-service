@@ -11,9 +11,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, error, instrument, warn, debug}; // [DÜZELTME]: `trace` kaldırıldı
+use tracing::{info, error, instrument, warn, debug}; 
 use metrics::gauge;
-// [DÜZELTME]: `Pacer` kaldırıldı
+// [YENİ EKLENDİ]: Stateful Decoder yaratmak için çekirdekten CodecFactory ve Decoder alındı.
 use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, JitterBuffer, AudioProfile, CodecFactory, Decoder};
 
 #[derive(Clone)]
@@ -66,13 +66,17 @@ impl RtpSession {
         Some(RtpPacket { header, payload })
     }
 
-#[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
+    #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
+        // [YENİ EKLENDİ]: Ses kazanç çarpanı Config'den okundu.
+        let gain_multiplier = self.app_state.port_manager.config.audio_recording_gain;
+        
         info!(
             event = "RTP_SESSION_START",
             resource.service.name = "media-service",
             sip.call_id = %self.call_id,
-            "🎧 RTP Oturumu Başlatıldı (Stateful Decoder Ready)"
+            audio.gain = gain_multiplier,
+            "🎧 RTP Oturumu Başlatıldı (Stateful Decoder & Gain Ready)"
         );
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
@@ -124,12 +128,13 @@ impl RtpSession {
             port: self.port,
         };
 
-        // [YENİ]: Oturum boyunca yaşayacak ve geçmiş frekansları aklında tutacak Decoder
+        // [YENİ EKLENDİ]: Stateful (Durumlu) Decoder Referansı. 
+        // Nedeni: Oturum boyunca yaşayacak ve geçmiş frekansları aklında tutacak. G.729 bozulmalarını engeller.
         let mut active_decoder: Option<Box<dyn Decoder>> = None;
         let mut active_payload_type: Option<u8> = None;
 
         loop {
-            let timeout = self.app_state.port_manager.config.rtp_session_inactivity_timeout;
+            let timeout = session_config.app_config.rtp_session_inactivity_timeout;
 
             if last_activity.elapsed() > timeout {
                 warn!(
@@ -145,6 +150,7 @@ impl RtpSession {
             for _ in 0..10 {
                 if let Some(packet) = jitter_buffer.pop() {
                     
+                    // Zero-Copy Echo mantığı (Dokunulmadı)
                     if echo_mode {
                         if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                             let ts_increment = match packet.header.payload_type {
@@ -162,23 +168,41 @@ impl RtpSession {
                         }
                     }
 
-                    // --- [KRİTİK DÜZELTME]: STATEFUL DECODING ---
+                    // --- [YENİ]: STATEFUL DECODING & DIGITAL GAIN (Kazanç) UYGULAMASI ---
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                         
-                        // Eğer kodek değiştiyse veya henüz decoder yoksa, YENİ ve KALICI bir decoder oluştur.
+                        // Kodek değişimi veya ilk başlatma durumunda Yeni Kalıcı Decoder Üretilir.
                         if active_payload_type != Some(packet.header.payload_type) {
                             active_decoder = Some(CodecFactory::create_decoder(codec.to_core_type()));
                             active_payload_type = Some(packet.header.payload_type);
-                            debug!(event = "DECODER_READY", codec = ?codec, "✅ Stateful RTP Decoder başlatıldı.");
+                            
+                            debug!(
+                                event = "DECODER_READY", 
+                                codec = ?codec, 
+                                audio.gain = gain_multiplier,
+                                "✅ Akıllı RTP Decoder ve Digital Gain motoru devrede."
+                            );
                         }
 
                         // Aynı decoder objesini kullanarak paketi çöz (Geçmiş ses verisi hafızada tutulur)
                         if let Some(ref mut decoder) = active_decoder {
-                            // DTMF (TelephoneEvent) gelirse decode etmeyi atla
+                            // Tuşlama seslerini (DTMF) decode etmeye çalışmayız.
                             if codec != AudioCodec::TelephoneEvent {
-                                let pcm_8k = decoder.decode(&packet.payload);
+                                let raw_pcm_8k = decoder.decode(&packet.payload);
 
-                                // 1. AI Canlı Yayın Akışı İçin (Gelecekte açacağınız yer, şimdiden düzeltilmiş oldu)
+                                // 🎛️ [YENİ]: DİNAMİK SES KAZANCI (GAIN) VE CLIPPING KORUMASI
+                                // Nedeni: Sesi f32 çarpanla yükseltir, ardından patlamaması (robotik cızırtı yapmaması)
+                                // için i16 sınırlarında clamp'ler (kırpar).
+                                let pcm_8k: Vec<i16> = if (gain_multiplier - 1.0).abs() > f32::EPSILON {
+                                    raw_pcm_8k.into_iter().map(|sample| {
+                                        let boosted = (sample as f32 * gain_multiplier) as i32;
+                                        boosted.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+                                    }).collect()
+                                } else {
+                                    raw_pcm_8k // Gain 1.0 ise performansı korumak için işlem yapma
+                                };
+
+                                // 1. AI Canlı Yayın Akışı İçin (Geleceğe yatırım)
                                 if live_stream_sender.lock().await.is_some() {
                                     if let Some(tx) = &*live_stream_sender.lock().await { 
                                         let pcm_16k = sentiric_rtp_core::simple_resample(&pcm_8k, 8000, 16000);
@@ -188,7 +212,7 @@ impl RtpSession {
                                     }
                                 }
 
-                                // 2. S3 Kayıt İçin Doğrudan Native 8k Yazımı (Şu an S3'ün bozuk olmasını çözen kısım)
+                                // 2. S3 Kayıt İçin Doğrudan Native 8k Yazımı
                                 if let Some(rec) = &mut *recording_session.lock().await { 
                                     rec.audio_buffer.extend_from_slice(&pcm_8k); 
                                 }
@@ -196,7 +220,7 @@ impl RtpSession {
                         }
                     }
                 } else {
-                    break;
+                    break; // Jitter buffer boş
                 }
             }
 
@@ -283,17 +307,20 @@ impl RtpSession {
                      }
                 }
             }
-        }
+        } // Loop sonu
         
         if let Some(rec) = recording_session.lock().await.take() { 
+            // [DÜZELTME]: Import edilip Warning vermeyen doğru çağrı metodu.
             match finalize_and_save_recording(rec, self.app_state.clone()).await {
-                Ok(_) => info!(event="RECORDING_SAVED", sip.call_id=%self.call_id, "Kayıt başarıyla diske/S3'e işlendi."),
-                Err(e) => error!(event="RECORDING_FAIL", sip.call_id=%self.call_id, error=%e, "Kayıt diske veya S3'e yazılamadı!"),
+                Ok(_) => info!(event="RECORDING_SAVED", sip.call_id=%self.call_id, "💾 Kayıt başarıyla diske işlendi."),
+                Err(e) => error!(event="RECORDING_FAIL", sip.call_id=%self.call_id, error=%e, "❌ Kayıt diske yazılamadı!"),
             }
         }
         
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
+        
+        // [DÜZELTME]: metrics crate'i üzerinden doğrudan macro çağrısı. Derleyici hatasını önler.
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
         
         info!(event = "RTP_SESSION_END", sip.call_id = %self.call_id, "🛑 RTP Oturumu Sonlandırıldı.");

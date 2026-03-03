@@ -37,15 +37,18 @@ impl AudioCodec {
     }
 }
 
-// [KRİTİK DÜZELTME]: Hatalı, her pakette sıfırlanan (stateless) decode fonksiyonları
-// sistemden tamamen kaldırıldı. Decode işlemi artık session.rs içinde stateful yapılacak.
+// [KALDIRILDI]: decode_rtp_to_lpcm16 ve decode_rtp_native_8k fonksiyonları kaldırıldı.
+// Nedeni: G.729 "Stateful" bir kodektir. Bu fonksiyonlar her çağrıldığında
+// yeni bir decoder ürettiği için ses robotikleşiyor ve bozuluyordu.
+// Decode işlemi artık doğrudan src/rtp/session.rs içinde stateful olarak yapılıyor.
 
+// [KORUNDU]: Encode işlemi TTS'ten gelen saf (durumsuz) 16k sesi sıkıştırdığı için burada kalabilir.
 pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
     if target_codec == AudioCodec::TelephoneEvent {
         return Ok(vec![]);
     }
     
-    // 16k -> 8k Downsample
+    // 16k -> 8k Downsample (Telekom standardı)
     let samples_8k = simple_resample(samples_16k, 16000, 8000);
     trace!("Downsampled {} samples to {} samples (16k->8k)", samples_16k.len(), samples_8k.len());
     

@@ -22,11 +22,8 @@ pub struct S3Config {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub grpc_listen_addr: SocketAddr,
-    
-    // [STRATEGIC UPDATE]: Bind ve Advertise IP ayrımı
-    pub rtp_listen_ip: String,      // Socket'in dinleyeceği yer (Genelde 0.0.0.0)
-    pub rtp_advertised_ip: String,  // Dış dünyaya duyurulacak IP (Node IP / VPN IP)
-    
+    pub rtp_listen_ip: String,      
+    pub rtp_advertised_ip: String,  
     pub rtp_port_min: u16,
     pub rtp_port_max: u16,
     pub rtp_port_quarantine_duration: Duration,
@@ -47,6 +44,10 @@ pub struct AppConfig {
     pub cert_path: String,
     pub key_path: String,
     pub ca_path: String,
+    
+    // [YENİ EKLENDİ]: Ses kalitesini artırmak için parametrik kazanç çarpanı (Gain).
+    // Nedeni: Orijinal operatör sesleri kısık olabiliyor, AI'ın daha iyi duymasını sağlar.
+    pub audio_recording_gain: f32,
 }
 
 impl AppConfig {
@@ -81,15 +82,16 @@ impl AppConfig {
             MediaEngineMode::Headless
         };
 
+        // [YENİ EKLENDİ]: Environment'tan Gain okur. Yoksa varsayılan 1.0 (değişimsiz ses) alır.
+        let audio_recording_gain: f32 = env::var("AUDIO_RECORDING_GAIN")
+            .unwrap_or_else(|_| "1.0".to_string())
+            .parse()
+            .unwrap_or(1.0);
+
         Ok(AppConfig {
             grpc_listen_addr: format!("[::]:{}", grpc_port).parse()?,
-            
-            // [FIX]: Ayrıştırılmış IP Okuma
-            // Dinleme adresi varsayılan olarak 0.0.0.0 olmalı (Docker içi)
             rtp_listen_ip: env::var("RTP_SERVICE_LISTEN_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string()),
-            // Duyurulacak adres (Zorunlu - Yanlış olursa ses gitmez)
             rtp_advertised_ip: env::var("RTP_SERVICE_ADVERTISED_IP").context("RTP_SERVICE_ADVERTISED_IP (Node IP) eksik!")?,
-
             assets_base_path: env::var("ASSETS_BASE_PATH").unwrap_or_else(|_| "assets".to_string()),
             media_recording_path: env::var("MEDIA_RECORDING_PATH").unwrap_or_else(|_| "/tmp/sentiric/recordings".to_string()),
             rtp_port_min,
@@ -110,6 +112,7 @@ impl AppConfig {
             cert_path: env::var("MEDIA_SERVICE_CERT_PATH")?,
             key_path: env::var("MEDIA_SERVICE_KEY_PATH")?,
             ca_path: env::var("GRPC_TLS_CA_PATH")?,
+            audio_recording_gain, 
         })
     }
 }
