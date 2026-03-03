@@ -1,16 +1,16 @@
-// sentiric-media-service/src/rtp/session_utils.rs
+// src/rtp/session_utils.rs
 use super::command::RecordingSession;
 use crate::state::AppState;
 use anyhow::Result;
-use hound::WavWriter;
+use hound::{WavWriter, WavSpec, SampleFormat}; // Spec eklendi
 use std::io::Cursor;
 use tokio::fs;
 use tokio::task::spawn_blocking;
-use tracing::instrument;
+use tracing::{instrument, info}; // Info eklendi
 
 #[instrument(skip_all, fields(call_id = %session.call_id))]
 pub async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
-    if session.mixed_samples_16khz.is_empty() {
+    if session.audio_buffer.is_empty() {
         return Ok(());
     }
 
@@ -18,19 +18,22 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
     let staging_path = format!("{}/{}_{}.wav", recordings_dir, session.call_id, session.trace_id);
     let tmp_path = format!("{}.tmp", staging_path);
 
-    let spec = session.spec;
-    let mixed_samples = session.mixed_samples_16khz;
+    // [TELECOM STANDARD]: Kayıt formatını 8000Hz Mono olarak zorluyoruz.
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: 8000,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+    
+    let samples = session.audio_buffer;
     
     let wav_data = spawn_blocking(move || -> Result<Vec<u8>> {
         let mut buffer = Cursor::new(Vec::new());
         let mut writer = WavWriter::new(&mut buffer, spec)?;
         
-        // [TELECOM STANDARD FIX]: 16kHz olan AI stream verisini, disk tasarrufu ve 
-        // geleneksel oynatıcı uyumluluğu için 8kHz'e (Telekom Standardı) geri düşürüyoruz.
-        let downsampled = sentiric_rtp_core::simple_resample(&mixed_samples, 16000, 8000);
-        
-        for sample in downsampled {
-            // [GAIN REMOVED]: Dijital bozulmaları (robotik/parazit) önlemek için sesi ham bırakıyoruz.
+        // [DIRECT WRITE]: Artık downsample yok. Veri zaten native 8kHz.
+        for sample in samples {
             writer.write_sample(sample)?;
         }
         
@@ -42,10 +45,11 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
     fs::write(&tmp_path, wav_data).await?;
     fs::rename(&tmp_path, &staging_path).await?; 
 
-    tracing::info!(path = %staging_path, "💾 Arka plana yüklenmek üzere kayıt yapıldı.");
+    info!(path = %staging_path, "💾 Kayıt başarıyla tamamlandı (Native 8kHz).");
     Ok(())
 }
 
+// ... (load_and_resample fonksiyonu aynı kalabilir)
 pub async fn load_and_resample_samples_from_uri(
     uri: &str,
     app_state: &AppState,
@@ -58,7 +62,10 @@ pub async fn load_and_resample_samples_from_uri(
         let mut final_path = PathBuf::from(&config.assets_base_path);
         final_path.push(path_part.trim_start_matches('/'));
         let samples_8k = load_or_get_from_cache(&app_state.audio_cache, &final_path).await?;
-        let samples_16k = spawn_blocking(move || {
+        
+        // Burası TTS/Playback için. Buradaki 16k upsample kalabilir çünkü
+        // encode fonksiyonu 16k bekleyip 8k'ya düşürüyor (codec uyumu için).
+        let samples_16k = tokio::task::spawn_blocking(move || {
             sentiric_rtp_core::simple_resample(&samples_8k, 8000, 16000)
         }).await?;
         return Ok(std::sync::Arc::new(samples_16k));

@@ -1,4 +1,4 @@
-// sentiric-media-service/src/rtp/session.rs
+// src/rtp/session.rs
 use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
@@ -11,9 +11,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, error, instrument, warn, debug, trace}; // Trace eklendi
+use tracing::{info, error, instrument, warn, debug}; // [DÜZELTME]: `trace` kaldırıldı
 use metrics::gauge;
-use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer, AudioProfile};
+// [DÜZELTME]: `Pacer` kaldırıldı
+use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, JitterBuffer, AudioProfile};
 
 #[derive(Clone)]
 pub struct RtpSessionConfig {
@@ -79,7 +80,6 @@ impl RtpSession {
         let endpoint = RtpEndpoint::new(None);
         let _audio_processor = AudioProcessor::new(AudioProfile::default().preferred_audio_codec());
         
-        // [TUNING]: Jitter Buffer kapasitesi artırıldı
         let mut jitter_buffer = JitterBuffer::new(100, 60);
 
         let mut last_seq: Option<u16> = None;
@@ -92,20 +92,17 @@ impl RtpSession {
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
 
-        // [SECURE RANDOM]: SSRC çakışmalarını önlemek için
         let server_ssrc: u32 = rand::random();
         let mut echo_seq: u16 = rand::random();
         let mut echo_ts: u32 = rand::random();
 
-        let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(2048); // Buffer artırıldı
+        let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(2048); 
         
-        // Receiver Thread (Mümkün olduğunca hafif)
         tokio::spawn({
             let socket = socket.clone();
             async move {
                 let mut buf = [0u8; 2048];
                 while let Ok((len, addr)) = socket.recv_from(&mut buf).await {
-                    // Backpressure koruması: Doluysa paketi düşür, sistemi kilitleme
                     let _ = rtp_packet_tx.try_send((buf[..len].to_vec(), addr)); 
                 }
             }
@@ -116,11 +113,10 @@ impl RtpSession {
         let mut playback_queue: std::collections::VecDeque<session_handlers::PlaybackJob> = std::collections::VecDeque::new();
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
-        let mut pacer = Pacer::new(20); 
+        
+        // [DÜZELTME]: `let mut pacer = Pacer::new(20);` satırı tamamen kaldırıldı.
         
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
-        
-        // [HIZLI LATCHING]: Saniyede 10 kez (100ms) kapı çal ki ilk saniyede kilitlensin.
         let mut latch_ticker = tokio::time::interval(Duration::from_millis(100));
         let mut last_activity = Instant::now();
 
@@ -131,10 +127,6 @@ impl RtpSession {
         };
 
         loop {
-            // [CRITICAL]: Pacer'ı döngünün başında değil, paket gönderim anında kullanacağız
-            // Bu sayede CPU sleep durumunda kalmaz.
-            // pacer.wait(); <--- KALDIRILDI (Burada bloklamak tüm event loop'u durduruyordu)
-
             let timeout = self.app_state.port_manager.config.rtp_session_inactivity_timeout;
 
             if last_activity.elapsed() > timeout {
@@ -148,30 +140,21 @@ impl RtpSession {
             }
 
             // --- RTP PROCESSING LOOP ---
-            // Bir döngüde birden fazla paket işleyerek birikmeyi önle (Batch Processing)
             for _ in 0..10 {
                 if let Some(packet) = jitter_buffer.pop() {
                     
-                    // [STRATEGY 1: ZERO-COPY ECHO]
-                    // Eğer Echo modu açıksa, paketi HİÇBİR İŞLEME SOKMADAN geri yansıt.
-                    // Decoder, DSP, Mixer... Hepsi atlanır.
                     if echo_mode {
                         if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                             
-                            // Gelen paketin boyutuna göre Timestamp artışı hesapla
                             let ts_increment = match packet.header.payload_type {
-                                18 => (packet.payload.len() as u32) * 8, // G729: 1 byte = 8 sample
-                                0 | 8 => packet.payload.len() as u32,    // G711: 1 byte = 1 sample
-                                _ => 160, // Default 20ms
+                                18 => (packet.payload.len() as u32) * 8, 
+                                0 | 8 => packet.payload.len() as u32,    
+                                _ => 160, 
                             };
 
                             let header = RtpHeader::new(packet.header.payload_type, echo_seq, echo_ts, server_ssrc);
-                            
-                            // Payload'u klonlama maliyeti var ama decode maliyetinden düşüktür.
                             let out_packet = RtpPacket { header, payload: packet.payload.clone() };
                             
-                            // [SYNC WRITE]: Pacer kullanmıyoruz, gelen hızda (line rate) geri gönderiyoruz.
-                            // Bu sayede ağdaki jitter'ı birebir yansıtırız, kendi jitter'ımızı eklemeyiz.
                             let _ = socket.send_to(&out_packet.to_bytes(), target).await;
                             
                             echo_seq = echo_seq.wrapping_add(1);
@@ -180,39 +163,36 @@ impl RtpSession {
 
                             if echo_tx_count % 200 == 0 {
                                 debug!(
-                                    event = "RTP_ECHO_FAST_PATH",
+                                    event = "RTP_ECHO_LIVE",
                                     sip.call_id = %self.call_id,
-                                    seq = echo_seq,
-                                    "⚡ Zero-Copy Echo devrede. Paketler decode edilmeden yansıtılıyor."
+                                    "⚡ Echo paketi gönderildi (Zero-Copy)."
                                 );
                             }
-                            
-                            // [KRİTİK]: Echo modundaysak, loop'un geri kalanını (Decoding/Recording) atla!
-                            // Bu, sorunu izole etmek için şart.
-                            continue; 
+                            // continue; 
+                            // // [KRİTİK DEĞİŞİKLİK]: 'continue' KALDIRILDI.
+                            // Artık aşağıya düşüp kaydı da yapacak.
                         }
                     }
 
-                    // --- [STRATEGY 2: NORMAL PIPELINE (Sadece Echo Kapalıysa)] ---
-                    // Eğer Echo değilse (örn: normal konuşma), o zaman decode et ve kaydet.
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
-                        if let Ok(pcm) = crate::rtp::codecs::decode_rtp_to_lpcm16(&packet.payload, codec) {
-                            
-                            // 1. Canlı Akış (STT için)
-                            if let Some(tx) = &*live_stream_sender.lock().await { 
-                                let mut b = Vec::new(); 
-                                for s in &pcm { b.extend_from_slice(&s.to_le_bytes()); }
-                                let _ = tx.try_send(Ok(AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
+                        
+                        if live_stream_sender.lock().await.is_some() {
+                            if let Ok(pcm_16k) = crate::rtp::codecs::decode_rtp_to_lpcm16(&packet.payload, codec) {
+                                if let Some(tx) = &*live_stream_sender.lock().await { 
+                                    let mut b = Vec::new(); 
+                                    for s in &pcm_16k { b.extend_from_slice(&s.to_le_bytes()); }
+                                    let _ = tx.try_send(Ok(AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
+                                }
                             }
+                        }
 
-                            // 2. Kayıt (Mixing)
-                            if let Some(rec) = &mut *recording_session.lock().await { 
-                                rec.mixed_samples_16khz.extend_from_slice(&pcm); 
+                        if let Some(rec) = &mut *recording_session.lock().await { 
+                            if let Ok(pcm_8k) = crate::rtp::codecs::decode_rtp_native_8k(&packet.payload, codec) {
+                                rec.audio_buffer.extend_from_slice(&pcm_8k); 
                             }
                         }
                     }
                 } else {
-                    // Buffer boşsa döngüden çık
                     break;
                 }
             }
@@ -223,7 +203,6 @@ impl RtpSession {
                     let loss_rate = if total_packets_rx > 0 { (packet_loss_count as f64 / (total_packets_rx + packet_loss_count) as f64) * 100.0 } else { 0.0 };
                     let avg_jitter = if total_packets_rx > 0 { jitter_acc / total_packets_rx as f64 } else { 0.0 };
                     
-                    // Sadece önemli bir aktivite varsa log bas
                     if total_packets_rx > 0 {
                         info!(
                             event = "RTP_QOS_REPORT",
@@ -240,7 +219,6 @@ impl RtpSession {
                 _ = latch_ticker.tick() => {
                     if endpoint.get_target().is_none() {
                         if let Some(target) = known_target {
-                            // Hole Punching Paketi
                             let dummy_rtp = vec![
                                 0x80, 0x00, 0x00, 0x01, 
                                 0x00, 0x00, 0x00, 0x00, 

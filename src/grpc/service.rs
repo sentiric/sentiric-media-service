@@ -1,4 +1,4 @@
-// sentiric-media-service/src/grpc/service.rs
+// src/grpc/service.rs
 use crate::grpc::error::ServiceError;
 use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
 use crate::rtp::command::{RtpCommand, RecordingSession};
@@ -102,8 +102,6 @@ impl MediaService for MyMediaService {
 
         let port = self.app_state.port_manager.get_available_port().await.ok_or(ServiceError::PortPoolExhausted)?;
 
-        // [FIX]: Bind IP (0.0.0.0) kullanılıyor.
-        // Docker içinde 0.0.0.0'a bind olmazsak dışarıdan gelen paketleri alamayız.
         let bind_addr = format!("{}:{}", self.config.rtp_listen_ip, port);
 
         match UdpSocket::bind(&bind_addr).await {
@@ -114,7 +112,6 @@ impl MediaService for MyMediaService {
                 
                 self.app_state.port_manager.add_session(port, session).await;
                 
-                // Logda hangi IP'yi dinlediğimizi gösterelim
                 info!(event = "MEDIA_PORT_ALLOCATED", rtp.port = port, bind.addr = %bind_addr, "RTP Port Allocated");
                 
                 Ok(Response::new(AllocatePortResponse { rtp_port: port as u32 }))
@@ -198,9 +195,8 @@ impl MediaService for MyMediaService {
         let session = self.app_state.port_manager.get_session(req.server_rtp_port as u16).await.ok_or(Status::not_found("No session"))?;
         session.send_command(RtpCommand::StartPermanentRecording(RecordingSession {
             output_uri: req.output_uri,
-            // [TELECOM STANDARD FIX]: Kesinlikle 8000Hz olarak kayıt başlar.
             spec: WavSpec { channels: 1, sample_rate: 8000, bits_per_sample: 16, sample_format: SampleFormat::Int },
-            mixed_samples_16khz: Vec::new(),
+            audio_buffer: Vec::new(), //[DÜZELTME BURADA YAPILDI]
             call_id: req.call_id,
             trace_id: req.trace_id,
         })).await.map_err(|_| Status::internal("Command fail"))?;

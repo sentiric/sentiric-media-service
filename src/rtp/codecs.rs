@@ -1,4 +1,4 @@
-// sentiric-media-service/src/rtp/codecs.rs
+// src/rtp/codecs.rs
 
 use anyhow::{anyhow, Result};
 use sentiric_rtp_core::{CodecFactory, CodecType, simple_resample};
@@ -37,6 +37,7 @@ impl AudioCodec {
     }
 }
 
+// MEVCUT: AI için Upsample yapar (16k)
 pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16>> {
     if codec == AudioCodec::TelephoneEvent {
         return Ok(vec![]); 
@@ -45,8 +46,19 @@ pub fn decode_rtp_to_lpcm16(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16
     let mut decoder = CodecFactory::create_decoder(codec.to_core_type());
     let samples_8k = decoder.decode(payload);
     
-    // 8k -> 16k Upsample
+    // 8k -> 16k Upsample (AI için gerekli, ama saf kayıt için zararlı)
     Ok(simple_resample(&samples_8k, 8000, 16000))
+}
+
+// [YENİ]: Saf Telekom Kaydı için (8k) - DSP Yok, Bozulma Yok.
+pub fn decode_rtp_native_8k(payload: &[u8], codec: AudioCodec) -> Result<Vec<i16>> {
+    if codec == AudioCodec::TelephoneEvent {
+        return Ok(vec![]); 
+    }
+
+    let mut decoder = CodecFactory::create_decoder(codec.to_core_type());
+    // Doğrudan 8k örnekleri döndürür
+    Ok(decoder.decode(payload))
 }
 
 pub fn encode_lpcm16_to_rtp(samples_16k: &[i16], target_codec: AudioCodec) -> Result<Vec<u8>> {
