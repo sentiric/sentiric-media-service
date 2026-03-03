@@ -25,13 +25,13 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         let mut buffer = Cursor::new(Vec::new());
         let mut writer = WavWriter::new(&mut buffer, spec)?;
         
-        let downsampled = sentiric_rtp_core::simple_resample(&mixed_samples, 16000, 8000);
-        
-        for sample in downsampled {
-            // [SES YÜKSELTİCİ]: Diske yazılan ses genelde kısık kalır. 2.5 kat (Gain) uyguluyoruz.
-            let amplified = (sample as f32 * 2.5).clamp(-32768.0, 32767.0) as i16;
-            writer.write_sample(amplified)?;
+        // [KALİTE DÜZELTMESİ]: 16kHz veriyi 8kHz'e düşürmüyoruz! Direkt 16kHz yazıyoruz.
+        // Ayrıca 2.5x olan parazitli gain kaldırıldı, pürüzsüz %20 artış (1.2x) eklendi.
+        for sample in mixed_samples {
+            let safe_sample = (sample as f32 * 1.2).clamp(-32768.0, 32767.0) as i16;
+            writer.write_sample(safe_sample)?;
         }
+        
         writer.finalize()?;
         Ok(buffer.into_inner())
     }).await??;
