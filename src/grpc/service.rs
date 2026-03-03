@@ -1,4 +1,4 @@
-// src/grpc/service.rs
+// sentiric-media-service/src/grpc/service.rs
 use crate::grpc::error::ServiceError;
 use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
 use crate::rtp::command::{RtpCommand, RecordingSession};
@@ -21,7 +21,6 @@ use tokio::net::UdpSocket;
 use tokio::sync::{mpsc, oneshot};
 use tokio_stream::{wrappers::ReceiverStream, Stream, StreamExt};
 use tonic::{Request, Response, Status, Streaming};
-// [CRITICAL FIX]: 'instrument' makrosunun ihtiyaç duyduğu 'field' modülü import edildi.
 use tracing::{info, warn, instrument, Span, field};
 
 pub struct MyMediaService {
@@ -84,7 +83,6 @@ impl MediaService for MyMediaService {
     async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
         let mut trace_id = Self::extract_trace_id(&request);
         
-        // [FIX]: Eğer trace_id yoksa, null bırakma, yeni bir tane üret ve uyar.
         if trace_id == "unknown" {
             let new_id = uuid::Uuid::new_v4().to_string();
             warn!(
@@ -104,21 +102,25 @@ impl MediaService for MyMediaService {
 
         let port = self.app_state.port_manager.get_available_port().await.ok_or(ServiceError::PortPoolExhausted)?;
 
-        match UdpSocket::bind(format!("{}:{}", self.config.rtp_host, port)).await {
+        // [FIX]: Bind IP (0.0.0.0) kullanılıyor.
+        // Docker içinde 0.0.0.0'a bind olmazsak dışarıdan gelen paketleri alamayız.
+        let bind_addr = format!("{}:{}", self.config.rtp_listen_ip, port);
+
+        match UdpSocket::bind(&bind_addr).await {
             Ok(socket) => {
                 gauge!(ACTIVE_SESSIONS).increment(1.0);
                 
-                // RtpSession oluştururken bu trace_id'yi kullan.
                 let session = RtpSession::new(trace_id.clone(), call_id.clone(), port, Arc::new(socket), self.app_state.clone());
-
                 
                 self.app_state.port_manager.add_session(port, session).await;
                 
-                info!(event = "MEDIA_PORT_ALLOCATED", rtp.port = port, "RTP Port Allocated");
+                // Logda hangi IP'yi dinlediğimizi gösterelim
+                info!(event = "MEDIA_PORT_ALLOCATED", rtp.port = port, bind.addr = %bind_addr, "RTP Port Allocated");
                 
                 Ok(Response::new(AllocatePortResponse { rtp_port: port as u32 }))
             }
-            Err(_) => {
+            Err(e) => {
+                warn!(event="BIND_FAIL", error=%e, addr=%bind_addr, "Socket bind başarısız");
                 self.app_state.port_manager.quarantine_port(port).await;
                 Err(Status::resource_exhausted("Bind failed"))
             }

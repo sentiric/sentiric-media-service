@@ -22,12 +22,15 @@ pub struct S3Config {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub grpc_listen_addr: SocketAddr,
-    pub rtp_host: String,
+    
+    // [STRATEGIC UPDATE]: Bind ve Advertise IP ayrımı
+    pub rtp_listen_ip: String,      // Socket'in dinleyeceği yer (Genelde 0.0.0.0)
+    pub rtp_advertised_ip: String,  // Dış dünyaya duyurulacak IP (Node IP / VPN IP)
+    
     pub rtp_port_min: u16,
     pub rtp_port_max: u16,
     pub rtp_port_quarantine_duration: Duration,
     pub assets_base_path: String,
-    // [YENİ]: Kayıtların geçici olarak tutulacağı disk yolu
     pub media_recording_path: String, 
     pub env: String,
     pub rust_log: String,
@@ -80,9 +83,14 @@ impl AppConfig {
 
         Ok(AppConfig {
             grpc_listen_addr: format!("[::]:{}", grpc_port).parse()?,
-            rtp_host: env::var("RTP_SERVICE_LISTEN_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            
+            // [FIX]: Ayrıştırılmış IP Okuma
+            // Dinleme adresi varsayılan olarak 0.0.0.0 olmalı (Docker içi)
+            rtp_listen_ip: env::var("RTP_SERVICE_LISTEN_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            // Duyurulacak adres (Zorunlu - Yanlış olursa ses gitmez)
+            rtp_advertised_ip: env::var("RTP_SERVICE_ADVERTISED_IP").context("RTP_SERVICE_ADVERTISED_IP (Node IP) eksik!")?,
+
             assets_base_path: env::var("ASSETS_BASE_PATH").unwrap_or_else(|_| "assets".to_string()),
-            // [YENİ]: Ortam değişkeninden oku veya varsayılanı kullan
             media_recording_path: env::var("MEDIA_RECORDING_PATH").unwrap_or_else(|_| "/tmp/sentiric/recordings".to_string()),
             rtp_port_min,
             rtp_port_max,
