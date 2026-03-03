@@ -11,7 +11,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, instrument, warn, debug};
+// [KRİTİK DÜZELTME]: 'error' makrosu import edildi.
+use tracing::{info, error, instrument, warn, debug};
 use metrics::gauge;
 use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, Pacer, JitterBuffer, AudioProfile};
 
@@ -104,9 +105,9 @@ impl RtpSession {
         let mut pacer = Pacer::new(20); 
         
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
-        // [KRİTİK]: Latch Heartbeat (SBC Uyanana kadar saniyede 2 kez kapı çalar)
-        let mut latch_ticker = tokio::time::interval(Duration::from_millis(500));
         
+        // [KRİTİK MİMARİ]: Latch Heartbeat (SBC Uyanana kadar saniyede 2 kez kapı çalar)
+        let mut latch_ticker = tokio::time::interval(Duration::from_millis(500));
         let mut last_activity = Instant::now();
 
         let session_config = RtpSessionConfig {
@@ -160,9 +161,8 @@ impl RtpSession {
                     );
                 },
 
-                // [KRİTİK EKLENTİ]: SBC veya UAC uyanıp bize RTP gönderene kadar kapı çal (Hole Punch)
+                // [HEARTBEAT LOGIC] SBC veya UAC uyanıp bize RTP gönderene kadar NAT deliğini açık tut.
                 _ = latch_ticker.tick() => {
-                    // Eğer karşı taraftan hiç paket gelmediyse (is_latched = false) ve nereye atacağımızı biliyorsak:
                     if endpoint.get_target().is_none() {
                         if let Some(target) = known_target {
                             let dummy_rtp = vec![
@@ -233,9 +233,14 @@ impl RtpSession {
             }
         }
         
+        // [GÖZLEMLENEBİLİRLİK FIX]: Kayıt işlemi sonucu loglanarak takip ediliyor.
         if let Some(rec) = recording_session.lock().await.take() { 
-            let _ = finalize_and_save_recording(rec, self.app_state.clone()).await; 
+            match finalize_and_save_recording(rec, self.app_state.clone()).await {
+                Ok(_) => info!(event="RECORDING_SAVED", "Kayıt başarıyla diske/S3'e işlendi."),
+                Err(e) => error!(event="RECORDING_FAIL", error=%e, "Kayıt diske veya S3'e yazılamadı!"),
+            }
         }
+        
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
