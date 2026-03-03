@@ -58,14 +58,31 @@ pub async fn handle_command(
             }
         },
         RtpCommand::EnableEchoTest => {
-            // [KRİTİK DÜZELTME]: Sadece log basmıyoruz, state'i değiştiriyoruz.
             info!(event = "ECHO_MODE_ENABLED", sip.call_id = %call_id, "🔊 Native Echo Reflex AKTİFLEŞTİRİLDİ. Loopback başlıyor.");
             *echo_mode = true;
             
-            // Hattı ısıtmak için ilk dummy paketler (NAT Hole Punching garantisi)
-            if let Some(target) = endpoint.get_target().or(*known_target) {
-                for _ in 0..3 {
-                    let _ = socket.send_to(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00], target).await;
+            // [KRİTİK GÜNCELLEME]: Agresif Hole Punching
+            // Hem endpoint'ten gelen hedefe (eğer varsa) hem de `known_target`'a (PlayAudio ile set edilen) paket gönder.
+            // Bu, SBC'nin media-service'i "duymasını" ve latch olmasını sağlar.
+            
+            let targets = vec![endpoint.get_target(), *known_target];
+            
+            for target_opt in targets {
+                if let Some(target) = target_opt {
+                    info!(event="HOLE_PUNCH_BLAST", target=%target, "SBC/Client yönüne delme paketi gönderiliyor...");
+                    for _ in 0..10 { // Sayıyı artırdık
+                        // RTP Header ile geçerli bir sessizlik paketi gönder (Payload Type 0/8 veya CN)
+                        // Boş paket bazen routerlar tarafından düşürülür.
+                        // Minimal valid RTP header (12 byte) + 1 byte payload
+                        let dummy_rtp = vec![
+                            0x80, 0x00, 0x00, 0x01, // V=2, P=0, X=0, CC=0, M=0, PT=0 (PCMU), Seq=1
+                            0x00, 0x00, 0x00, 0x00, // TS=0
+                            0xDE, 0xAD, 0xBE, 0xEF, // SSRC
+                            0xFF                    // Payload (Silence)
+                        ];
+                        let _ = socket.send_to(&dummy_rtp, target).await;
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
                 }
             }
         },
