@@ -14,7 +14,7 @@ use tokio::time::{Duration, Instant};
 use tracing::{info, error, instrument, warn, debug}; // [DÜZELTME]: `trace` kaldırıldı
 use metrics::gauge;
 // [DÜZELTME]: `Pacer` kaldırıldı
-use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, JitterBuffer, AudioProfile};
+use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, JitterBuffer, AudioProfile, CodecFactory, Decoder};
 
 #[derive(Clone)]
 pub struct RtpSessionConfig {
@@ -66,13 +66,13 @@ impl RtpSession {
         Some(RtpPacket { header, payload })
     }
 
-    #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
+#[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
         info!(
             event = "RTP_SESSION_START",
             resource.service.name = "media-service",
             sip.call_id = %self.call_id,
-            "🎧 RTP Oturumu Başlatıldı (Zero-Copy Ready)"
+            "🎧 RTP Oturumu Başlatıldı (Stateful Decoder Ready)"
         );
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
@@ -114,8 +114,6 @@ impl RtpSession {
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
         
-        // [DÜZELTME]: `let mut pacer = Pacer::new(20);` satırı tamamen kaldırıldı.
-        
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
         let mut latch_ticker = tokio::time::interval(Duration::from_millis(100));
         let mut last_activity = Instant::now();
@@ -125,6 +123,10 @@ impl RtpSession {
             app_config: self.app_state.port_manager.config.clone(),
             port: self.port,
         };
+
+        // [YENİ]: Oturum boyunca yaşayacak ve geçmiş frekansları aklında tutacak Decoder
+        let mut active_decoder: Option<Box<dyn Decoder>> = None;
+        let mut active_payload_type: Option<u8> = None;
 
         loop {
             let timeout = self.app_state.port_manager.config.rtp_session_inactivity_timeout;
@@ -145,50 +147,51 @@ impl RtpSession {
                     
                     if echo_mode {
                         if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
-                            
                             let ts_increment = match packet.header.payload_type {
                                 18 => (packet.payload.len() as u32) * 8, 
                                 0 | 8 => packet.payload.len() as u32,    
                                 _ => 160, 
                             };
-
                             let header = RtpHeader::new(packet.header.payload_type, echo_seq, echo_ts, server_ssrc);
                             let out_packet = RtpPacket { header, payload: packet.payload.clone() };
-                            
                             let _ = socket.send_to(&out_packet.to_bytes(), target).await;
                             
                             echo_seq = echo_seq.wrapping_add(1);
                             echo_ts = echo_ts.wrapping_add(ts_increment); 
                             echo_tx_count += 1;
-
-                            if echo_tx_count % 200 == 0 {
-                                debug!(
-                                    event = "RTP_ECHO_LIVE",
-                                    sip.call_id = %self.call_id,
-                                    "⚡ Echo paketi gönderildi (Zero-Copy)."
-                                );
-                            }
-                            // continue; 
-                            // // [KRİTİK DEĞİŞİKLİK]: 'continue' KALDIRILDI.
-                            // Artık aşağıya düşüp kaydı da yapacak.
                         }
                     }
 
+                    // --- [KRİTİK DÜZELTME]: STATEFUL DECODING ---
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                         
-                        if live_stream_sender.lock().await.is_some() {
-                            if let Ok(pcm_16k) = crate::rtp::codecs::decode_rtp_to_lpcm16(&packet.payload, codec) {
-                                if let Some(tx) = &*live_stream_sender.lock().await { 
-                                    let mut b = Vec::new(); 
-                                    for s in &pcm_16k { b.extend_from_slice(&s.to_le_bytes()); }
-                                    let _ = tx.try_send(Ok(AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
-                                }
-                            }
+                        // Eğer kodek değiştiyse veya henüz decoder yoksa, YENİ ve KALICI bir decoder oluştur.
+                        if active_payload_type != Some(packet.header.payload_type) {
+                            active_decoder = Some(CodecFactory::create_decoder(codec.to_core_type()));
+                            active_payload_type = Some(packet.header.payload_type);
+                            debug!(event = "DECODER_READY", codec = ?codec, "✅ Stateful RTP Decoder başlatıldı.");
                         }
 
-                        if let Some(rec) = &mut *recording_session.lock().await { 
-                            if let Ok(pcm_8k) = crate::rtp::codecs::decode_rtp_native_8k(&packet.payload, codec) {
-                                rec.audio_buffer.extend_from_slice(&pcm_8k); 
+                        // Aynı decoder objesini kullanarak paketi çöz (Geçmiş ses verisi hafızada tutulur)
+                        if let Some(ref mut decoder) = active_decoder {
+                            // DTMF (TelephoneEvent) gelirse decode etmeyi atla
+                            if codec != AudioCodec::TelephoneEvent {
+                                let pcm_8k = decoder.decode(&packet.payload);
+
+                                // 1. AI Canlı Yayın Akışı İçin (Gelecekte açacağınız yer, şimdiden düzeltilmiş oldu)
+                                if live_stream_sender.lock().await.is_some() {
+                                    if let Some(tx) = &*live_stream_sender.lock().await { 
+                                        let pcm_16k = sentiric_rtp_core::simple_resample(&pcm_8k, 8000, 16000);
+                                        let mut b = Vec::with_capacity(pcm_16k.len() * 2); 
+                                        for s in &pcm_16k { b.extend_from_slice(&s.to_le_bytes()); }
+                                        let _ = tx.try_send(Ok(AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
+                                    }
+                                }
+
+                                // 2. S3 Kayıt İçin Doğrudan Native 8k Yazımı (Şu an S3'ün bozuk olmasını çözen kısım)
+                                if let Some(rec) = &mut *recording_session.lock().await { 
+                                    rec.audio_buffer.extend_from_slice(&pcm_8k); 
+                                }
                             }
                         }
                     }
