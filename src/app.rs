@@ -112,11 +112,8 @@ impl App {
         
         let app_state = AppState::new(port_manager, s3_client, rabbit_channel);
         
-        let worker_state = app_state.clone();
-        tokio::spawn(async move {
-            let worker = crate::persistence::worker::UploadWorker::new(worker_state);
-            worker.run().await;
-        });
+        // [DÜZELTME]: Disk tabanlı Worker (UploadWorker) iptal edildiği için bu blok tamamen kaldırıldı.
+        // Artık sistem %100 Stateless çalışıyor.
 
         Ok(app_state)
     }
@@ -134,7 +131,6 @@ impl App {
             let s3_client_config = S3ConfigBuilder::from(&sdk_config).force_path_style(true).build();
             let client = S3Client::from_conf(s3_client_config);
             
-            // [YENİ: BUCKET AUTO-CREATION] Bucket var mı kontrol et, yoksa oluştur!
             match client.head_bucket().bucket(&s3_config.bucket_name).send().await {
                 Ok(_) => {
                     info!(event="S3_BUCKET_READY", bucket=%s3_config.bucket_name, "S3 Bucket mevcut ve hazır.");

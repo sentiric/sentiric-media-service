@@ -17,10 +17,10 @@ pub struct AudioFrame {
 pub struct RecordingSession {
     pub output_uri: String,
     pub spec: WavSpec,
-    // [DEĞİŞİKLİK]: İsim genelleştirildi. Artık hem 8k hem 16k tutabilir.
     pub audio_buffer: Vec<i16>,
     pub call_id: String,
     pub trace_id: String,
+    pub max_reached_warned: bool, // YENİ: Spam log atılmasını önlemek için state
 }
 
 #[derive(Debug)]

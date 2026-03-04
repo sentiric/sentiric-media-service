@@ -196,9 +196,10 @@ impl MediaService for MyMediaService {
         session.send_command(RtpCommand::StartPermanentRecording(RecordingSession {
             output_uri: req.output_uri,
             spec: WavSpec { channels: 1, sample_rate: 8000, bits_per_sample: 16, sample_format: SampleFormat::Int },
-            audio_buffer: Vec::new(), //[DÜZELTME BURADA YAPILDI]
+            audio_buffer: Vec::new(), 
             call_id: req.call_id,
             trace_id: req.trace_id,
+            max_reached_warned: false, // DÜZELTME
         })).await.map_err(|_| Status::internal("Command fail"))?;
         Ok(Response::new(StartRecordingResponse { success: true }))
     }

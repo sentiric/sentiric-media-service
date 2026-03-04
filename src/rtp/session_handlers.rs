@@ -1,6 +1,5 @@
 // sentiric-media-service/src/rtp/session_handlers.rs
 use super::command::{RtpCommand, AudioFrame, RecordingSession};
-use super::session_utils::load_and_resample_samples_from_uri; 
 use super::session::RtpSessionConfig;
 use crate::rabbitmq;
 use std::sync::Arc;
@@ -101,12 +100,11 @@ pub async fn start_playback(
 
     let span = tracing::Span::current();
 
-    match load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
+    match crate::rtp::session_utils::load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
         Ok(samples) => {
             tokio::spawn(async move {
                 let profile = AudioProfile::default();
                 let target_codec_type = profile.preferred_audio_codec();
-                
                 let target_codec = codecs::AudioCodec::from_rtp_payload_type(target_codec_type as u8).unwrap();
                 
                 let res = match codecs::encode_lpcm16_to_rtp(&samples, target_codec) {
@@ -169,7 +167,7 @@ pub async fn start_playback(
         },
         Err(e) => {
             error!(event = "MEDIA_PLAYBACK_ERROR", error = %e, "Medya oynatma hatası");
-            if let Some(tx) = responder { let _ = tx.send(Err(anyhow::anyhow!(e.to_string()))); }
+            if let Some(tx) = responder { let _ = tx.send(Err(anyhow::anyhow!("Playback error: {}", e))); }
             let _ = finished_tx.try_send(());
         }
     }

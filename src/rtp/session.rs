@@ -1,10 +1,8 @@
 // src/rtp/session.rs
-use crate::metrics::ACTIVE_SESSIONS;
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
 use crate::rtp::session_handlers; 
 use crate::rtp::processing::AudioProcessor;
-use crate::rtp::session_utils::finalize_and_save_recording;
 use crate::state::AppState;
 use crate::config::AppConfig;
 use std::net::SocketAddr;
@@ -12,8 +10,10 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
 use tracing::{info, error, instrument, warn, debug}; 
+
+use crate::metrics::{ACTIVE_SESSIONS, RECORDING_BUFFER_BYTES};
 use metrics::gauge;
-// [YENİ EKLENDİ]: Stateful Decoder yaratmak için çekirdekten CodecFactory ve Decoder alındı.
+
 use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, JitterBuffer, AudioProfile, CodecFactory, Decoder};
 
 #[derive(Clone)]
@@ -68,7 +68,6 @@ impl RtpSession {
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
     async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>) {
-        // [YENİ EKLENDİ]: Ses kazanç çarpanı Config'den okundu.
         let gain_multiplier = self.app_state.port_manager.config.audio_recording_gain;
         
         info!(
@@ -128,8 +127,6 @@ impl RtpSession {
             port: self.port,
         };
 
-        // [YENİ EKLENDİ]: Stateful (Durumlu) Decoder Referansı. 
-        // Nedeni: Oturum boyunca yaşayacak ve geçmiş frekansları aklında tutacak. G.729 bozulmalarını engeller.
         let mut active_decoder: Option<Box<dyn Decoder>> = None;
         let mut active_payload_type: Option<u8> = None;
 
@@ -146,11 +143,9 @@ impl RtpSession {
                 break;
             }
 
-            // --- RTP PROCESSING LOOP ---
             for _ in 0..10 {
                 if let Some(packet) = jitter_buffer.pop() {
                     
-                    // Zero-Copy Echo mantığı (Dokunulmadı)
                     if echo_mode {
                         if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                             let ts_increment = match packet.header.payload_type {
@@ -168,10 +163,8 @@ impl RtpSession {
                         }
                     }
 
-                    // --- [YENİ]: STATEFUL DECODING & DIGITAL GAIN (Kazanç) UYGULAMASI ---
                     if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                         
-                        // Kodek değişimi veya ilk başlatma durumunda Yeni Kalıcı Decoder Üretilir.
                         if active_payload_type != Some(packet.header.payload_type) {
                             active_decoder = Some(CodecFactory::create_decoder(codec.to_core_type()));
                             active_payload_type = Some(packet.header.payload_type);
@@ -184,25 +177,19 @@ impl RtpSession {
                             );
                         }
 
-                        // Aynı decoder objesini kullanarak paketi çöz (Geçmiş ses verisi hafızada tutulur)
                         if let Some(ref mut decoder) = active_decoder {
-                            // Tuşlama seslerini (DTMF) decode etmeye çalışmayız.
                             if codec != AudioCodec::TelephoneEvent {
                                 let raw_pcm_8k = decoder.decode(&packet.payload);
 
-                                // 🎛️ [YENİ]: DİNAMİK SES KAZANCI (GAIN) VE CLIPPING KORUMASI
-                                // Nedeni: Sesi f32 çarpanla yükseltir, ardından patlamaması (robotik cızırtı yapmaması)
-                                // için i16 sınırlarında clamp'ler (kırpar).
                                 let pcm_8k: Vec<i16> = if (gain_multiplier - 1.0).abs() > f32::EPSILON {
                                     raw_pcm_8k.into_iter().map(|sample| {
                                         let boosted = (sample as f32 * gain_multiplier) as i32;
                                         boosted.clamp(i16::MIN as i32, i16::MAX as i32) as i16
                                     }).collect()
                                 } else {
-                                    raw_pcm_8k // Gain 1.0 ise performansı korumak için işlem yapma
+                                    raw_pcm_8k 
                                 };
 
-                                // 1. AI Canlı Yayın Akışı İçin (Geleceğe yatırım)
                                 if live_stream_sender.lock().await.is_some() {
                                     if let Some(tx) = &*live_stream_sender.lock().await { 
                                         let pcm_16k = sentiric_rtp_core::simple_resample(&pcm_8k, 8000, 16000);
@@ -212,19 +199,30 @@ impl RtpSession {
                                     }
                                 }
 
-                                // 2. S3 Kayıt İçin Doğrudan Native 8k Yazımı
                                 if let Some(rec) = &mut *recording_session.lock().await { 
-                                    rec.audio_buffer.extend_from_slice(&pcm_8k); 
+                                    const MAX_SAMPLES: usize = 57_600_000; 
+                                    
+                                    if rec.audio_buffer.len() + pcm_8k.len() <= MAX_SAMPLES {
+                                        rec.audio_buffer.extend_from_slice(&pcm_8k); 
+                                        gauge!(RECORDING_BUFFER_BYTES).increment((pcm_8k.len() * 2) as f64);
+                                    } else if !rec.max_reached_warned {
+                                        warn!(
+                                            event = "MAX_CALL_DURATION_REACHED",
+                                            sip.call_id = %self.call_id,
+                                            max_samples = MAX_SAMPLES,
+                                            "⚠️ OOM Koruması: Çağrı maksimum kayıt süresini aştı. Kayıt donduruldu."
+                                        );
+                                        rec.max_reached_warned = true;
+                                    }
                                 }
                             }
                         }
                     }
                 } else {
-                    break; // Jitter buffer boş
+                    break; 
                 }
             }
 
-            // --- EVENT HANDLING ---
             tokio::select! {
                 _ = stats_ticker.tick() => {
                     let loss_rate = if total_packets_rx > 0 { (packet_loss_count as f64 / (total_packets_rx + packet_loss_count) as f64) * 100.0 } else { 0.0 };
@@ -307,20 +305,18 @@ impl RtpSession {
                      }
                 }
             }
-        } // Loop sonu
+        } 
         
         if let Some(rec) = recording_session.lock().await.take() { 
-            // [DÜZELTME]: Import edilip Warning vermeyen doğru çağrı metodu.
-            match finalize_and_save_recording(rec, self.app_state.clone()).await {
-                Ok(_) => info!(event="RECORDING_SAVED", sip.call_id=%self.call_id, "💾 Kayıt başarıyla diske işlendi."),
-                Err(e) => error!(event="RECORDING_FAIL", sip.call_id=%self.call_id, error=%e, "❌ Kayıt diske yazılamadı!"),
+            match crate::rtp::session_utils::finalize_and_save_recording(rec, self.app_state.clone()).await {
+                Ok(_) => info!(event="RECORDING_SAVED", sip.call_id=%self.call_id, "💾 Kayıt başarıyla S3'e yüklendi."),
+                Err(e) => error!(event="RECORDING_FAIL", sip.call_id=%self.call_id, error=%e, "❌ Kayıt S3'e yazılamadı!"),
             }
         }
         
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
         
-        // [DÜZELTME]: metrics crate'i üzerinden doğrudan macro çağrısı. Derleyici hatasını önler.
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
         
         info!(event = "RTP_SESSION_END", sip.call_id = %self.call_id, "🛑 RTP Oturumu Sonlandırıldı.");

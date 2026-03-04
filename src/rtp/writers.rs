@@ -1,88 +1,46 @@
 // sentiric-media-service/src/rtp/writers.rs
-use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait; 
-use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
+use aws_sdk_s3::primitives::ByteStream;
 use std::sync::Arc;
-use tracing::{info, error, instrument};
-use url::Url;
+use tokio::time::{sleep, Duration};
+use tracing::{info, error, warn, instrument};
+use anyhow::Result;
+use crate::metrics::S3_UPLOAD_FAILURES;
+use metrics::counter;
 
-use crate::config::AppConfig;
-use crate::state::AppState;
-
-#[async_trait] 
-pub trait AsyncRecordingWriter: Send + Sync {
-    async fn write(&self, data: Vec<u8>) -> Result<()>;
-}
-
-struct S3Writer {
+#[instrument(skip(client, data), fields(s3.bucket = %bucket, s3.key = %key, file.size_bytes = data.len()))]
+pub async fn upload_to_s3_with_retry(
     client: Arc<S3Client>,
-    bucket: String,
-    key: String,
-}
+    bucket: &str,
+    key: &str,
+    data: Vec<u8>,
+) -> Result<()> {
+    const MAX_RETRIES: u32 = 3;
+    let mut attempt = 0;
 
-#[async_trait] 
-impl AsyncRecordingWriter for S3Writer {
-    #[instrument(skip(self, data), fields(s3.bucket = %self.bucket, s3.key = %self.key, file.size_bytes = data.len()))]
-    async fn write(&self, data: Vec<u8>) -> Result<()> {
-        let body = ByteStream::from(data);
+    info!(event = "S3_UPLOAD_START", "☁️ Kayıt dosyası doğrudan bellekten S3'e yükleniyor...");
+
+    loop {
+        attempt += 1;
+        let body = ByteStream::from(data.clone());
         
-        info!(
-            event = "S3_UPLOAD_START",
-            "☁️ Kayıt dosyası S3'e yükleniyor..."
-        );
-
-        match self.client
-            .put_object()
-            .bucket(&self.bucket)
-            .key(&self.key)
-            .body(body)
-            .send()
-            .await 
-        {
+        match client.put_object().bucket(bucket).key(key).body(body).send().await {
             Ok(_) => {
-                info!(event = "S3_UPLOAD_SUCCESS", "✅ Dosya S3'e başarıyla yüklendi.");
-                Ok(())
-            },
+                info!(event = "S3_UPLOAD_SUCCESS", attempt = attempt, "✅ Dosya S3'e başarıyla yüklendi.");
+                return Ok(());
+            }
             Err(e) => {
-                // Detaylı AWS SDK hatasını yakala
-                error!(
-                    event = "S3_UPLOAD_ERROR", 
-                    error_detail = ?e,
-                    "❌ S3 Yükleme işlemi AWS tarafından reddedildi veya zaman aşımına uğradı."
-                );
-                Err(anyhow!("S3 PutObject Error: {:#?}", e))
+                counter!(S3_UPLOAD_FAILURES).increment(1);
+                
+                if attempt >= MAX_RETRIES {
+                    error!(event = "S3_UPLOAD_ERROR", error = ?e, "❌ S3 Upload {} deneme sonrası başarısız oldu.", MAX_RETRIES);
+                    return Err(anyhow::anyhow!("S3 Upload Bounded Retry Failed: {:?}", e));
+                }
+                
+                let backoff = Duration::from_millis(2u64.pow(attempt) * 500);
+                warn!(event = "S3_UPLOAD_RETRY", attempt = attempt, backoff_ms = backoff.as_millis(), "⚠️ S3 Upload başarısız, tekrar deneniyor...");
+                sleep(backoff).await;
             }
         }
-    }
-}
-
-pub async fn from_uri(
-    uri_str: &str,
-    app_state: &AppState,
-    config: &AppConfig,
-) -> Result<Box<dyn AsyncRecordingWriter>> {
-    let uri = Url::parse(uri_str).context("Geçersiz kayıt URI formatı")?;
-
-    match uri.scheme() {
-        "s3" => {
-            let s3_config = config.s3_config.as_ref().ok_or_else(|| {
-                anyhow!("S3 URI'si belirtildi ancak S3 konfigürasyonu (BUCKET_ENDPOINT_URL vb.) ortamda bulunamadı.")
-            })?;
-            
-            let client = app_state.s3_client.clone().ok_or_else(|| {
-                anyhow!("S3 istemcisi başlatılamamış. MinIO erişilebilir mi?")
-            })?;
-
-            let bucket = uri.host_str().unwrap_or(&s3_config.bucket_name).to_string();
-            let key = uri.path().trim_start_matches('/').to_string();
-
-            if key.is_empty() {
-                return Err(anyhow!("S3 URI'sinde dosya yolu (key) belirtilmelidir."));
-            }
-
-            Ok(Box::new(S3Writer { client, bucket, key }))
-        }
-        scheme => Err(anyhow!("Desteklenmeyen kayıt URI şeması: {}", scheme)),
     }
 }

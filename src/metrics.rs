@@ -1,4 +1,4 @@
-// File: src/metrics.rs
+// src/metrics.rs
 
 use hyper::{service::{make_service_fn, service_fn}, Body, Request, Response, Server as HyperServer, StatusCode};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -9,15 +9,16 @@ use tracing::{error, info};
 pub const GRPC_REQUESTS_TOTAL: &str = "sentiric_media_grpc_requests_total";
 pub const ACTIVE_SESSIONS: &str = "sentiric_media_active_sessions";
 
-// YENİ: HTTP isteklerini yönlendirecek fonksiyon
+// YENİ SRE METRİKLERİ
+pub const RECORDING_BUFFER_BYTES: &str = "sentiric_media_recording_buffer_bytes";
+pub const S3_UPLOAD_FAILURES: &str = "sentiric_media_s3_upload_failures_total";
+
 async fn route_handler(req: Request<Body>, recorder_handle: PrometheusHandle) -> Result<Response<Body>, Infallible> {
     match (req.method(), req.uri().path()) {
-        // Mevcut metrik yolu
         (&hyper::Method::GET, "/metrics") => {
             let metrics = recorder_handle.render();
             Ok(Response::new(Body::from(metrics)))
         },
-        // YENİ sağlık kontrol yolu
         (&hyper::Method::GET, "/healthz") => {
             let response = Response::builder()
                 .status(StatusCode::OK)
@@ -26,7 +27,6 @@ async fn route_handler(req: Request<Body>, recorder_handle: PrometheusHandle) ->
                 .unwrap_or_default();
             Ok(response)
         },
-        // Diğer tüm yollar için 404 Not Found
         _ => {
             let mut not_found = Response::default();
             *not_found.status_mut() = StatusCode::NOT_FOUND;
