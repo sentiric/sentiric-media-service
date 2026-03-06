@@ -12,9 +12,6 @@ use sentiric_contracts::sentiric::event::v1::GenericEvent;
 use prost::Message;
 use std::time::SystemTime;
 
-use sentiric_rtp_core::{Pacer, RtpHeader, RtpPacket, AudioProfile};
-use crate::rtp::codecs;
-
 #[derive(Debug)]
 pub struct PlaybackJob {
     pub audio_uri: String,
@@ -26,16 +23,13 @@ pub struct PlaybackJob {
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     command: RtpCommand,
-    _rtp_port: u16,
     live_stream_sender: &Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>>,
     recording_session: &Arc<Mutex<Option<RecordingSession>>>,
-    outbound_stream_rx: &mut Option<mpsc::Receiver<Vec<u8>>>,
-    is_streaming: &mut bool,
     playback_queue: &mut std::collections::VecDeque<PlaybackJob>,
     is_playing: &mut bool,
     echo_mode: &mut bool,
     config: &RtpSessionConfig,
-    socket: &Arc<tokio::net::UdpSocket>,
+    egress_tx: &mpsc::Sender<Vec<i16>>,
     finished_tx: &mpsc::Sender<()>,
     known_target: &mut Option<SocketAddr>,
     endpoint: &sentiric_rtp_core::RtpEndpoint,
@@ -50,7 +44,7 @@ pub async fn handle_command(
             
             if !*is_playing {
                 *is_playing = true;
-                start_playback(job, config, socket.clone(), finished_tx.clone(), call_id).await;
+                start_playback(job, config, egress_tx.clone(), finished_tx.clone(), call_id).await;
             } else { 
                 playback_queue.push_back(job); 
             }
@@ -63,8 +57,6 @@ pub async fn handle_command(
             info!(event = "ECHO_MODE_DISABLED", sip.call_id = %call_id, "🔇 Native Echo Reflex KAPATILDI.");
             *echo_mode = false;
         },
-        RtpCommand::StartOutboundStream { audio_rx } => { *outbound_stream_rx = Some(audio_rx); *is_streaming = true; },
-        RtpCommand::StopOutboundStream => { *is_streaming = false; *outbound_stream_rx = None; },
         RtpCommand::StartLiveAudioStream { stream_sender, .. } => { let mut guard = live_stream_sender.lock().await; *guard = Some(stream_sender); },
         RtpCommand::StopLiveAudioStream => { let mut guard = live_stream_sender.lock().await; *guard = None; },
         RtpCommand::StartPermanentRecording(session) => { let mut guard = recording_session.lock().await; *guard = Some(session); },
@@ -81,7 +73,7 @@ pub async fn handle_command(
         },
         RtpCommand::Shutdown => return true,
         RtpCommand::SetTargetAddress { target } => { *known_target = Some(target); },
-        _ => {}
+        _ => {} // Start/StopOutboundStream kaldırıldığı için ignore
     }
     false
 }
@@ -89,7 +81,7 @@ pub async fn handle_command(
 pub async fn start_playback(
     job: PlaybackJob, 
     config: &RtpSessionConfig, 
-    socket: Arc<tokio::net::UdpSocket>, 
+    egress_tx: mpsc::Sender<Vec<i16>>, 
     finished_tx: mpsc::Sender<()>,
     call_id: &str,
 ) {
@@ -103,43 +95,22 @@ pub async fn start_playback(
     match crate::rtp::session_utils::load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
         Ok(samples) => {
             tokio::spawn(async move {
-                let profile = AudioProfile::default();
-                let target_codec_type = profile.preferred_audio_codec();
-                let target_codec = codecs::AudioCodec::from_rtp_payload_type(target_codec_type as u8).unwrap();
+                info!(event = "MEDIA_PLAYBACK_START", uri = %uri, "🚀 Medya PCM chunk'ları Egress kanalına basılıyor.");
                 
-                let res = match codecs::encode_lpcm16_to_rtp(&samples, target_codec) {
-                    Ok(encoded_payload) => {
-                        info!(event = "MEDIA_PLAYBACK_START", target = %job.target_addr, "🚀 Hassas akış başlatılıyor.");
-                        
-                        let ssrc: u32 = rand::random();
-                        let mut sequence_number: u16 = rand::random();
-                        let mut timestamp: u32 = rand::random();
-                        let rtp_payload_type = target_codec.to_payload_type();
-                        
-                        let ptime = profile.ptime;
-                        let packet_chunk_size = target_codec_type.payload_size_bytes(ptime);
-                        let samples_per_frame = target_codec_type.samples_per_frame(ptime);
-
-                        let mut pacer = Pacer::new(ptime as u64);
-
-                        for chunk in encoded_payload.chunks(packet_chunk_size) {
-                            if job.cancellation_token.is_cancelled() { break; }
-                            pacer.wait(); 
-                            
-                            let header = RtpHeader::new(rtp_payload_type, sequence_number, timestamp, ssrc);
-                            let packet = RtpPacket { header, payload: chunk.to_vec() };
-                            
-                            if let Err(e) = socket.send_to(&packet.to_bytes(), job.target_addr).await {
-                                debug!(event = "RTP_SEND_ERROR", error = %e, "RTP gönderme hatası");
-                            }
-                            
-                            sequence_number = sequence_number.wrapping_add(1);
-                            timestamp = timestamp.wrapping_add(samples_per_frame as u32);
-                        }
-                        Ok(())
-                    },
-                    Err(e) => Err(anyhow::Error::from(e)),
-                };
+                let mut res = Ok(());
+                
+                // Chunk size 160 (20ms) - Egress queue will handle timing
+                for chunk in samples.chunks(160) {
+                    if job.cancellation_token.is_cancelled() { break; }
+                    
+                    if let Err(e) = egress_tx.send(chunk.to_vec()).await {
+                        debug!(event = "EGRESS_SEND_ERROR", error = %e, "Egress channel closed");
+                        res = Err(anyhow::anyhow!("Egress channel closed"));
+                        break;
+                    }
+                    // Ticker'ı boğmamak için mikrosaniye düzeyinde yield
+                    tokio::task::yield_now().await; 
+                }
                 
                 if res.is_ok() {
                     if let Some(channel) = &app_state.rabbitmq_publisher {

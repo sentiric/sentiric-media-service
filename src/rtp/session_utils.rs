@@ -17,10 +17,13 @@ use sentiric_contracts::sentiric::event::v1::CallRecordingAvailableEvent;
 
 #[instrument(skip_all, fields(call_id = %session.call_id))]
 pub async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
-    let sample_count = session.audio_buffer.len();
-    gauge!(RECORDING_BUFFER_BYTES).decrement((sample_count * 2) as f64);
+    let rx_len = session.rx_buffer.len();
+    let tx_len = session.tx_buffer.len();
+    let max_len = rx_len.max(tx_len);
 
-    if sample_count == 0 {
+    gauge!(RECORDING_BUFFER_BYTES).decrement(((rx_len + tx_len) * 2) as f64);
+
+    if max_len == 0 {
         info!("Boş kayıt, işlem atlanıyor.");
         return Ok(());
     }
@@ -28,20 +31,29 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
     let now = chrono::Utc::now();
     let s3_key = format!("recordings/{}/{:02}/{:02}/{}.wav", now.year(), now.month(), now.day(), session.call_id);
 
+    // [MİMARİ GÜNCELLEME]: Artık Stereo (2 Kanal)
     let spec = WavSpec {
-        channels: 1,
+        channels: 2, 
         sample_rate: 8000,
         bits_per_sample: 16,
         sample_format: SampleFormat::Int,
     };
     
-    let samples = session.audio_buffer;
+    // Stereo Interleaving: L, R, L, R...
+    let rx_buffer = session.rx_buffer;
+    let tx_buffer = session.tx_buffer;
+
     let wav_data = spawn_blocking(move || -> Result<Vec<u8>> {
-        let mut buffer = Cursor::new(Vec::with_capacity(sample_count * 2 + 44));
+        let mut buffer = Cursor::new(Vec::with_capacity(max_len * 4 + 44));
         let mut writer = WavWriter::new(&mut buffer, spec)?;
-        for sample in samples {
-            writer.write_sample(sample)?;
+        
+        for i in 0..max_len {
+            let left = if i < rx_buffer.len() { rx_buffer[i] } else { 0 };
+            let right = if i < tx_buffer.len() { tx_buffer[i] } else { 0 };
+            writer.write_sample(left)?;
+            writer.write_sample(right)?;
         }
+        
         writer.finalize()?;
         Ok(buffer.into_inner())
     }).await??;
@@ -63,7 +75,7 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         };
 
         match rabbitmq::publish_with_confirm(channel, "call.recording.available", &event.encode_to_vec()).await {
-            Ok(_) => info!("📩 Kayıt tamamlandı olayı (Confirmed) RabbitMQ'ya iletildi."),
+            Ok(_) => info!("📩 Stereo kayıt tamamlandı olayı (Confirmed) RabbitMQ'ya iletildi."),
             Err(e) => {
                 error!(error = %e, "🔥 Kayıt S3'e yüklendi ama RabbitMQ'ya olay atılamadı!");
                 return Err(e.into());
@@ -86,11 +98,7 @@ pub async fn load_and_resample_samples_from_uri(
         let mut final_path = PathBuf::from(&config.assets_base_path);
         final_path.push(path_part.trim_start_matches('/'));
         let samples_8k = load_or_get_from_cache(&app_state.audio_cache, &final_path).await?;
-        
-        let samples_16k = tokio::task::spawn_blocking(move || {
-            sentiric_rtp_core::simple_resample(&samples_8k, 8000, 16000)
-        }).await?;
-        return Ok(std::sync::Arc::new(samples_16k));
+        return Ok(samples_8k);
     }
     Err(anyhow!("Desteklenmeyen URI şeması: {}", uri))
 }

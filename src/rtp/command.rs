@@ -1,4 +1,4 @@
-// src/rtp/command.rs
+// sentiric-media-service/src/rtp/command.rs
 use anyhow::Result;
 use bytes::Bytes;
 use hound::WavSpec;
@@ -13,14 +13,16 @@ pub struct AudioFrame {
     pub media_type: String,
 }
 
+//[MİMARİ GÜNCELLEME]: Stereo Kayıt Desteği
 #[derive(Debug)]
 pub struct RecordingSession {
     pub output_uri: String,
     pub spec: WavSpec,
-    pub audio_buffer: Vec<i16>,
+    pub rx_buffer: Vec<i16>, // Müşteri sesi (Channel 0)
+    pub tx_buffer: Vec<i16>, // AI sesi (Channel 1)
     pub call_id: String,
     pub trace_id: String,
-    pub max_reached_warned: bool, // YENİ: Spam log atılmasını önlemek için state
+    pub max_reached_warned: bool,
 }
 
 #[derive(Debug)]
@@ -37,14 +39,9 @@ pub enum RtpCommand {
         target_sample_rate: Option<u32>,
     },
     StopLiveAudioStream,
-    StartOutboundStream {
-        audio_rx: mpsc::Receiver<Vec<u8>>,
-    },
-    StopOutboundStream,
     EnableEchoTest,   
     DisableEchoTest,
     SetTargetAddress { target: SocketAddr },
-    HolePunching { target_addr: SocketAddr },
     StartPermanentRecording(RecordingSession),
     StopPermanentRecording { responder: oneshot::Sender<Result<String, String>> },
     Shutdown,

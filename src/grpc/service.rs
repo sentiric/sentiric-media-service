@@ -1,4 +1,4 @@
-// src/grpc/service.rs
+// sentiric-media-service/src/grpc/service.rs
 use crate::grpc::error::ServiceError;
 use crate::metrics::{GRPC_REQUESTS_TOTAL, ACTIVE_SESSIONS};
 use crate::rtp::command::{RtpCommand, RecordingSession};
@@ -64,14 +64,28 @@ impl MediaService for MyMediaService {
         let session = self.app_state.port_manager.get_session_by_call_id(&call_id).await
             .ok_or_else(|| Status::not_found("Session not found"))?;
 
-        let (audio_tx, audio_rx) = mpsc::channel(8192);
-        session.send_command(RtpCommand::StartOutboundStream { audio_rx }).await.map_err(|_| Status::internal("Command fail"))?;
+        let egress_tx = session.egress_tx.clone();
 
         let (response_tx, response_rx) = mpsc::channel(1);
         tokio::spawn(async move {
-            if !first_msg.audio_chunk.is_empty() { let _ = audio_tx.send(first_msg.audio_chunk).await; }
+            // İlk chunk'ı işle
+            if !first_msg.audio_chunk.is_empty() { 
+                let samples_16k: Vec<i16> = first_msg.audio_chunk.chunks_exact(2)
+                    .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                    .collect();
+                let samples_8k = sentiric_rtp_core::simple_resample(&samples_16k, 16000, 8000);
+                let _ = egress_tx.send(samples_8k).await;
+            }
+            
+            // Geri kalan chunk'ları işle
             while let Ok(Some(msg)) = in_stream.message().await {
-                if !msg.audio_chunk.is_empty() && audio_tx.send(msg.audio_chunk).await.is_err() { break; }
+                if !msg.audio_chunk.is_empty() {
+                    let samples_16k: Vec<i16> = msg.audio_chunk.chunks_exact(2)
+                        .map(|c| i16::from_le_bytes([c[0], c[1]]))
+                        .collect();
+                    let samples_8k = sentiric_rtp_core::simple_resample(&samples_16k, 16000, 8000);
+                    if egress_tx.send(samples_8k).await.is_err() { break; }
+                }
             }
             let _ = response_tx.send(Ok(StreamAudioToCallResponse { success: true, error_message: "".to_string() })).await;
         });
@@ -79,41 +93,25 @@ impl MediaService for MyMediaService {
         Ok(Response::new(Box::pin(ReceiverStream::new(response_rx))))
     }
     
+    // ... allocate_port ve release_port aynıdır ...
     #[instrument(skip(self, request), fields(call_id = %request.get_ref().call_id, trace_id))]
     async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
         let mut trace_id = Self::extract_trace_id(&request);
-        
-        if trace_id == "unknown" {
-            let new_id = uuid::Uuid::new_v4().to_string();
-            warn!(
-                event = "MISSING_TRACE_ID", 
-                call_id = %request.get_ref().call_id,
-                assigned_id = %new_id,
-                "Trace ID header eksik. Otomatik ID atandı."
-            );
-            trace_id = format!("orphaned-{}", new_id);
-        }
-
+        if trace_id == "unknown" { trace_id = format!("orphaned-{}", uuid::Uuid::new_v4()); }
         Span::current().record("trace_id", &trace_id);
         
         let call_id = request.get_ref().call_id.clone();
-
         counter!(GRPC_REQUESTS_TOTAL, "method" => "allocate_port").increment(1);
 
         let port = self.app_state.port_manager.get_available_port().await.ok_or(ServiceError::PortPoolExhausted)?;
-
         let bind_addr = format!("{}:{}", self.config.rtp_listen_ip, port);
 
         match UdpSocket::bind(&bind_addr).await {
             Ok(socket) => {
                 gauge!(ACTIVE_SESSIONS).increment(1.0);
-                
                 let session = RtpSession::new(trace_id.clone(), call_id.clone(), port, Arc::new(socket), self.app_state.clone());
-                
                 self.app_state.port_manager.add_session(port, session).await;
-                
                 info!(event = "MEDIA_PORT_ALLOCATED", rtp.port = port, bind.addr = %bind_addr, "RTP Port Allocated");
-                
                 Ok(Response::new(AllocatePortResponse { rtp_port: port as u32 }))
             }
             Err(e) => {
@@ -128,7 +126,6 @@ impl MediaService for MyMediaService {
     async fn release_port(&self, request: Request<ReleasePortRequest>) -> Result<Response<ReleasePortResponse>, Status> {
         let trace_id = Self::extract_trace_id(&request);
         Span::current().record("trace_id", &trace_id);
-        
         let port = request.into_inner().rtp_port as u16;
         if let Some(session) = self.app_state.port_manager.get_session(port).await {
             let _ = session.send_command(RtpCommand::Shutdown).await;
@@ -141,7 +138,6 @@ impl MediaService for MyMediaService {
     async fn play_audio(&self, request: Request<PlayAudioRequest>) -> Result<Response<PlayAudioResponse>, Status> {
         let trace_id = Self::extract_trace_id(&request);
         Span::current().record("trace_id", &trace_id);
-        
         let req = request.into_inner();
         let rtp_port = req.server_rtp_port as u16;
         let session = self.app_state.port_manager.get_session(rtp_port).await.ok_or(ServiceError::SessionNotFound { port: rtp_port })?;
@@ -153,7 +149,6 @@ impl MediaService for MyMediaService {
             let cmd = req.audio_uri.strip_prefix("control://").unwrap();
             match cmd {
                 "enable_echo" => {
-                    info!(event = "NATIVE_ECHO_ENABLED", target = %target_addr, "🔊 Native Echo Reflex ENABLED");
                     let _ = session.send_command(RtpCommand::EnableEchoTest).await;
                     return Ok(Response::new(PlayAudioResponse { success: true, message: "Echo On".into() }));
                 }
@@ -195,11 +190,12 @@ impl MediaService for MyMediaService {
         let session = self.app_state.port_manager.get_session(req.server_rtp_port as u16).await.ok_or(Status::not_found("No session"))?;
         session.send_command(RtpCommand::StartPermanentRecording(RecordingSession {
             output_uri: req.output_uri,
-            spec: WavSpec { channels: 1, sample_rate: 8000, bits_per_sample: 16, sample_format: SampleFormat::Int },
-            audio_buffer: Vec::new(), 
+            spec: WavSpec { channels: 2, sample_rate: 8000, bits_per_sample: 16, sample_format: SampleFormat::Int },
+            rx_buffer: Vec::new(), 
+            tx_buffer: Vec::new(),
             call_id: req.call_id,
             trace_id: req.trace_id,
-            max_reached_warned: false, // DÜZELTME
+            max_reached_warned: false, 
         })).await.map_err(|_| Status::internal("Command fail"))?;
         Ok(Response::new(StartRecordingResponse { success: true }))
     }
