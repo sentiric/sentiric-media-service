@@ -246,24 +246,32 @@ impl RtpSession {
                         }
                     }
 
-                    // --- C. Process TX ---
+                    // --- C. Process TX (COMFORT NOISE FIX) ---
+                    // Eğer kuyrukta veri varsa al, yoksa SESSİZLİK (Silence) üret.
+                    // Böylece RTP akışı asla kesilmez, Jitter Buffer mutlu kalır.
                     if egress_queue.len() >= 160 {
                         let chunk: Vec<i16> = egress_queue.drain(0..160).collect();
                         tx_frame.copy_from_slice(&chunk);
+                    } else {
+                        // Kuyruk boşsa sessizlik (0) bas.
+                        // Önemli: Sadece hedef kilitlendiyse ve oturum aktifse gönder.
+                        tx_frame.fill(0);
+                    }
                         
-                        if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
-                            if let Some(enc) = &mut active_encoder {
-                                let payload = enc.encode(&tx_frame);
-                                let header = RtpHeader::new(enc.get_type() as u8, tx_seq, tx_ts, server_ssrc);
-                                let packet = RtpPacket { header, payload };
-                                let _ = socket.send_to(&packet.to_bytes(), target).await;
-                                
-                                tx_seq = tx_seq.wrapping_add(1);
-                                tx_ts = tx_ts.wrapping_add(160);
-                                echo_tx_count += 1;
-                            }
+                    if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
+                        if let Some(enc) = &mut active_encoder {
+                            // Sessizliği encode et (G.711 için ucuzdur)
+                            let payload = enc.encode(&tx_frame);
+                            let header = RtpHeader::new(enc.get_type() as u8, tx_seq, tx_ts, server_ssrc);
+                            let packet = RtpPacket { header, payload };
+                            let _ = socket.send_to(&packet.to_bytes(), target).await;
+                            
+                            tx_seq = tx_seq.wrapping_add(1);
+                            tx_ts = tx_ts.wrapping_add(160);
+                            echo_tx_count += 1;
                         }
                     }
+                
 
                     // --- D. Stereo Recording Synchronization ---
                     if let Some(rec) = &mut *recording_session.lock().await {
