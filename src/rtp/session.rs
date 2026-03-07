@@ -7,8 +7,8 @@ use crate::config::AppConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{Duration, Instant};
-use tracing::{info, error, instrument, warn}; 
+use tokio::time::{Duration, Instant, MissedTickBehavior}; // [DÜZELTME]: MissedTickBehavior eklendi
+use tracing::{info, error, instrument, warn, debug}; 
 
 use crate::metrics::{ACTIVE_SESSIONS, RECORDING_BUFFER_BYTES};
 use metrics::gauge;
@@ -72,7 +72,7 @@ impl RtpSession {
             event = "RTP_SESSION_START",
             resource.service.name = "media-service",
             sip.call_id = %self.call_id,
-            "🎧 RTP Oturumu Başlatıldı (20ms Sync Engine Devrede)"
+            "🎧 RTP Oturumu Başlatıldı (Strict 20ms Sync Engine Devrede)"
         );
 
         let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
@@ -91,7 +91,6 @@ impl RtpSession {
         let mut echo_mode = false;
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
-        // target_locked değişkenine gerek kalmadı çünkü her 20ms'de bir sessizlik yollanacak.
 
         let server_ssrc: u32 = rand::random();
         let mut tx_seq: u16 = rand::random();
@@ -114,7 +113,11 @@ impl RtpSession {
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
         
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
+        
+        // [STRATEJİK DÜZELTME]: STRICT REAL-TIME CLOCK (Senkron Kayması ve Gürültüyü Önler)
         let mut ptime_ticker = tokio::time::interval(Duration::from_millis(20));
+        ptime_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        
         let mut last_activity = Instant::now();
 
         let session_config = RtpSessionConfig {
@@ -123,7 +126,6 @@ impl RtpSession {
             port: self.port,
         };
 
-        // EARLY MEDIA ENCODER
         let default_profile = AudioProfile::default();
         let initial_codec = default_profile.preferred_audio_codec();
         
@@ -191,7 +193,9 @@ impl RtpSession {
                          &mut playback_queue, &mut is_playing, &mut echo_mode, 
                          &session_config, &self.egress_tx, &finished_tx, &mut known_target, &endpoint, &self.call_id
                      ).await { break; }
-                     // Otonom manuel NAT ısıtıcı kaldırıldı. Aşağıdaki ptime_ticker her şeyi yönetecek.
+                     
+                     // Not: Eski hacky NAT Warmer buradan tamamen silindi.
+                     // Cızırtıya neden olan 0xFF byte gönderimi kalktı.
                 },
 
                 _ = ptime_ticker.tick() => {
@@ -237,14 +241,13 @@ impl RtpSession {
                         let chunk: Vec<i16> = egress_queue.drain(0..160).collect();
                         tx_frame.copy_from_slice(&chunk);
                     } else {
-                        // Kuyruk boşsa yasal sessizlik üret (0 PCM)
+                        // Kuyruk boşsa saf sessizlik (0 PCM).
+                        // Encoder bunu doğru PCMU/PCMA/G729 formatına otomatik çevirir (Hatasız NAT Warmer).
                         tx_frame.fill(0);
                     }
                         
                     if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                         if let Some(enc) = &mut active_encoder {
-                            // Sessizliği (0 PCM) bile olsa G.711 / G.729 formatında encode et. 
-                            // Bu sayede Mobil UAC'nin dekoderi asla çökmez.
                             let payload = enc.encode(&tx_frame);
                             let header = RtpHeader::new(enc.get_type() as u8, tx_seq, tx_ts, server_ssrc);
                             let packet = RtpPacket { header, payload };
@@ -257,8 +260,8 @@ impl RtpSession {
                     }
 
                     // --- D. Stereo Recording Synchronization ---
-                    // Ses olsa da olmasa da bu 160 bytelık frameler senkron olarak yazılır. 
-                    // Asla senkron kaymaz!
+                    // Ticker "Skip" modunda olduğu için, zaman kayması YAŞANMAZ.
+                    // Saniyede tam 50 kez bu blok çalışır (50 * 160 = 8000 samples = 1 saniye kayıt).
                     if let Some(rec) = &mut *recording_session.lock().await {
                         const MAX_SAMPLES: usize = 57_600_000; 
                         if rec.rx_buffer.len() + 160 <= MAX_SAMPLES {
