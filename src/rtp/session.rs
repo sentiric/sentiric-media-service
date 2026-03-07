@@ -156,13 +156,20 @@ impl RtpSession {
                         jitter_acc += (delta - 20.0).abs();
                         last_arrival = now;
 
+                        // [CRITICAL FIX]: Sequence Number Reordering Overflow Protection
+                        let seq = packet.header.sequence_number;
                         if let Some(prev) = last_seq {
                             let expected = prev.wrapping_add(1);
-                            if packet.header.sequence_number != expected {
-                                packet_loss_count += packet.header.sequence_number.wrapping_sub(expected) as u64;
+                            if seq != expected {
+                                // Eğer gelen sıra numarası beklenen numaradan ilerideyken fark 1000'den küçükse (gerçek kayıp)
+                                // veya geriden geliyorsa (Reordering - geç gelmiş paket) onu kayıp sayma.
+                                let diff = seq.wrapping_sub(expected);
+                                if diff > 0 && diff < 1000 {
+                                    packet_loss_count += diff as u64;
+                                }
                             }
                         }
-                        last_seq = Some(packet.header.sequence_number);
+                        last_seq = Some(seq);
                         
                         // Set Codec Dynamics
                         if active_payload_type != Some(packet.header.payload_type) {
