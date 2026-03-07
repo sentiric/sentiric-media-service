@@ -68,7 +68,6 @@ impl MediaService for MyMediaService {
 
         let (response_tx, response_rx) = mpsc::channel(1);
         tokio::spawn(async move {
-            // İlk chunk'ı işle
             if !first_msg.audio_chunk.is_empty() { 
                 let samples_16k: Vec<i16> = first_msg.audio_chunk.chunks_exact(2)
                     .map(|c| i16::from_le_bytes([c[0], c[1]]))
@@ -77,7 +76,6 @@ impl MediaService for MyMediaService {
                 let _ = egress_tx.send(samples_8k).await;
             }
             
-            // Geri kalan chunk'ları işle
             while let Ok(Some(msg)) = in_stream.message().await {
                 if !msg.audio_chunk.is_empty() {
                     let samples_16k: Vec<i16> = msg.audio_chunk.chunks_exact(2)
@@ -93,7 +91,6 @@ impl MediaService for MyMediaService {
         Ok(Response::new(Box::pin(ReceiverStream::new(response_rx))))
     }
     
-    // ... allocate_port ve release_port aynıdır ...
     #[instrument(skip(self, request), fields(call_id = %request.get_ref().call_id, trace_id))]
     async fn allocate_port(&self, request: Request<AllocatePortRequest>) -> Result<Response<AllocatePortResponse>, Status> {
         let mut trace_id = Self::extract_trace_id(&request);
@@ -155,6 +152,10 @@ impl MediaService for MyMediaService {
                 "disable_echo" => {
                     let _ = session.send_command(RtpCommand::DisableEchoTest).await;
                     return Ok(Response::new(PlayAudioResponse { success: true, message: "Echo Off".into() }));
+                }
+                // [YENİ]: B2BUA hedef ataması yapmak için sahte anons
+                "set_target" => {
+                    return Ok(Response::new(PlayAudioResponse { success: true, message: "Target Locked".into() }));
                 }
                 _ => return Err(Status::invalid_argument("Unknown control command"))
             }

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant};
-use tracing::{info, error, instrument, warn, debug}; 
+use tracing::{info, error, instrument, warn}; 
 
 use crate::metrics::{ACTIVE_SESSIONS, RECORDING_BUFFER_BYTES};
 use metrics::gauge;
@@ -27,23 +27,17 @@ pub struct RtpSession {
     pub trace_id: String,
     pub port: u16,
     command_tx: mpsc::Sender<RtpCommand>,
-    pub egress_tx: mpsc::Sender<Vec<i16>>, // The Single Point of Egress
+    pub egress_tx: mpsc::Sender<Vec<i16>>,
     app_state: AppState,
 }
 
 impl RtpSession {
     pub fn new(trace_id: String, call_id: String, port: u16, socket: Arc<tokio::net::UdpSocket>, app_state: AppState) -> Arc<Self> {
         let (command_tx, command_rx) = mpsc::channel(128);
-        // Egress Channel (TTS veya Playback'ten gelen PCM verisi)
         let (egress_tx, egress_rx) = mpsc::channel(8192);
 
         let session = Arc::new(Self { 
-            call_id, 
-            trace_id, 
-            port, 
-            command_tx,
-            egress_tx, 
-            app_state: app_state.clone() 
+            call_id, trace_id, port, command_tx, egress_tx, app_state: app_state.clone() 
         });
         tokio::spawn(Self::run(session.clone(), socket, command_rx, egress_rx));
         session
@@ -97,7 +91,7 @@ impl RtpSession {
         let mut echo_mode = false;
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
-        let mut target_locked = false;
+        // target_locked değişkenine gerek kalmadı çünkü her 20ms'de bir sessizlik yollanacak.
 
         let server_ssrc: u32 = rand::random();
         let mut tx_seq: u16 = rand::random();
@@ -129,7 +123,7 @@ impl RtpSession {
             port: self.port,
         };
 
-        // [CRITICAL FIX]: EARLY MEDIA ENCODER INITIALIZATION
+        // EARLY MEDIA ENCODER
         let default_profile = AudioProfile::default();
         let initial_codec = default_profile.preferred_audio_codec();
         
@@ -137,12 +131,7 @@ impl RtpSession {
         let mut active_decoder: Option<Box<dyn Decoder>> = Some(CodecFactory::create_decoder(initial_codec));
         let mut active_encoder: Option<Box<dyn Encoder>> = Some(CodecFactory::create_encoder(initial_codec));
 
-        info!(
-            event = "RTP_ENGINE_READY",
-            codec = ?initial_codec,
-            "🚀 Medya Motoru önbellekten yüklendi ve Anons okumaya hazır."
-        );
-
+        info!(event = "RTP_ENGINE_READY", codec = ?initial_codec, "🚀 Medya Motoru önbellekten yüklendi.");
 
         loop {
             let timeout = session_config.app_config.rtp_session_inactivity_timeout;
@@ -152,12 +141,10 @@ impl RtpSession {
             }
 
             tokio::select! {
-                // 1. INBOUND NETWORK PACKETS
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
                     total_packets_rx += 1;
                     if endpoint.latch(addr) { 
-                        target_locked = true;
                         info!(event = "RTP_LATCH_LOCKED", sip.call_id = %self.call_id, peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Medya Hedefi Kilitlendi"); 
                     }
 
@@ -186,18 +173,15 @@ impl RtpSession {
                                 active_payload_type = Some(packet.header.payload_type);
                             }
                         }
-                        
                         jitter_buffer.push(packet);
                     }
                 },
 
-                // 2. INBOUND EGRESS (PCM from internal services)
                 Some(mut pcm_data) = egress_rx.recv() => {
                     last_activity = Instant::now();
                     egress_queue.append(&mut pcm_data);
                 },
 
-                // 3. INTERNAL COMMANDS
                 Some(cmd) = command_rx.recv() => {
                      last_activity = Instant::now();
                      if matches!(cmd, RtpCommand::Shutdown) { break; }
@@ -207,22 +191,9 @@ impl RtpSession {
                          &mut playback_queue, &mut is_playing, &mut echo_mode, 
                          &session_config, &self.egress_tx, &finished_tx, &mut known_target, &endpoint, &self.call_id
                      ).await { break; }
-
-                     // [STRATEJİK DÜZELTME]: Otonom NAT Warmer
-                     // Cep telefonu SIP UAC'de oluşan parazit/gürültüyü önlemek için
-                     // Payload 2 byte değil, tam bir 20ms'lik kare (160 byte) olmalıdır.
-                     if let Some(target) = known_target {
-                         if !target_locked {
-                             let silence = vec![0xFF; 160]; // DÜZELTME: 160 Byte PCMU Silence
-                             let header = RtpHeader::new(0, tx_seq, tx_ts, server_ssrc);
-                             let packet = RtpPacket { header, payload: silence };
-                             let _ = socket.send_to(&packet.to_bytes(), target).await;
-                             debug!(event="AUTONOMOUS_NAT_WARMER", target=%target, "Sentiric NAT Warmer devrede (160 bytes).");
-                         }
-                     }
+                     // Otonom manuel NAT ısıtıcı kaldırıldı. Aşağıdaki ptime_ticker her şeyi yönetecek.
                 },
 
-                // 4. THE 20MS HEARTBEAT ENGINE
                 _ = ptime_ticker.tick() => {
                     let mut rx_frame = vec![0i16; 160];
                     let mut tx_frame = vec![0i16; 160];
@@ -231,7 +202,6 @@ impl RtpSession {
                     // --- A. Process RX ---
                     if let Some(packet) = jitter_buffer.pop() {
                         if let Some(ref mut decoder) = active_decoder {
-                            // DTMF Ignored in audio flow
                             if packet.header.payload_type != 101 {
                                 let raw_pcm = decoder.decode(&packet.payload);
                                 if raw_pcm.len() == 160 {
@@ -262,17 +232,19 @@ impl RtpSession {
                         }
                     }
 
-                    // --- C. Process TX (COMFORT NOISE FIX) ---
+                    // --- C. Process TX (Strict Encoding with Silence) ---
                     if egress_queue.len() >= 160 {
                         let chunk: Vec<i16> = egress_queue.drain(0..160).collect();
                         tx_frame.copy_from_slice(&chunk);
                     } else {
-                        // Kuyruk boşsa sessizlik (0) bas. Encoder bunu codec karşılığına çevirir.
+                        // Kuyruk boşsa yasal sessizlik üret (0 PCM)
                         tx_frame.fill(0);
                     }
                         
                     if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                         if let Some(enc) = &mut active_encoder {
+                            // Sessizliği (0 PCM) bile olsa G.711 / G.729 formatında encode et. 
+                            // Bu sayede Mobil UAC'nin dekoderi asla çökmez.
                             let payload = enc.encode(&tx_frame);
                             let header = RtpHeader::new(enc.get_type() as u8, tx_seq, tx_ts, server_ssrc);
                             let packet = RtpPacket { header, payload };
@@ -283,15 +255,16 @@ impl RtpSession {
                             echo_tx_count += 1;
                         }
                     }
-                
 
                     // --- D. Stereo Recording Synchronization ---
+                    // Ses olsa da olmasa da bu 160 bytelık frameler senkron olarak yazılır. 
+                    // Asla senkron kaymaz!
                     if let Some(rec) = &mut *recording_session.lock().await {
                         const MAX_SAMPLES: usize = 57_600_000; 
                         if rec.rx_buffer.len() + 160 <= MAX_SAMPLES {
                             rec.rx_buffer.extend_from_slice(&rx_frame);
                             rec.tx_buffer.extend_from_slice(&tx_frame);
-                            gauge!(RECORDING_BUFFER_BYTES).increment(640.0); // 160 * 2ch * 2bytes
+                            gauge!(RECORDING_BUFFER_BYTES).increment(640.0);
                         } else if !rec.max_reached_warned {
                             warn!(event = "MAX_RECORDING_REACHED", sip.call_id = %self.call_id, "OOM Koruması aktif.");
                             rec.max_reached_warned = true;
