@@ -120,7 +120,7 @@ impl RtpSession {
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
         
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
-        let mut ptime_ticker = tokio::time::interval(Duration::from_millis(20)); // The Heartbeat of Media
+        let mut ptime_ticker = tokio::time::interval(Duration::from_millis(20));
         let mut last_activity = Instant::now();
 
         let session_config = RtpSessionConfig {
@@ -129,9 +129,22 @@ impl RtpSession {
             port: self.port,
         };
 
-        let mut active_decoder: Option<Box<dyn Decoder>> = None;
-        let mut active_encoder: Option<Box<dyn Encoder>> = None;
-        let mut active_payload_type: Option<u8> = None;
+        // [CRITICAL FIX]: EARLY MEDIA ENCODER INITIALIZATION
+        // Eskiden `None` olarak başlıyor ve müşteri konuşana kadar (ilk pakete kadar) Egress'i (anonsu) yutuyordu.
+        // Artık sistemin varsayılan kodeği ile hemen uyanıyor.
+        let default_profile = AudioProfile::default();
+        let initial_codec = default_profile.preferred_audio_codec();
+        
+        let mut active_payload_type: Option<u8> = Some(initial_codec as u8);
+        let mut active_decoder: Option<Box<dyn Decoder>> = Some(CodecFactory::create_decoder(initial_codec));
+        let mut active_encoder: Option<Box<dyn Encoder>> = Some(CodecFactory::create_encoder(initial_codec));
+
+        info!(
+            event = "RTP_ENGINE_READY",
+            codec = ?initial_codec,
+            "🚀 Medya Motoru önbellekten yüklendi ve Anons okumaya hazır."
+        );
+
 
         loop {
             let timeout = session_config.app_config.rtp_session_inactivity_timeout;
