@@ -130,8 +130,6 @@ impl RtpSession {
         };
 
         // [CRITICAL FIX]: EARLY MEDIA ENCODER INITIALIZATION
-        // Eskiden `None` olarak başlıyor ve müşteri konuşana kadar (ilk pakete kadar) Egress'i (anonsu) yutuyordu.
-        // Artık sistemin varsayılan kodeği ile hemen uyanıyor.
         let default_profile = AudioProfile::default();
         let initial_codec = default_profile.preferred_audio_codec();
         
@@ -169,13 +167,10 @@ impl RtpSession {
                         jitter_acc += (delta - 20.0).abs();
                         last_arrival = now;
 
-                        // [CRITICAL FIX]: Sequence Number Reordering Overflow Protection
                         let seq = packet.header.sequence_number;
                         if let Some(prev) = last_seq {
                             let expected = prev.wrapping_add(1);
                             if seq != expected {
-                                // Eğer gelen sıra numarası beklenen numaradan ilerideyken fark 1000'den küçükse (gerçek kayıp)
-                                // veya geriden geliyorsa (Reordering - geç gelmiş paket) onu kayıp sayma.
                                 let diff = seq.wrapping_sub(expected);
                                 if diff > 0 && diff < 1000 {
                                     packet_loss_count += diff as u64;
@@ -184,7 +179,6 @@ impl RtpSession {
                         }
                         last_seq = Some(seq);
                         
-                        // Set Codec Dynamics
                         if active_payload_type != Some(packet.header.payload_type) {
                             if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                                 active_decoder = Some(CodecFactory::create_decoder(codec.to_core_type()));
@@ -214,14 +208,16 @@ impl RtpSession {
                          &session_config, &self.egress_tx, &finished_tx, &mut known_target, &endpoint, &self.call_id
                      ).await { break; }
 
-                     // [OTONOM NAT WARMER]: Target adresi ilk belli olduğunda sessizlik bas.
+                     // [STRATEJİK DÜZELTME]: Otonom NAT Warmer
+                     // Cep telefonu SIP UAC'de oluşan parazit/gürültüyü önlemek için
+                     // Payload 2 byte değil, tam bir 20ms'lik kare (160 byte) olmalıdır.
                      if let Some(target) = known_target {
                          if !target_locked {
-                             let silence = vec![0xFF, 0xFF]; // PCMU comfort noise
+                             let silence = vec![0xFF; 160]; // DÜZELTME: 160 Byte PCMU Silence
                              let header = RtpHeader::new(0, tx_seq, tx_ts, server_ssrc);
                              let packet = RtpPacket { header, payload: silence };
                              let _ = socket.send_to(&packet.to_bytes(), target).await;
-                             debug!(event="AUTONOMOUS_NAT_WARMER", target=%target, "Sentiric NAT Warmer devrede.");
+                             debug!(event="AUTONOMOUS_NAT_WARMER", target=%target, "Sentiric NAT Warmer devrede (160 bytes).");
                          }
                      }
                 },
@@ -267,20 +263,16 @@ impl RtpSession {
                     }
 
                     // --- C. Process TX (COMFORT NOISE FIX) ---
-                    // Eğer kuyrukta veri varsa al, yoksa SESSİZLİK (Silence) üret.
-                    // Böylece RTP akışı asla kesilmez, Jitter Buffer mutlu kalır.
                     if egress_queue.len() >= 160 {
                         let chunk: Vec<i16> = egress_queue.drain(0..160).collect();
                         tx_frame.copy_from_slice(&chunk);
                     } else {
-                        // Kuyruk boşsa sessizlik (0) bas.
-                        // Önemli: Sadece hedef kilitlendiyse ve oturum aktifse gönder.
+                        // Kuyruk boşsa sessizlik (0) bas. Encoder bunu codec karşılığına çevirir.
                         tx_frame.fill(0);
                     }
                         
                     if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                         if let Some(enc) = &mut active_encoder {
-                            // Sessizliği encode et (G.711 için ucuzdur)
                             let payload = enc.encode(&tx_frame);
                             let header = RtpHeader::new(enc.get_type() as u8, tx_seq, tx_ts, server_ssrc);
                             let packet = RtpPacket { header, payload };
