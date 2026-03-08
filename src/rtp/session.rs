@@ -7,8 +7,8 @@ use crate::config::AppConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{Duration, Instant, MissedTickBehavior}; // [DÜZELTME]: MissedTickBehavior eklendi
-use tracing::{info, error, instrument, warn, debug}; 
+use tokio::time::{Duration, Instant, MissedTickBehavior}; 
+use tracing::{info, error, instrument, warn}; 
 
 use crate::metrics::{ACTIVE_SESSIONS, RECORDING_BUFFER_BYTES};
 use metrics::gauge;
@@ -114,7 +114,6 @@ impl RtpSession {
         
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
         
-        // [STRATEJİK DÜZELTME]: STRICT REAL-TIME CLOCK (Senkron Kayması ve Gürültüyü Önler)
         let mut ptime_ticker = tokio::time::interval(Duration::from_millis(20));
         ptime_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
         
@@ -194,8 +193,8 @@ impl RtpSession {
                          &session_config, &self.egress_tx, &finished_tx, &mut known_target, &endpoint, &self.call_id
                      ).await { break; }
                      
-                     // Not: Eski hacky NAT Warmer buradan tamamen silindi.
-                     // Cızırtıya neden olan 0xFF byte gönderimi kalktı.
+                     // [DÜZELTİLDİ]: Manuel 0xFF gönderme kodu tamamen SİLİNDİ. 
+                     // Yalnızca aşağıdaki ptime_ticker gerçeğe uygun PCM sessizliği kodlayıp yollayacak.
                 },
 
                 _ = ptime_ticker.tick() => {
@@ -203,7 +202,6 @@ impl RtpSession {
                     let mut tx_frame = vec![0i16; 160];
                     let mut rx_has_audio = false;
 
-                    // --- A. Process RX ---
                     if let Some(packet) = jitter_buffer.pop() {
                         if let Some(ref mut decoder) = active_decoder {
                             if packet.header.payload_type != 101 {
@@ -222,7 +220,6 @@ impl RtpSession {
                         }
                     }
 
-                    // --- B. Live Stream (To STT) ---
                     if rx_has_audio {
                         if let Some(tx) = &*live_stream_sender.lock().await {
                             let pcm_16k = sentiric_rtp_core::simple_resample(&rx_frame, 8000, 16000);
@@ -236,18 +233,17 @@ impl RtpSession {
                         }
                     }
 
-                    // --- C. Process TX (Strict Encoding with Silence) ---
                     if egress_queue.len() >= 160 {
                         let chunk: Vec<i16> = egress_queue.drain(0..160).collect();
                         tx_frame.copy_from_slice(&chunk);
                     } else {
-                        // Kuyruk boşsa saf sessizlik (0 PCM).
-                        // Encoder bunu doğru PCMU/PCMA/G729 formatına otomatik çevirir (Hatasız NAT Warmer).
-                        tx_frame.fill(0);
+                        tx_frame.fill(0); // Saf sessizlik
                     }
                         
                     if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                         if let Some(enc) = &mut active_encoder {
+                            // [MUCİZE BURADA]: 0 değerindeki PCM, encoder'a girer ve 
+                            // seçili kodeğe (PCMA, PCMU, G729) göre %100 YASAL sessizliğe dönüşür.
                             let payload = enc.encode(&tx_frame);
                             let header = RtpHeader::new(enc.get_type() as u8, tx_seq, tx_ts, server_ssrc);
                             let packet = RtpPacket { header, payload };
@@ -259,9 +255,6 @@ impl RtpSession {
                         }
                     }
 
-                    // --- D. Stereo Recording Synchronization ---
-                    // Ticker "Skip" modunda olduğu için, zaman kayması YAŞANMAZ.
-                    // Saniyede tam 50 kez bu blok çalışır (50 * 160 = 8000 samples = 1 saniye kayıt).
                     if let Some(rec) = &mut *recording_session.lock().await {
                         const MAX_SAMPLES: usize = 57_600_000; 
                         if rec.rx_buffer.len() + 160 <= MAX_SAMPLES {
