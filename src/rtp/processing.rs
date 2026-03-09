@@ -53,7 +53,7 @@ impl AudioProcessor {
         let frame_16k: Vec<i16> = self.accumulator.drain(0..FRAME_SIZE_16K).collect();
         
         // 1. Resampling (16k -> 8k) - Stateful
-        let frame_8k = self.resampler.process(&frame_16k).await;
+        let frame_8k = self.resampler.process(&frame_16k); // .await KALDIRILDI
         
         // 2. Encoding (8k -> RTP Payload)
         let encoded = self.encoder.encode(&frame_8k);

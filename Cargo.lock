@@ -3297,7 +3297,7 @@ dependencies = [
 
 [[package]]
 name = "sentiric-media-service"
-version = "0.6.8"
+version = "0.6.9"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3336,8 +3336,8 @@ dependencies = [
 
 [[package]]
 name = "sentiric-rtp-core"
-version = "1.5.1"
-source = "git+https://github.com/sentiric/sentiric-rtp-core.git?tag=v1.5.1#f5e49769f3cdd1e2fde0000d7115369f2e99a2e5"
+version = "1.6.0"
+source = "git+https://github.com/sentiric/sentiric-rtp-core.git?tag=v1.6.0#f5ba336623e0c81eab20c265ac8c87ec8d22bb9d"
 dependencies = [
  "cc",
  "glob",
