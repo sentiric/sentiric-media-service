@@ -1,4 +1,4 @@
-// sentiric-media-service/src/app.rs
+// Dosya: src/app.rs
 use crate::config::AppConfig;
 use crate::grpc::service::MyMediaService;
 use crate::metrics::start_metrics_server;
@@ -41,6 +41,7 @@ impl App {
                 config.service_version.clone(),
                 config.env.clone(),
                 config.node_hostname.clone(),
+                config.tenant_id.clone(), // [ARCH-COMPLIANCE] Tenant enjekte edildi
             );
             subscriber.with(fmt::layer().event_format(suts_formatter)).init();
         } else {
@@ -112,9 +113,6 @@ impl App {
         
         let app_state = AppState::new(port_manager, s3_client, rabbit_channel);
         
-        // [DÜZELTME]: Disk tabanlı Worker (UploadWorker) iptal edildiği için bu blok tamamen kaldırıldı.
-        // Artık sistem %100 Stateless çalışıyor.
-
         Ok(app_state)
     }
 
