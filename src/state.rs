@@ -45,12 +45,14 @@ pub struct PortManager {
     pub config: Arc<AppConfig>, 
 }
 
+// [ARCH-COMPLIANCE] Sadece değiştirilen blok
 impl PortManager {
     pub fn new(rtp_port_min: u16, rtp_port_max: u16, config: Arc<AppConfig>) -> Self {
         let initial_vec: Vec<u16> = (rtp_port_min..=rtp_port_max).filter(|&p| p % 2 == 0).collect();
         let initial_ports = VecDeque::from(initial_vec); 
         
-        info!(port_count = initial_ports.len(), "Kullanılabilir port havuzu oluşturuldu.");
+        info!(event = "PORT_POOL_CREATED", port_count = initial_ports.len(), "Kullanılabilir port havuzu oluşturuldu.");
+
         Self {
             active_sessions: Arc::new(Mutex::new(HashMap::new())),
             available_ports: Arc::new(Mutex::new(initial_ports)),
@@ -88,7 +90,8 @@ impl PortManager {
     }
     
     pub async fn run_reclamation_task(&self, cooldown: Duration) {
-        info!("Port karantina temizleme görevi başlatıldı. Soğuma süresi: {:?}", cooldown);
+        info!(event = "QUARANTINE_TASK_START", cooldown_sec = cooldown.as_secs(), "Port karantina temizleme görevi başlatıldı.");
+
         let mut interval = tokio::time::interval(cooldown);
         loop {
             interval.tick().await;
@@ -100,7 +103,7 @@ impl PortManager {
             
             quarantined_guard.retain(|(port, release_time)| {
                 if now.duration_since(*release_time) >= cooldown {
-                    debug!(port, "Port karantinadan çıkarıldı ve havuza eklendi.");
+                    debug!(event = "PORT_RELEASED_FROM_QUARANTINE", port = port, "Port karantinadan çıkarıldı ve havuza eklendi.");
                     available_ports_guard.push_back(*port); 
                     false
                 } else {

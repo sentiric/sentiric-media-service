@@ -22,14 +22,15 @@ pub fn extract_uri_scheme(uri: &str) -> &str {
     }
 }
 
+//[ARCH-COMPLIANCE] Sadece değiştirilen blok
 pub async fn send_hole_punch_packet(socket: &UdpSocket, target: SocketAddr, count: usize) {
     let silence_packet = [0u8; 160]; 
     for i in 0..count {
         if let Err(e) = socket.send_to(&silence_packet, target).await {
-            warn!("Hole Punching failed: {}", e);
+            warn!(event = "HOLE_PUNCH_FAIL", error = %e, target = %target, "Hole Punching failed");
             break;
         }
-        debug!("Hole Punching sent ({}/{}) -> {}", i + 1, count, target);
+        debug!(event = "HOLE_PUNCH_SENT", attempt = i + 1, target = %target, "Hole Punching sent");
         sleep(Duration::from_millis(50)).await;
     }
 }

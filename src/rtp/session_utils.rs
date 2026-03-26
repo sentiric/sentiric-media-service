@@ -23,8 +23,9 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
 
     gauge!(RECORDING_BUFFER_BYTES).decrement(((rx_len + tx_len) * 2) as f64);
 
+    // [ARCH-COMPLIANCE] Sadece değiştirilen blok (satır 26 ve 62 civarı)
     if max_len == 0 {
-        info!("Boş kayıt, işlem atlanıyor.");
+        info!(event = "RECORDING_SKIPPED", "Boş kayıt, işlem atlanıyor.");
         return Ok(());
     }
 
@@ -75,9 +76,9 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         };
 
         match rabbitmq::publish_with_confirm(channel, "call.recording.available", &event.encode_to_vec()).await {
-            Ok(_) => info!("📩 Stereo kayıt tamamlandı olayı (Confirmed) RabbitMQ'ya iletildi."),
+            Ok(_) => info!(event = "RECORDING_EVENT_PUBLISHED", "📩 Stereo kayıt tamamlandı olayı (Confirmed) RabbitMQ'ya iletildi."),
             Err(e) => {
-                error!(error = %e, "🔥 Kayıt S3'e yüklendi ama RabbitMQ'ya olay atılamadı!");
+                error!(event = "RECORDING_EVENT_PUBLISH_FAIL", error = %e, "🔥 Kayıt S3'e yüklendi ama RabbitMQ'ya olay atılamadı!");
                 return Err(e.into());
             }
         }

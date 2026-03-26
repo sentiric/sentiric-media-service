@@ -73,7 +73,7 @@ pub async fn handle_command(
         },
         RtpCommand::Shutdown => return true,
         RtpCommand::SetTargetAddress { target } => { *known_target = Some(target); },
-        _ => {} // Start/StopOutboundStream kaldırıldığı için ignore
+        _ => {} 
     }
     false
 }
@@ -89,6 +89,9 @@ pub async fn start_playback(
     let uri = job.audio_uri.clone();
     let call_id_owned = call_id.to_string();
     let app_state = config.app_state.clone();
+    
+    // [ARCH-COMPLIANCE] Spec Kuralı: Tenant ID config üzerinden dinamik olarak alınmalıdır.
+    let tenant_id_owned = config.app_config.tenant_id.clone(); 
 
     let span = tracing::Span::current();
 
@@ -99,7 +102,6 @@ pub async fn start_playback(
                 
                 let mut res = Ok(());
                 
-                // Chunk size 160 (20ms) - Egress queue will handle timing
                 for chunk in samples.chunks(160) {
                     if job.cancellation_token.is_cancelled() { break; }
                     
@@ -108,7 +110,6 @@ pub async fn start_playback(
                         res = Err(anyhow::anyhow!("Egress channel closed"));
                         break;
                     }
-                    // Ticker'ı boğmamak için mikrosaniye düzeyinde yield
                     tokio::task::yield_now().await; 
                 }
                 
@@ -119,7 +120,7 @@ pub async fn start_playback(
                             event_type: "call.media.playback.finished".to_string(),
                             trace_id: call_id_owned.clone(), 
                             timestamp: Some(prost_types::Timestamp::from(SystemTime::now())),
-                            tenant_id: "system".to_string(),
+                            tenant_id: tenant_id_owned, // [ARCH-COMPLIANCE] Hardcoded 'system' silindi
                             payload_json: json_payload,
                         };
                         let _ = channel.basic_publish(

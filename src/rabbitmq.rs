@@ -10,26 +10,27 @@ use tracing::{error, info, warn};
 
 pub const EXCHANGE_NAME: &str = "sentiric_events";
 
+// [ARCH-COMPLIANCE] Sadece ilgili değiştirilen fonksiyon blokları
 pub async fn connect_with_retry(url: &str) -> anyhow::Result<Arc<LapinChannel>> {
     let mut attempt = 0;
     loop {
         attempt += 1;
-        info!("🐇 RabbitMQ'ya bağlanılıyor (Deneme: {})...", attempt);
+        info!(event = "RABBITMQ_CONNECTING", attempt = attempt, "🐇 RabbitMQ'ya bağlanılıyor...");
         match Connection::connect(url, ConnectionProperties::default()).await {
             Ok(conn) => {
                 match conn.create_channel().await {
                     Ok(channel) => {
                         if let Err(e) = channel.confirm_select(ConfirmSelectOptions::default()).await {
-                            error!("🚨 RabbitMQ Confirm Mode Error: {}", e);
+                            error!(event = "RABBITMQ_CONFIRM_ERROR", error = %e, "🚨 RabbitMQ Confirm Mode Error");
                         }
                         
-                        let _ = conn.on_error(|err| error!("🚨 RabbitMQ Connection Error: {}", err));
+                        let _ = conn.on_error(|err| error!(event = "RABBITMQ_CONN_ERROR", error = %err, "🚨 RabbitMQ Connection Error"));
                         return Ok(Arc::new(channel));
                     },
-                    Err(e) => error!("❌ RabbitMQ kanalı oluşturulamadı: {}. Tekrar deneniyor...", e)
+                    Err(e) => error!(event = "RABBITMQ_CHANNEL_FAIL", error = %e, "❌ RabbitMQ kanalı oluşturulamadı. Tekrar deneniyor...")
                 }
             },
-            Err(e) => warn!("⚠️ RabbitMQ'ya ulaşılamıyor (Deneme: {}): {}. 5 saniye sonra tekrar denenecek...", attempt, e)
+            Err(e) => warn!(event = "RABBITMQ_UNREACHABLE", attempt = attempt, error = %e, "⚠️ RabbitMQ'ya ulaşılamıyor. 5 saniye sonra tekrar denenecek...")
         }
         sleep(Duration::from_secs(5)).await;
     }
