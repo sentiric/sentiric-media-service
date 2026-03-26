@@ -103,6 +103,7 @@ impl PortManager {
             
             quarantined_guard.retain(|(port, release_time)| {
                 if now.duration_since(*release_time) >= cooldown {
+                    // [ARCH-COMPLIANCE] INFO yerine DEBUG yapıldı.
                     debug!(event = "PORT_RELEASED_FROM_QUARANTINE", port = port, "Port karantinadan çıkarıldı ve havuza eklendi.");
                     available_ports_guard.push_back(*port); 
                     false

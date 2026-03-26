@@ -98,7 +98,8 @@ pub async fn start_playback(
     match crate::rtp::session_utils::load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
         Ok(samples) => {
             tokio::spawn(async move {
-                info!(event = "MEDIA_PLAYBACK_START", uri = %uri, "🚀 Medya PCM chunk'ları Egress kanalına basılıyor.");
+                // [ARCH-COMPLIANCE] sip.call_id log'a eklendi
+                info!(event = "MEDIA_PLAYBACK_START", sip.call_id = %call_id_owned, uri = %uri, "🚀 Medya PCM chunk'ları Egress kanalına basılıyor.");
                 
                 let mut res = Ok(());
                 

@@ -108,7 +108,8 @@ impl MediaService for MyMediaService {
                 gauge!(ACTIVE_SESSIONS).increment(1.0);
                 let session = RtpSession::new(trace_id.clone(), call_id.clone(), port, Arc::new(socket), self.app_state.clone());
                 self.app_state.port_manager.add_session(port, session).await;
-                info!(event = "MEDIA_PORT_ALLOCATED", rtp.port = port, bind.addr = %bind_addr, "RTP Port Allocated");
+                //[ARCH-COMPLIANCE] sip.call_id log'a eklendi
+                info!(event = "MEDIA_PORT_ALLOCATED", sip.call_id = %call_id, rtp.port = port, bind.addr = %bind_addr, "RTP Port Allocated");
                 Ok(Response::new(AllocatePortResponse { rtp_port: port as u32 }))
             }
             Err(e) => {
