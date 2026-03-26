@@ -15,6 +15,7 @@ use prost::Message;
 
 use sentiric_contracts::sentiric::event::v1::CallRecordingAvailableEvent;
 
+// [ARCH-COMPLIANCE] upload_to_s3 ve RabbitMQ event loglarındaki eksik bağlam onarılmıştır.
 #[instrument(skip_all, fields(call_id = %session.call_id))]
 pub async fn finalize_and_save_recording(session: RecordingSession, app_state: AppState) -> Result<()> {
     let rx_len = session.rx_buffer.len();
@@ -23,16 +24,15 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
 
     gauge!(RECORDING_BUFFER_BYTES).decrement(((rx_len + tx_len) * 2) as f64);
 
-    // [ARCH-COMPLIANCE] Sadece değiştirilen blok (satır 26 ve 62 civarı)
     if max_len == 0 {
-        info!(event = "RECORDING_SKIPPED", "Boş kayıt, işlem atlanıyor.");
+        // [ARCH-COMPLIANCE] sip.call_id eklendi
+        info!(event = "RECORDING_SKIPPED", sip.call_id = %session.call_id, "Boş kayıt, işlem atlanıyor.");
         return Ok(());
     }
 
     let now = chrono::Utc::now();
     let s3_key = format!("recordings/{}/{:02}/{:02}/{}.wav", now.year(), now.month(), now.day(), session.call_id);
 
-    // [MİMARİ GÜNCELLEME]: Artık Stereo (2 Kanal)
     let spec = WavSpec {
         channels: 2, 
         sample_rate: 8000,
@@ -40,7 +40,6 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         sample_format: SampleFormat::Int,
     };
     
-    // Stereo Interleaving: L, R, L, R...
     let rx_buffer = session.rx_buffer;
     let tx_buffer = session.tx_buffer;
 
@@ -62,7 +61,8 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
     let s3_config = app_state.port_manager.config.s3_config.clone().ok_or_else(|| anyhow!("S3 config eksik"))?;
     let s3_client = app_state.s3_client.clone().ok_or_else(|| anyhow!("S3 client eksik"))?;
     
-    writers::upload_to_s3_with_retry(s3_client, &s3_config.bucket_name, &s3_key, wav_data).await?;
+    // [ARCH-COMPLIANCE] Fonksiyon çağrısına session.call_id paslandı
+    writers::upload_to_s3_with_retry(s3_client, &s3_config.bucket_name, &s3_key, wav_data, &session.call_id).await?;
 
     if let Some(channel) = &app_state.rabbitmq_publisher {
         let s3_uri = format!("s3://{}/{}", s3_config.bucket_name, s3_key);
@@ -76,9 +76,10 @@ pub async fn finalize_and_save_recording(session: RecordingSession, app_state: A
         };
 
         match rabbitmq::publish_with_confirm(channel, "call.recording.available", &event.encode_to_vec()).await {
-            Ok(_) => info!(event = "RECORDING_EVENT_PUBLISHED", "📩 Stereo kayıt tamamlandı olayı (Confirmed) RabbitMQ'ya iletildi."),
+            //[ARCH-COMPLIANCE] sip.call_id loga eklendi.
+            Ok(_) => info!(event = "RECORDING_EVENT_PUBLISHED", sip.call_id = %session.call_id, "📩 Stereo kayıt tamamlandı olayı (Confirmed) RabbitMQ'ya iletildi."),
             Err(e) => {
-                error!(event = "RECORDING_EVENT_PUBLISH_FAIL", error = %e, "🔥 Kayıt S3'e yüklendi ama RabbitMQ'ya olay atılamadı!");
+                error!(event = "RECORDING_EVENT_PUBLISH_FAIL", sip.call_id = %session.call_id, error = %e, "🔥 Kayıt S3'e yüklendi ama RabbitMQ'ya olay atılamadı!");
                 return Err(e.into());
             }
         }
