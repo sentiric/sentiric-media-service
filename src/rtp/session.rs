@@ -125,6 +125,8 @@ impl RtpSession {
             port: self.port,
         };
 
+        // AudioProfile::default(), eğer "PREFERRED_AUDIO_CODEC" tanımlıysa
+        // otomatik olarak o kodeği en üste koyar. Hardcode'a gerek yok!
         let default_profile = AudioProfile::default();
         let initial_codec = default_profile.preferred_audio_codec();
         
