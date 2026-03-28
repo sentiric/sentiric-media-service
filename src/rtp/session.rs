@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant, MissedTickBehavior}; 
 use tracing::{info, error, instrument, warn}; 
+use std::collections::VecDeque;
 
 use crate::metrics::{ACTIVE_SESSIONS, RECORDING_BUFFER_BYTES};
 use metrics::gauge;
@@ -80,7 +81,9 @@ impl RtpSession {
         let endpoint = RtpEndpoint::new(None);
         
         let mut jitter_buffer = JitterBuffer::new(100, 60);
-        let mut egress_queue: Vec<i16> = Vec::with_capacity(16000);
+        
+        // [ARCH-COMPLIANCE] O(N) drain darboğazını önlemek için Vec yerine VecDeque kullanıldı.
+        let mut egress_queue: VecDeque<i16> = VecDeque::with_capacity(16000);
 
         let mut last_seq: Option<u16> = None;
         let mut packet_loss_count = 0u64;
@@ -125,8 +128,6 @@ impl RtpSession {
             port: self.port,
         };
 
-        // AudioProfile::default(), eğer "PREFERRED_AUDIO_CODEC" tanımlıysa
-        // otomatik olarak o kodeği en üste koyar. Hardcode'a gerek yok!
         let default_profile = AudioProfile::default();
         let initial_codec = default_profile.preferred_audio_codec();
         
@@ -180,9 +181,9 @@ impl RtpSession {
                     }
                 },
 
-                Some(mut pcm_data) = egress_rx.recv() => {
+                Some(pcm_data) = egress_rx.recv() => {
                     last_activity = Instant::now();
-                    egress_queue.append(&mut pcm_data);
+                    egress_queue.extend(pcm_data);
                 },
 
                 Some(cmd) = command_rx.recv() => {
@@ -194,9 +195,6 @@ impl RtpSession {
                          &mut playback_queue, &mut is_playing, &mut echo_mode, 
                          &session_config, &self.egress_tx, &finished_tx, &mut known_target, &endpoint, &self.call_id
                      ).await { break; }
-                     
-                     // [DÜZELTİLDİ]: Manuel 0xFF gönderme kodu tamamen SİLİNDİ. 
-                     // Yalnızca aşağıdaki ptime_ticker gerçeğe uygun PCM sessizliği kodlayıp yollayacak.
                 },
 
                 _ = ptime_ticker.tick() => {
@@ -231,21 +229,21 @@ impl RtpSession {
                         }
 
                         if echo_mode {
-                            egress_queue.extend_from_slice(&rx_frame);
+                            egress_queue.extend(rx_frame.iter().copied());
                         }
                     }
 
                     if egress_queue.len() >= 160 {
-                        let chunk: Vec<i16> = egress_queue.drain(0..160).collect();
-                        tx_frame.copy_from_slice(&chunk);
+                        // [ARCH-COMPLIANCE] O(1) maliyetle pop_front yapıldı.
+                        for i in 0..160 {
+                            tx_frame[i] = egress_queue.pop_front().unwrap_or(0);
+                        }
                     } else {
-                        tx_frame.fill(0); // Saf sessizlik
+                        tx_frame.fill(0); 
                     }
                         
                     if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                         if let Some(enc) = &mut active_encoder {
-                            // [MUCİZE BURADA]: 0 değerindeki PCM, encoder'a girer ve 
-                            // seçili kodeğe (PCMA, PCMU, G729) göre %100 YASAL sessizliğe dönüşür.
                             let payload = enc.encode(&tx_frame);
                             let header = RtpHeader::new(enc.get_type() as u8, tx_seq, tx_ts, server_ssrc);
                             let packet = RtpPacket { header, payload };

@@ -89,8 +89,6 @@ pub async fn start_playback(
     let uri = job.audio_uri.clone();
     let call_id_owned = call_id.to_string();
     let app_state = config.app_state.clone();
-    
-    // [ARCH-COMPLIANCE] Spec Kuralı: Tenant ID config üzerinden dinamik olarak alınmalıdır.
     let tenant_id_owned = config.app_config.tenant_id.clone(); 
 
     let span = tracing::Span::current();
@@ -98,20 +96,25 @@ pub async fn start_playback(
     match crate::rtp::session_utils::load_and_resample_samples_from_uri(&uri, &config.app_state, &config.app_config).await {
         Ok(samples) => {
             tokio::spawn(async move {
-                // [ARCH-COMPLIANCE] sip.call_id log'a eklendi
                 info!(event = "MEDIA_PLAYBACK_START", sip.call_id = %call_id_owned, uri = %uri, "🚀 Medya PCM chunk'ları Egress kanalına basılıyor.");
                 
                 let mut res = Ok(());
                 
+                // [ARCH-COMPLIANCE] Ses dosyasının kanala Boca edilmesi (Buffering) engellendi.
+                // 20ms'lik metronom ile senkron ses aktarımı sağlandı.
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
                 for chunk in samples.chunks(160) {
                     if job.cancellation_token.is_cancelled() { break; }
                     
+                    interval.tick().await;
+
                     if let Err(e) = egress_tx.send(chunk.to_vec()).await {
                         debug!(event = "EGRESS_SEND_ERROR", error = %e, "Egress channel closed");
                         res = Err(anyhow::anyhow!("Egress channel closed"));
                         break;
                     }
-                    tokio::task::yield_now().await; 
                 }
                 
                 if res.is_ok() {
@@ -121,7 +124,7 @@ pub async fn start_playback(
                             event_type: "call.media.playback.finished".to_string(),
                             trace_id: call_id_owned.clone(), 
                             timestamp: Some(prost_types::Timestamp::from(SystemTime::now())),
-                            tenant_id: tenant_id_owned, // [ARCH-COMPLIANCE] Hardcoded 'system' silindi
+                            tenant_id: tenant_id_owned,
                             payload_json: json_payload,
                         };
                         let _ = channel.basic_publish(
