@@ -5,11 +5,20 @@ use tonic::Status;
 #[derive(Debug)]
 pub enum ServiceError {
     PortPoolExhausted,
-    SessionNotFound { port: u16 },
-    InvalidUri { uri: String },
-    InvalidTargetAddress { addr: String, source: std::net::AddrParseError },
+    SessionNotFound {
+        port: u16,
+    },
+    InvalidUri {
+        uri: String,
+    },
+    InvalidTargetAddress {
+        addr: String,
+        source: std::net::AddrParseError,
+    },
     CommandSendError(String),
-    RecordingSaveFailed { source: String },
+    RecordingSaveFailed {
+        source: String,
+    },
     InternalError(anyhow::Error),
 }
 
@@ -17,11 +26,21 @@ impl Display for ServiceError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
             ServiceError::PortPoolExhausted => write!(f, "Available RTP port pool is exhausted."),
-            ServiceError::SessionNotFound { port } => write!(f, "Active session not found for port {}.", port),
-            ServiceError::InvalidUri { uri } => write!(f, "Unsupported or invalid URI scheme: {}", uri),
-            ServiceError::InvalidTargetAddress { addr, .. } => write!(f, "Invalid target RTP address format: {}", addr),
-            ServiceError::CommandSendError(msg) => write!(f, "Failed to send command to RTP session: {}", msg),
-            ServiceError::RecordingSaveFailed { source } => write!(f, "Failed to finalize and save recording: {}", source),
+            ServiceError::SessionNotFound { port } => {
+                write!(f, "Active session not found for port {}.", port)
+            }
+            ServiceError::InvalidUri { uri } => {
+                write!(f, "Unsupported or invalid URI scheme: {}", uri)
+            }
+            ServiceError::InvalidTargetAddress { addr, .. } => {
+                write!(f, "Invalid target RTP address format: {}", addr)
+            }
+            ServiceError::CommandSendError(msg) => {
+                write!(f, "Failed to send command to RTP session: {}", msg)
+            }
+            ServiceError::RecordingSaveFailed { source } => {
+                write!(f, "Failed to finalize and save recording: {}", source)
+            }
             ServiceError::InternalError(e) => write!(f, "An internal server error occurred: {}", e),
         }
     }
@@ -38,7 +57,7 @@ impl From<ServiceError> for Status {
             ServiceError::InvalidUri { .. } | ServiceError::InvalidTargetAddress { .. } => {
                 Status::invalid_argument(message)
             }
-            
+
             // --- GÜÇLENDİRİLMİŞ HATA YÖNETİMİ ---
             ServiceError::RecordingSaveFailed { source } => {
                 let lower_source = source.to_lowercase();
@@ -60,11 +79,10 @@ impl From<ServiceError> for Status {
                 }
             }
             // --- HATA YÖNETİMİ SONU ---
-
             ServiceError::CommandSendError(_) | ServiceError::InternalError(_) => {
                 tracing::error!(error = %message, "Dahili servis hatası oluştu");
                 Status::internal("Bir iç hata oluştu. Lütfen sunucu loglarını kontrol edin.")
-            }              
+            }
         }
     }
 }

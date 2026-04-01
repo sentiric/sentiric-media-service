@@ -1,13 +1,13 @@
 // Dosya: src/config.rs
+use anyhow::{bail, Context, Result};
 use std::env;
 use std::net::SocketAddr;
 use std::time::Duration;
-use anyhow::{Result, Context, bail};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MediaEngineMode {
-    Headless, 
-    Hardware, 
+    Headless,
+    Hardware,
 }
 
 #[derive(Debug, Clone)]
@@ -22,13 +22,13 @@ pub struct S3Config {
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub grpc_listen_addr: SocketAddr,
-    pub rtp_listen_ip: String,      
-    pub rtp_advertised_ip: String,  
+    pub rtp_listen_ip: String,
+    pub rtp_advertised_ip: String,
     pub rtp_port_min: u16,
     pub rtp_port_max: u16,
     pub rtp_port_quarantine_duration: Duration,
     pub assets_base_path: String,
-    pub media_recording_path: String, 
+    pub media_recording_path: String,
     pub env: String,
     pub rust_log: String,
     pub log_format: String,
@@ -45,23 +45,37 @@ pub struct AppConfig {
     pub key_path: String,
     pub ca_path: String,
     pub audio_recording_gain: f32,
-    
+
     pub tenant_id: String, // [ARCH-COMPLIANCE] Tenant ID runtime'da çözülmek için eklendi
 }
 
 impl AppConfig {
     pub fn load_from_env() -> Result<Self> {
-        let grpc_port: u16 = env::var("MEDIA_SERVICE_GRPC_PORT").context("MEDIA_SERVICE_GRPC_PORT eksik")?.parse()?;
-        let metrics_port: u16 = env::var("MEDIA_SERVICE_METRICS_PORT").unwrap_or_else(|_| "13032".to_string()).parse()?;
+        let grpc_port: u16 = env::var("MEDIA_SERVICE_GRPC_PORT")
+            .context("MEDIA_SERVICE_GRPC_PORT eksik")?
+            .parse()?;
+        let metrics_port: u16 = env::var("MEDIA_SERVICE_METRICS_PORT")
+            .unwrap_or_else(|_| "13032".to_string())
+            .parse()?;
 
-        let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN").unwrap_or_else(|_| "50000".to_string()).parse()?;
-        let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX").unwrap_or_else(|_| "50100".to_string()).parse()?;
+        let rtp_port_min: u16 = env::var("RTP_SERVICE_PORT_MIN")
+            .unwrap_or_else(|_| "50000".to_string())
+            .parse()?;
+        let rtp_port_max: u16 = env::var("RTP_SERVICE_PORT_MAX")
+            .unwrap_or_else(|_| "50100".to_string())
+            .parse()?;
 
-        if rtp_port_min >= rtp_port_max { bail!("RTP port aralığı geçersiz."); }
+        if rtp_port_min >= rtp_port_max {
+            bail!("RTP port aralığı geçersiz.");
+        }
 
-        let quarantine_seconds: u64 = env::var("RTP_SERVICE_PORT_QUARANTINE_SECONDS").unwrap_or_else(|_| "5".to_string()).parse()?;
-        let inactivity_seconds: u64 = env::var("RTP_SESSION_INACTIVITY_TIMEOUT_SECONDS").unwrap_or_else(|_| "30".to_string()).parse()?;
-        
+        let quarantine_seconds: u64 = env::var("RTP_SERVICE_PORT_QUARANTINE_SECONDS")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()?;
+        let inactivity_seconds: u64 = env::var("RTP_SESSION_INACTIVITY_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()?;
+
         let s3_config = if env::var("BUCKET_ENDPOINT_URL").is_ok() {
             Some(S3Config {
                 endpoint_url: env::var("BUCKET_ENDPOINT_URL")?,
@@ -70,8 +84,10 @@ impl AppConfig {
                 secret_access_key: env::var("BUCKET_SECRET_ACCESS_KEY")?,
                 bucket_name: env::var("BUCKET_NAME")?,
             })
-        } else { None };
-        
+        } else {
+            None
+        };
+
         let rabbitmq_url = env::var("RABBITMQ_URL").ok();
 
         let mode_str = env::var("MEDIA_ENGINE_MODE").unwrap_or_else(|_| "HEADLESS".to_string());
@@ -87,19 +103,23 @@ impl AppConfig {
             .unwrap_or(1.0);
 
         // [ARCH-COMPLIANCE] tenant_id zorunlu alan doğrulaması
-        let tenant_id = env::var("TENANT_ID")
-            .map_err(|_| anyhow::anyhow!("[ARCH-COMPLIANCE] TENANT_ID env var zorunludur, tanımlanmamış"))?;
-        
+        let tenant_id = env::var("TENANT_ID").map_err(|_| {
+            anyhow::anyhow!("[ARCH-COMPLIANCE] TENANT_ID env var zorunludur, tanımlanmamış")
+        })?;
+
         if tenant_id.is_empty() {
             anyhow::bail!("[ARCH-COMPLIANCE] TENANT_ID boş olamaz");
         }
 
         Ok(AppConfig {
             grpc_listen_addr: format!("[::]:{}", grpc_port).parse()?,
-            rtp_listen_ip: env::var("RTP_SERVICE_LISTEN_ADDRESS").unwrap_or_else(|_| "0.0.0.0".to_string()),
-            rtp_advertised_ip: env::var("RTP_SERVICE_ADVERTISED_IP").context("RTP_SERVICE_ADVERTISED_IP (Node IP) eksik!")?,
+            rtp_listen_ip: env::var("RTP_SERVICE_LISTEN_ADDRESS")
+                .unwrap_or_else(|_| "0.0.0.0".to_string()),
+            rtp_advertised_ip: env::var("RTP_SERVICE_ADVERTISED_IP")
+                .context("RTP_SERVICE_ADVERTISED_IP (Node IP) eksik!")?,
             assets_base_path: env::var("ASSETS_BASE_PATH").unwrap_or_else(|_| "assets".to_string()),
-            media_recording_path: env::var("MEDIA_RECORDING_PATH").unwrap_or_else(|_| "/tmp/sentiric/recordings".to_string()),
+            media_recording_path: env::var("MEDIA_RECORDING_PATH")
+                .unwrap_or_else(|_| "/tmp/sentiric/recordings".to_string()),
             rtp_port_min,
             rtp_port_max,
             rtp_port_quarantine_duration: Duration::from_secs(quarantine_seconds),
@@ -118,7 +138,7 @@ impl AppConfig {
             cert_path: env::var("MEDIA_SERVICE_CERT_PATH")?,
             key_path: env::var("MEDIA_SERVICE_KEY_PATH")?,
             ca_path: env::var("GRPC_TLS_CA_PATH")?,
-            audio_recording_gain, 
+            audio_recording_gain,
             tenant_id,
         })
     }

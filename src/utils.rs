@@ -24,7 +24,7 @@ pub fn extract_uri_scheme(uri: &str) -> &str {
 
 //[ARCH-COMPLIANCE] Sadece değiştirilen blok
 pub async fn send_hole_punch_packet(socket: &UdpSocket, target: SocketAddr, count: usize) {
-    let silence_packet = [0u8; 160]; 
+    let silence_packet = [0u8; 160];
     for i in 0..count {
         if let Err(e) = socket.send_to(&silence_packet, target).await {
             warn!(event = "HOLE_PUNCH_FAIL", error = %e, target = %target, "Hole Punching failed");

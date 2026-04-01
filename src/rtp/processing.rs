@@ -1,22 +1,25 @@
 // sentiric-media-service/src/rtp/processing.rs
 
-use sentiric_rtp_core::{CodecFactory, CodecType, Encoder, AudioResampler};
+use sentiric_rtp_core::{AudioResampler, CodecFactory, CodecType, Encoder};
 use tracing::{info, warn}; // 'error' ve 'codecs' kaldırıldı
 
 /// AudioProcessor: AI Pipeline (16kHz) ile RTP (8kHz) arasındaki köprüdür.
 pub struct AudioProcessor {
     encoder: Box<dyn Encoder>,
-    accumulator: Vec<i16>, 
+    accumulator: Vec<i16>,
     current_codec: CodecType,
     resampler: AudioResampler,
 }
 
 impl AudioProcessor {
     pub fn new(initial_codec: CodecType) -> Self {
-        info!("🎛️ Audio Processor Initialized for Codec: {:?}", initial_codec);
+        info!(
+            "🎛️ Audio Processor Initialized for Codec: {:?}",
+            initial_codec
+        );
         Self {
             encoder: CodecFactory::create_encoder(initial_codec),
-            accumulator: Vec::with_capacity(8192), 
+            accumulator: Vec::with_capacity(8192),
             current_codec: initial_codec,
             resampler: AudioResampler::new(16000, 8000, 320),
         }
@@ -24,7 +27,10 @@ impl AudioProcessor {
 
     pub fn update_codec(&mut self, new_codec: CodecType) {
         if self.current_codec != new_codec {
-            info!("🔄 Switching Processor Codec: {:?} -> {:?}", self.current_codec, new_codec);
+            info!(
+                "🔄 Switching Processor Codec: {:?} -> {:?}",
+                self.current_codec, new_codec
+            );
             self.current_codec = new_codec;
             self.encoder = CodecFactory::create_encoder(new_codec);
         }
@@ -36,30 +42,35 @@ impl AudioProcessor {
             return;
         }
 
-        let samples: Vec<i16> = data.chunks_exact(2)
+        let samples: Vec<i16> = data
+            .chunks_exact(2)
             .map(|b| i16::from_le_bytes([b[0], b[1]]))
             .collect();
-        
+
         self.accumulator.extend(samples);
     }
 
     pub async fn process_frame(&mut self) -> Option<Vec<Vec<u8>>> {
-        const FRAME_SIZE_16K: usize = 320; 
-        
+        const FRAME_SIZE_16K: usize = 320;
+
         if self.accumulator.len() < FRAME_SIZE_16K {
             return None;
         }
 
         let frame_16k: Vec<i16> = self.accumulator.drain(0..FRAME_SIZE_16K).collect();
-        
+
         // 1. Resampling (16k -> 8k) - Stateful
         let frame_8k = self.resampler.process(&frame_16k); // .await KALDIRILDI
-        
+
         // 2. Encoding (8k -> RTP Payload)
         let encoded = self.encoder.encode(&frame_8k);
 
-        let payload_size = if self.current_codec == CodecType::G729 { 10 } else { 160 };
-        
+        let payload_size = if self.current_codec == CodecType::G729 {
+            10
+        } else {
+            160
+        };
+
         if encoded.is_empty() {
             return None;
         }

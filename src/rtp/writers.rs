@@ -1,12 +1,12 @@
 // sentiric-media-service/src/rtp/writers.rs
-use aws_sdk_s3::Client as S3Client;
+use crate::metrics::S3_UPLOAD_FAILURES;
+use anyhow::Result;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::Client as S3Client;
+use metrics::counter;
 use std::sync::Arc;
 use tokio::time::{sleep, timeout, Duration};
-use tracing::{info, error, warn, instrument};
-use anyhow::Result;
-use crate::metrics::S3_UPLOAD_FAILURES;
-use metrics::counter;
+use tracing::{error, info, instrument, warn};
 
 #[instrument(skip(client, data), fields(s3.bucket = %bucket, s3.key = %key, file.size_bytes = data.len()))]
 pub async fn upload_to_s3_with_retry(
@@ -25,9 +25,14 @@ pub async fn upload_to_s3_with_retry(
     loop {
         attempt += 1;
         let body = ByteStream::from(data.clone());
-        
-        let s3_future = client.put_object().bucket(bucket).key(key).body(body).send();
-        
+
+        let s3_future = client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(body)
+            .send();
+
         match timeout(Duration::from_secs(15), s3_future).await {
             Ok(Ok(_)) => {
                 info!(event = "S3_UPLOAD_SUCCESS", sip.call_id = %call_id, attempt = attempt, "✅ Dosya S3'e başarıyla yüklendi.");
@@ -35,24 +40,24 @@ pub async fn upload_to_s3_with_retry(
             }
             Ok(Err(e)) => {
                 counter!(S3_UPLOAD_FAILURES).increment(1);
-                
+
                 if attempt >= MAX_RETRIES {
                     error!(event = "S3_UPLOAD_ERROR", sip.call_id = %call_id, error = ?e, "❌ S3 Upload {} deneme sonrası başarısız oldu.", MAX_RETRIES);
                     return Err(anyhow::anyhow!("S3 Upload Bounded Retry Failed: {:?}", e));
                 }
-                
+
                 let backoff = Duration::from_millis(2u64.pow(attempt) * 500);
                 warn!(event = "S3_UPLOAD_RETRY", sip.call_id = %call_id, attempt = attempt, backoff_ms = backoff.as_millis(), "⚠️ S3 Upload başarısız, tekrar deneniyor...");
                 sleep(backoff).await;
             }
             Err(_) => {
                 counter!(S3_UPLOAD_FAILURES).increment(1);
-                
+
                 if attempt >= MAX_RETRIES {
                     error!(event = "S3_UPLOAD_TIMEOUT_FATAL", sip.call_id = %call_id, "❌ S3 Upload {} deneme boyunca Timeout yedi.", MAX_RETRIES);
                     return Err(anyhow::anyhow!("S3 Upload Timeout Exceeded after retries"));
                 }
-                
+
                 let backoff = Duration::from_millis(2u64.pow(attempt) * 500);
                 warn!(event = "S3_UPLOAD_TIMEOUT", sip.call_id = %call_id, attempt = attempt, "⚠️ S3 Upload isteği 15 saniyede cevap vermedi (Timeout). Tekrar deneniyor...");
                 sleep(backoff).await;

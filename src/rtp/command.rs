@@ -39,10 +39,14 @@ pub enum RtpCommand {
         target_sample_rate: Option<u32>,
     },
     StopLiveAudioStream,
-    EnableEchoTest,   
+    EnableEchoTest,
     DisableEchoTest,
-    SetTargetAddress { target: SocketAddr },
+    SetTargetAddress {
+        target: SocketAddr,
+    },
     StartPermanentRecording(RecordingSession),
-    StopPermanentRecording { responder: oneshot::Sender<Result<String, String>> },
+    StopPermanentRecording {
+        responder: oneshot::Sender<Result<String, String>>,
+    },
     Shutdown,
 }

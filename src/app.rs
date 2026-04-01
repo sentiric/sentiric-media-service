@@ -4,8 +4,8 @@ use crate::grpc::service::MyMediaService;
 use crate::metrics::start_metrics_server;
 use crate::rabbitmq;
 use crate::state::{AppState, PortManager};
-use crate::tls::load_server_tls_config;
 use crate::telemetry::SutsFormatter;
+use crate::tls::load_server_tls_config;
 use sentiric_contracts::sentiric::media::v1::media_service_server::MediaServiceServer;
 
 use anyhow::{Context, Result};
@@ -17,7 +17,7 @@ use std::env;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::transport::Server;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 use tracing_subscriber::{fmt, prelude::*, EnvFilter, Registry};
 
 pub struct App {
@@ -29,12 +29,14 @@ impl App {
         let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
         if let Err(_) = dotenvy::from_filename(&env_file) {}
 
-        let config = Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
+        let config =
+            Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
 
         let rust_log_env = env::var("RUST_LOG").unwrap_or_else(|_| config.rust_log.clone());
-        let env_filter = EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
+        let env_filter =
+            EnvFilter::try_from_default_env().or_else(|_| EnvFilter::try_new(&rust_log_env))?;
         let subscriber = Registry::default().with(env_filter);
-        
+
         if config.log_format == "json" {
             let suts_formatter = SutsFormatter::new(
                 "media-service".to_string(),
@@ -43,14 +45,16 @@ impl App {
                 config.node_hostname.clone(),
                 config.tenant_id.clone(), // [ARCH-COMPLIANCE] Tenant enjekte edildi
             );
-            subscriber.with(fmt::layer().event_format(suts_formatter)).init();
+            subscriber
+                .with(fmt::layer().event_format(suts_formatter))
+                .init();
         } else {
             subscriber.with(fmt::layer().compact()).init();
         }
 
         let metrics_addr = format!("0.0.0.0:{}", config.metrics_port).parse()?;
         start_metrics_server(metrics_addr);
-        
+
         info!(
             event = "SYSTEM_STARTUP",
             service_name = "sentiric-media-service",
@@ -70,13 +74,17 @@ impl App {
             let app_state = Self::setup_dependencies(app_config.clone()).await?;
             let reclamation_manager = app_state.port_manager.clone();
             let quarantine_duration = app_config.rtp_port_quarantine_duration;
-            
+
             tokio::spawn(async move {
-                reclamation_manager.run_reclamation_task(quarantine_duration).await;
+                reclamation_manager
+                    .run_reclamation_task(quarantine_duration)
+                    .await;
             });
-            
-            let tls_config = load_server_tls_config(&app_config).await.context("TLS konfigürasyonu yüklenemedi")?;
-            
+
+            let tls_config = load_server_tls_config(&app_config)
+                .await
+                .context("TLS konfigürasyonu yüklenemedi")?;
+
             let media_service = MyMediaService::new(app_config.clone(), app_state);
             let server_addr = app_config.grpc_listen_addr;
             info!(event="GRPC_SERVER_START", address = %server_addr, "Güvenli gRPC sunucusu başlatılıyor...");
@@ -86,15 +94,15 @@ impl App {
                 .add_service(MediaServiceServer::new(media_service))
                 .serve_with_shutdown(server_addr, async {
                     shutdown_rx.recv().await;
-                    info!(event="GRPC_SHUTDOWN_SIGNAL", "gRPC sunucusu kapanıyor.");
+                    info!(event = "GRPC_SHUTDOWN_SIGNAL", "gRPC sunucusu kapanıyor.");
                 });
-            
+
             server.await.context("gRPC sunucusu hatayla sonlandı")
         });
 
         tokio::select! {
-            res = server_handle => { 
-                if let Err(e) = res { error!(event="SERVER_ERROR", error=%e, "Sunucu hatası"); } 
+            res = server_handle => {
+                if let Err(e) = res { error!(event="SERVER_ERROR", error=%e, "Sunucu hatası"); }
             },
             _ = tokio::signal::ctrl_c() => {
                 warn!(event="SIGINT", "Kapatma sinyali alındı.");
@@ -102,17 +110,18 @@ impl App {
         }
 
         let _ = shutdown_tx.send(()).await;
-        info!(event="SYSTEM_STOPPED", "Servis durduruldu.");
+        info!(event = "SYSTEM_STOPPED", "Servis durduruldu.");
         Ok(())
     }
 
     async fn setup_dependencies(config: Arc<AppConfig>) -> Result<AppState> {
         let s3_client = Self::create_s3_client(config.clone()).await?;
         let rabbit_channel = Self::create_rabbitmq_channel(config.clone()).await?;
-        let port_manager = PortManager::new(config.rtp_port_min, config.rtp_port_max, config.clone());
-        
+        let port_manager =
+            PortManager::new(config.rtp_port_min, config.rtp_port_max, config.clone());
+
         let app_state = AppState::new(port_manager, s3_client, rabbit_channel);
-        
+
         Ok(app_state)
     }
 
@@ -123,32 +132,52 @@ impl App {
                 .region(region)
                 .endpoint_url(&s3_config.endpoint_url)
                 .credentials_provider(Credentials::new(
-                    &s3_config.access_key_id, &s3_config.secret_access_key, None, None, "Static",
-                )).load().await;
-            
-            let s3_client_config = S3ConfigBuilder::from(&sdk_config).force_path_style(true).build();
+                    &s3_config.access_key_id,
+                    &s3_config.secret_access_key,
+                    None,
+                    None,
+                    "Static",
+                ))
+                .load()
+                .await;
+
+            let s3_client_config = S3ConfigBuilder::from(&sdk_config)
+                .force_path_style(true)
+                .build();
             let client = S3Client::from_conf(s3_client_config);
-            
-            match client.head_bucket().bucket(&s3_config.bucket_name).send().await {
+
+            match client
+                .head_bucket()
+                .bucket(&s3_config.bucket_name)
+                .send()
+                .await
+            {
                 Ok(_) => {
                     info!(event="S3_BUCKET_READY", bucket=%s3_config.bucket_name, "S3 Bucket mevcut ve hazır.");
-                },
+                }
                 Err(_) => {
                     warn!(event="S3_BUCKET_NOT_FOUND", bucket=%s3_config.bucket_name, "Bucket bulunamadı. Otomatik olarak oluşturuluyor...");
-                    if let Err(e) = client.create_bucket().bucket(&s3_config.bucket_name).send().await {
+                    if let Err(e) = client
+                        .create_bucket()
+                        .bucket(&s3_config.bucket_name)
+                        .send()
+                        .await
+                    {
                         error!(event="S3_BUCKET_CREATE_FAIL", error=?e, "Bucket oluşturulamadı!");
                     } else {
                         info!(event="S3_BUCKET_CREATED", bucket=%s3_config.bucket_name, "✅ S3 Bucket başarıyla oluşturuldu.");
                     }
                 }
             }
-            
+
             return Ok(Some(Arc::new(client)));
         }
         Ok(None)
     }
 
-    async fn create_rabbitmq_channel(config: Arc<AppConfig>) -> Result<Option<Arc<lapin::Channel>>> {
+    async fn create_rabbitmq_channel(
+        config: Arc<AppConfig>,
+    ) -> Result<Option<Arc<lapin::Channel>>> {
         if let Some(url) = &config.rabbitmq_url {
             let channel = rabbitmq::connect_with_retry(url).await?;
             rabbitmq::declare_exchange(&channel).await?;

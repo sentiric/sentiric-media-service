@@ -1,6 +1,9 @@
 // src/metrics.rs
 
-use hyper::{service::{make_service_fn, service_fn}, Body, Request, Response, Server as HyperServer, StatusCode};
+use hyper::{
+    service::{make_service_fn, service_fn},
+    Body, Request, Response, Server as HyperServer, StatusCode,
+};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use std::convert::Infallible;
 use std::net::SocketAddr;
@@ -13,12 +16,15 @@ pub const ACTIVE_SESSIONS: &str = "sentiric_media_active_sessions";
 pub const RECORDING_BUFFER_BYTES: &str = "sentiric_media_recording_buffer_bytes";
 pub const S3_UPLOAD_FAILURES: &str = "sentiric_media_s3_upload_failures_total";
 
-async fn route_handler(req: Request<Body>, recorder_handle: PrometheusHandle) -> Result<Response<Body>, Infallible> {
+async fn route_handler(
+    req: Request<Body>,
+    recorder_handle: PrometheusHandle,
+) -> Result<Response<Body>, Infallible> {
     match (req.method(), req.uri().path()) {
         (&hyper::Method::GET, "/metrics") => {
             let metrics = recorder_handle.render();
             Ok(Response::new(Body::from(metrics)))
-        },
+        }
         (&hyper::Method::GET, "/healthz") => {
             let response = Response::builder()
                 .status(StatusCode::OK)
@@ -26,7 +32,7 @@ async fn route_handler(req: Request<Body>, recorder_handle: PrometheusHandle) ->
                 .body(Body::from(r#"{"status":"ok"}"#))
                 .unwrap_or_default();
             Ok(response)
-        },
+        }
         _ => {
             let mut not_found = Response::default();
             *not_found.status_mut() = StatusCode::NOT_FOUND;
@@ -51,7 +57,7 @@ pub fn start_metrics_server(addr: SocketAddr) {
         });
 
         let server = HyperServer::bind(&addr).serve(make_svc);
-        
+
         info!(address = %addr, "Prometheus metrik ve sağlık sunucusu dinlemeye başlıyor...");
         if let Err(e) = server.await {
             error!(error = %e, "Metrik/sağlık sunucusu hatası.");

@@ -1,20 +1,22 @@
 // sentiric-media-service/src/rtp/session.rs
-use crate::rtp::codecs::AudioCodec;
-use crate::rtp::command::{RtpCommand, AudioFrame, RecordingSession};
-use crate::rtp::session_handlers; 
-use crate::state::AppState;
 use crate::config::AppConfig;
+use crate::rtp::codecs::AudioCodec;
+use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
+use crate::rtp::session_handlers;
+use crate::state::AppState;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{Duration, Instant, MissedTickBehavior}; 
-use tracing::{info, error, instrument, warn}; 
-use std::collections::VecDeque;
+use tokio::time::{Duration, Instant, MissedTickBehavior};
+use tracing::{error, info, instrument, warn};
 
 use crate::metrics::{ACTIVE_SESSIONS, RECORDING_BUFFER_BYTES};
 use metrics::gauge;
 
-use sentiric_rtp_core::{RtpHeader, RtpPacket, RtpEndpoint, JitterBuffer, AudioProfile, CodecFactory, Decoder, Encoder};
+use sentiric_rtp_core::{
+    AudioProfile, CodecFactory, Decoder, Encoder, JitterBuffer, RtpEndpoint, RtpHeader, RtpPacket,
+};
 
 #[derive(Clone)]
 pub struct RtpSessionConfig {
@@ -33,23 +35,39 @@ pub struct RtpSession {
 }
 
 impl RtpSession {
-    pub fn new(trace_id: String, call_id: String, port: u16, socket: Arc<tokio::net::UdpSocket>, app_state: AppState) -> Arc<Self> {
+    pub fn new(
+        trace_id: String,
+        call_id: String,
+        port: u16,
+        socket: Arc<tokio::net::UdpSocket>,
+        app_state: AppState,
+    ) -> Arc<Self> {
         let (command_tx, command_rx) = mpsc::channel(128);
         let (egress_tx, egress_rx) = mpsc::channel(8192);
 
-        let session = Arc::new(Self { 
-            call_id, trace_id, port, command_tx, egress_tx, app_state: app_state.clone() 
+        let session = Arc::new(Self {
+            call_id,
+            trace_id,
+            port,
+            command_tx,
+            egress_tx,
+            app_state: app_state.clone(),
         });
         tokio::spawn(Self::run(session.clone(), socket, command_rx, egress_rx));
         session
     }
 
-    pub async fn send_command(&self, command: RtpCommand) -> Result<(), mpsc::error::SendError<RtpCommand>> {
+    pub async fn send_command(
+        &self,
+        command: RtpCommand,
+    ) -> Result<(), mpsc::error::SendError<RtpCommand>> {
         self.command_tx.send(command).await
     }
 
     fn parse_rtp_packet(data: Vec<u8>) -> Option<RtpPacket> {
-        if data.len() < 12 { return None; }
+        if data.len() < 12 {
+            return None;
+        }
         let header = RtpHeader {
             version: (data[0] >> 6) & 0x03,
             padding: (data[0] >> 5) & 0x01 != 0,
@@ -66,9 +84,14 @@ impl RtpSession {
     }
 
     #[instrument(skip_all, fields(port = self.port, call_id = %self.call_id, trace_id = %self.trace_id))]
-    async fn run(self: Arc<Self>, socket: Arc<tokio::net::UdpSocket>, mut command_rx: mpsc::Receiver<RtpCommand>, mut egress_rx: mpsc::Receiver<Vec<i16>>) {
+    async fn run(
+        self: Arc<Self>,
+        socket: Arc<tokio::net::UdpSocket>,
+        mut command_rx: mpsc::Receiver<RtpCommand>,
+        mut egress_rx: mpsc::Receiver<Vec<i16>>,
+    ) {
         let gain_multiplier = self.app_state.port_manager.config.audio_recording_gain;
-        
+
         info!(
             event = "RTP_SESSION_START",
             resource.service.name = "media-service",
@@ -76,12 +99,14 @@ impl RtpSession {
             "🎧 RTP Oturumu Başlatıldı (Strict 20ms Sync Engine Devrede)"
         );
 
-        let live_stream_sender: Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>> = Arc::new(Mutex::new(None));
+        let live_stream_sender: Arc<
+            Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>,
+        > = Arc::new(Mutex::new(None));
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
         let endpoint = RtpEndpoint::new(None);
-        
+
         let mut jitter_buffer = JitterBuffer::new(100, 60);
-        
+
         // [ARCH-COMPLIANCE] O(N) drain darboğazını önlemek için Vec yerine VecDeque kullanıldı.
         let mut egress_queue: VecDeque<i16> = VecDeque::with_capacity(16000);
 
@@ -90,7 +115,7 @@ impl RtpSession {
         let mut total_packets_rx = 0u64;
         let mut jitter_acc = 0.0f64;
         let mut last_arrival = Instant::now();
-        
+
         let mut echo_mode = false;
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
@@ -99,27 +124,28 @@ impl RtpSession {
         let mut tx_seq: u16 = rand::random();
         let mut tx_ts: u32 = rand::random();
 
-        let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(2048); 
-        
+        let (rtp_packet_tx, mut rtp_packet_rx) = mpsc::channel::<(Vec<u8>, SocketAddr)>(2048);
+
         tokio::spawn({
             let socket = socket.clone();
             async move {
-                let mut buf =[0u8; 2048];
+                let mut buf = [0u8; 2048];
                 while let Ok((len, addr)) = socket.recv_from(&mut buf).await {
-                    let _ = rtp_packet_tx.try_send((buf[..len].to_vec(), addr)); 
+                    let _ = rtp_packet_tx.try_send((buf[..len].to_vec(), addr));
                 }
             }
         });
 
-        let mut playback_queue: std::collections::VecDeque<session_handlers::PlaybackJob> = std::collections::VecDeque::new();
+        let mut playback_queue: std::collections::VecDeque<session_handlers::PlaybackJob> =
+            std::collections::VecDeque::new();
         let mut is_playing = false;
         let (finished_tx, mut finished_rx) = mpsc::channel(1);
-        
+
         let mut stats_ticker = tokio::time::interval(Duration::from_secs(5));
-        
+
         let mut ptime_ticker = tokio::time::interval(Duration::from_millis(20));
         ptime_ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
-        
+
         let mut last_activity = Instant::now();
 
         let session_config = RtpSessionConfig {
@@ -130,10 +156,12 @@ impl RtpSession {
 
         let default_profile = AudioProfile::default();
         let initial_codec = default_profile.preferred_audio_codec();
-        
+
         let mut active_payload_type: Option<u8> = Some(initial_codec as u8);
-        let mut active_decoder: Option<Box<dyn Decoder>> = Some(CodecFactory::create_decoder(initial_codec));
-        let mut active_encoder: Option<Box<dyn Encoder>> = Some(CodecFactory::create_encoder(initial_codec));
+        let mut active_decoder: Option<Box<dyn Decoder>> =
+            Some(CodecFactory::create_decoder(initial_codec));
+        let mut active_encoder: Option<Box<dyn Encoder>> =
+            Some(CodecFactory::create_encoder(initial_codec));
 
         info!(event = "RTP_ENGINE_READY", codec = ?initial_codec, "🚀 Medya Motoru önbellekten yüklendi.");
 
@@ -148,8 +176,8 @@ impl RtpSession {
                 Some((data, addr)) = rtp_packet_rx.recv() => {
                     last_activity = Instant::now();
                     total_packets_rx += 1;
-                    if endpoint.latch(addr) { 
-                        info!(event = "RTP_LATCH_LOCKED", sip.call_id = %self.call_id, peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Medya Hedefi Kilitlendi"); 
+                    if endpoint.latch(addr) {
+                        info!(event = "RTP_LATCH_LOCKED", sip.call_id = %self.call_id, peer.ip = %addr.ip(), peer.port = addr.port(), "🔒 Medya Hedefi Kilitlendi");
                     }
 
                     if let Some(packet) = Self::parse_rtp_packet(data) {
@@ -169,7 +197,7 @@ impl RtpSession {
                             }
                         }
                         last_seq = Some(seq);
-                        
+
                         if active_payload_type != Some(packet.header.payload_type) {
                             if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                                 active_decoder = Some(CodecFactory::create_decoder(codec.to_core_type()));
@@ -189,10 +217,10 @@ impl RtpSession {
                 Some(cmd) = command_rx.recv() => {
                      last_activity = Instant::now();
                      if matches!(cmd, RtpCommand::Shutdown) { break; }
-                     
+
                      if session_handlers::handle_command(
-                         cmd, &live_stream_sender, &recording_session, 
-                         &mut playback_queue, &mut is_playing, &mut echo_mode, 
+                         cmd, &live_stream_sender, &recording_session,
+                         &mut playback_queue, &mut is_playing, &mut echo_mode,
                          &session_config, &self.egress_tx, &finished_tx, &mut known_target, &endpoint, &self.call_id
                      ).await { break; }
                 },
@@ -223,7 +251,7 @@ impl RtpSession {
                     if rx_has_audio {
                         if let Some(tx) = &*live_stream_sender.lock().await {
                             let pcm_16k = sentiric_rtp_core::simple_resample(&rx_frame, 8000, 16000);
-                            let mut b = Vec::with_capacity(pcm_16k.len() * 2); 
+                            let mut b = Vec::with_capacity(pcm_16k.len() * 2);
                             for s in &pcm_16k { b.extend_from_slice(&s.to_le_bytes()); }
                             let _ = tx.try_send(Ok(AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
                         }
@@ -239,16 +267,16 @@ impl RtpSession {
                             tx_frame[i] = egress_queue.pop_front().unwrap_or(0);
                         }
                     } else {
-                        tx_frame.fill(0); 
+                        tx_frame.fill(0);
                     }
-                        
+
                     if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                         if let Some(enc) = &mut active_encoder {
                             let payload = enc.encode(&tx_frame);
                             let header = RtpHeader::new(enc.get_type() as u8, tx_seq, tx_ts, server_ssrc);
                             let packet = RtpPacket { header, payload };
                             let _ = socket.send_to(&packet.to_bytes(), target).await;
-                            
+
                             tx_seq = tx_seq.wrapping_add(1);
                             tx_ts = tx_ts.wrapping_add(160);
                             echo_tx_count += 1;
@@ -256,7 +284,7 @@ impl RtpSession {
                     }
 
                     if let Some(rec) = &mut *recording_session.lock().await {
-                        const MAX_SAMPLES: usize = 57_600_000; 
+                        const MAX_SAMPLES: usize = 57_600_000;
                         if rec.rx_buffer.len() + 160 <= MAX_SAMPLES {
                             rec.rx_buffer.extend_from_slice(&rx_frame);
                             rec.tx_buffer.extend_from_slice(&tx_frame);
@@ -284,18 +312,27 @@ impl RtpSession {
                      }
                 }
             }
-        } 
-        
-        if let Some(rec) = recording_session.lock().await.take() { 
-            match crate::rtp::session_utils::finalize_and_save_recording(rec, self.app_state.clone()).await {
-                Ok(_) => info!(event="RECORDING_SAVED", sip.call_id=%self.call_id, "💾 Stereo kayıt başarıyla S3'e yüklendi."),
-                Err(e) => error!(event="RECORDING_FAIL", sip.call_id=%self.call_id, error=%e, "❌ Kayıt S3'e yazılamadı!"),
+        }
+
+        if let Some(rec) = recording_session.lock().await.take() {
+            match crate::rtp::session_utils::finalize_and_save_recording(
+                rec,
+                self.app_state.clone(),
+            )
+            .await
+            {
+                Ok(_) => {
+                    info!(event="RECORDING_SAVED", sip.call_id=%self.call_id, "💾 Stereo kayıt başarıyla S3'e yüklendi.")
+                }
+                Err(e) => {
+                    error!(event="RECORDING_FAIL", sip.call_id=%self.call_id, error=%e, "❌ Kayıt S3'e yazılamadı!")
+                }
             }
         }
-        
+
         self.app_state.port_manager.remove_session(self.port).await;
         self.app_state.port_manager.quarantine_port(self.port).await;
-        
+
         gauge!(ACTIVE_SESSIONS).decrement(1.0);
         info!(event = "RTP_SESSION_END", sip.call_id = %self.call_id, "🛑 RTP Oturumu Sonlandırıldı.");
     }

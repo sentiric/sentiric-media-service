@@ -1,5 +1,5 @@
-use rustls::crypto::CryptoProvider;
 use rustls::crypto::ring::default_provider;
+use rustls::crypto::CryptoProvider;
 use sentiric_media_service::app::App;
 
 #[tokio::main]
