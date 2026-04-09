@@ -113,13 +113,14 @@ pub async fn handle_command(
 }
 
 pub async fn start_playback(
-    job: PlaybackJob,
+    mut job: PlaybackJob, // [ARCH-COMPLIANCE] responder'ı take() edebilmek için mut yapıldı
     config: &RtpSessionConfig,
     egress_tx: mpsc::Sender<Vec<i16>>,
     finished_tx: mpsc::Sender<()>,
     call_id: &str,
 ) {
-    let responder = job.responder;
+    // [ARCH-COMPLIANCE] Responder'ı görevden ayırıyoruz ki asenkron thread'e girmeden önce yanıt dönebilelim.
+    let responder = job.responder.take();
     let uri = job.audio_uri.clone();
     let call_id_owned = call_id.to_string();
     let app_state = config.app_state.clone();
@@ -135,11 +136,17 @@ pub async fn start_playback(
     .await
     {
         Ok(samples) => {
+            // [ARCH-COMPLIANCE] finite_state_assurance Kuralı:
+            // Ses dosyası RAM'e başarıyla yüklendiği an gRPC çağrısına "OK" dönülür!
+            // Workflow-service asla anonsun bitmesini senkron olarak beklemez.
+            if let Some(tx) = responder {
+                let _ = tx.send(Ok(()));
+            }
+
             tokio::spawn(async move {
                 info!(event = "MEDIA_PLAYBACK_START", sip.call_id = %call_id_owned, uri = %uri, "🚀 Medya PCM chunk'ları Egress kanalına basılıyor.");
 
-                let mut res = Ok(());
-
+                let mut res_ok = true;
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -149,24 +156,27 @@ pub async fn start_playback(
                     interval.tick().await;
 
                     if let Err(e) = egress_tx.send(chunk.to_vec()).await {
-                        debug!(event = "EGRESS_SEND_ERROR", error = %e, "Egress channel closed");
-                        res = Err(anyhow::anyhow!("Egress channel closed"));
+                        tracing::debug!(event = "EGRESS_SEND_ERROR", error = %e, "Egress channel closed");
+                        res_ok = false;
                         break;
                     }
                 }
 
-                if res.is_ok() {
+                // Anons başarıyla bittiyse RabbitMQ'ya Asenkron Event fırlat
+                if res_ok {
                     if let Some(channel) = &app_state.rabbitmq_publisher {
                         let json_payload = serde_json::json!({ "callId": call_id_owned, "uri": uri }).to_string();
-                        let event = GenericEvent {
+                        let event = sentiric_contracts::sentiric::event::v1::GenericEvent {
                             event_type: "call.media.playback.finished".to_string(),
                             trace_id: call_id_owned.clone(),
-                            timestamp: Some(prost_types::Timestamp::from(SystemTime::now())),
+                            timestamp: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
                             tenant_id: tenant_id_owned,
                             payload_json: json_payload,
                         };
+                        use lapin::{options::BasicPublishOptions, BasicProperties};
+                        use prost::Message;
                         let _ = channel.basic_publish(
-                            rabbitmq::EXCHANGE_NAME,
+                            crate::rabbitmq::EXCHANGE_NAME,
                             "call.media.playback.finished",
                             BasicPublishOptions::default(),
                             &event.encode_to_vec(),
@@ -175,7 +185,6 @@ pub async fn start_playback(
                     }
                 }
 
-                if let Some(tx) = responder { let _ = tx.send(res); }
                 let _ = finished_tx.try_send(());
             }.instrument(span));
         }
