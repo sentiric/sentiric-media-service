@@ -1,7 +1,7 @@
 // Dosya: sentiric-media-service/src/rtp/session.rs
 use crate::config::AppConfig;
 use crate::rtp::codecs::AudioCodec;
-use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
+use crate::rtp::command::{RecordingSession, RtpCommand};
 use crate::rtp::session_handlers;
 use crate::state::AppState;
 use std::collections::VecDeque;
@@ -233,8 +233,6 @@ impl RtpSession {
                     let mut rx_has_audio = false;
                     let mut decoded_samples = Vec::new();
 
-                    // [CRITICAL FIX]: Gelen veri boyutu (160) kısıtlaması kaldırıldı.
-                    // Decoder'ın döndüğü tüm ham ses tamponlanır ve işlenir.
                     if let Some(packet) = jitter_buffer.pop() {
                         if let Some(ref mut decoder) = active_decoder {
                             if packet.header.payload_type != 101 {
@@ -305,10 +303,8 @@ impl RtpSession {
                     if let Some(rec) = &mut *recording_session.lock().await {
                         const MAX_SAMPLES: usize = 57_600_000;
                         if rec.rx_buffer.len() + 160 <= MAX_SAMPLES {
-                            // Dinamik boyutlu sesin TAMAMINI kayıt bufferına ekle (Veri kaybını önler)
                             if rx_has_audio {
                                 rec.rx_buffer.extend_from_slice(&decoded_samples);
-                                // TX tarafını da RX boyutunda sıfırlarla uydur (Senkronizasyon için)
                                 let mut tx_pad = vec![0i16; decoded_samples.len()];
                                 let copy_len = tx_frame.len().min(decoded_samples.len());
                                 tx_pad[..copy_len].copy_from_slice(&tx_frame[..copy_len]);
