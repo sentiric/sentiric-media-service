@@ -68,18 +68,55 @@ impl RtpSession {
         if data.len() < 12 {
             return None;
         }
+
+        let version = (data[0] >> 6) & 0x03;
+        if version != 2 {
+            return None;
+        }
+
+        let padding = (data[0] >> 5) & 0x01 != 0;
+        let extension = (data[0] >> 4) & 0x01 != 0;
+        let csrc_count = data[0] & 0x0F;
+
         let header = RtpHeader {
-            version: (data[0] >> 6) & 0x03,
-            padding: (data[0] >> 5) & 0x01 != 0,
-            extension: (data[0] >> 4) & 0x01 != 0,
-            csrc_count: data[0] & 0x0F,
+            version,
+            padding,
+            extension,
+            csrc_count,
             marker: (data[1] >> 7) & 0x01 != 0,
             payload_type: data[1] & 0x7F,
             sequence_number: u16::from_be_bytes([data[2], data[3]]),
             timestamp: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
             ssrc: u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
         };
-        let payload = data[12..].to_vec();
+
+        // [ARCH-COMPLIANCE] RFC 3550: Calculate exact payload offset skipping CSRCs and Extensions
+        let mut offset = 12 + (csrc_count as usize * 4);
+        if data.len() < offset {
+            return None;
+        }
+
+        if extension {
+            if data.len() < offset + 4 {
+                return None;
+            }
+            let ext_len = u16::from_be_bytes([data[offset + 2], data[offset + 3]]) as usize * 4;
+            offset += 4 + ext_len;
+        }
+
+        if data.len() < offset {
+            return None;
+        }
+
+        let mut end_offset = data.len();
+        if padding {
+            let pad_len = data[data.len() - 1] as usize;
+            if pad_len > 0 && offset + pad_len <= data.len() {
+                end_offset -= pad_len;
+            }
+        }
+
+        let payload = data[offset..end_offset].to_vec();
         Some(RtpPacket { header, payload })
     }
 
@@ -104,12 +141,14 @@ impl RtpSession {
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
         let endpoint = RtpEndpoint::new(None);
 
-        // [CRITICAL FIX]: Katı JitterBuffer yerine Sıvı (Fluid) Ingress Queue!
-        // Gelen her ses pakedi anında çözülüp bu kuyruğa atılır.
         let mut ingress_queue: VecDeque<i16> = VecDeque::with_capacity(32000);
         let mut egress_queue: VecDeque<i16> = VecDeque::with_capacity(32000);
 
-        let packet_loss_count = 0u64; // mut KALDIRILDI
+        // [CRITICAL FIX] Jitter Buffer durum yöneticisi
+        let mut is_buffering = true;
+
+        // ... (packet_loss_count vb. tanımlamalar aynı kalacak) ...
+        let packet_loss_count = 0u64; // mut kaldırılmıştı hatırlarsanız
         let mut total_packets_rx = 0u64;
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
@@ -228,16 +267,26 @@ impl RtpSession {
                     let mut tx_frame = vec![0i16; 160];
                     let mut rx_has_audio = false;
 
-                    // 2. DÜZELTME: ptime_ticker döngüsü içindeki (Satır ~220 civarı) INGRESS bölümü
-                    // 1. INGRESS (Müşteriden Gelen Sesi Çek)
-                    if ingress_queue.len() >= 160 {
-                        for item in rx_frame.iter_mut().take(160) {
-                            *item = ingress_queue.pop_front().unwrap_or(0);
+                    // 1. INGRESS JITTER BUFFER (Müşteriden Gelen Sesi Çek)
+                    if is_buffering {
+                        // 4 paketlik (80ms) avans bekliyoruz
+                        if ingress_queue.len() >= 640 {
+                            is_buffering = false;
                         }
-                        rx_has_audio = true;
                     }
-                    // [CRITICAL FIX] Jitter Buffer faz hizalaması (Phase Alignment) için `else if` bloğu BURADAN SİLİNDİ.
-                    // Eksik paket varsa zero-pad yapmak yerine sessizce frame'in tamamlanmasını bekliyoruz. Cızırtıyı (crackling) sıfırlar.
+
+                    if !is_buffering {
+                        if ingress_queue.len() >= 160 {
+                            for item in rx_frame.iter_mut().take(160) {
+                                *item = ingress_queue.pop_front().unwrap_or(0);
+                            }
+                            rx_has_audio = true;
+                        } else {
+                            // [CRITICAL FIX] Starvation (Kuyruk açlığı) oluştu.
+                            // Cızırtı (Crackling) olmaması için sessizce Buffering moduna geri dön.
+                            is_buffering = true;
+                        }
+                    }
 
                     // 2. SESİ DAĞIT (Echo ve AI için)
                     if rx_has_audio {
