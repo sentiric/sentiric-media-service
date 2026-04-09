@@ -106,7 +106,7 @@ pub async fn handle_command(
 }
 
 pub async fn start_playback(
-    mut job: PlaybackJob, // [ARCH-COMPLIANCE] Responder'ı ayırmak için mut yapıldı
+    mut job: PlaybackJob,
     config: &RtpSessionConfig,
     egress_tx: mpsc::Sender<Vec<i16>>,
     finished_tx: mpsc::Sender<()>,
@@ -127,19 +127,17 @@ pub async fn start_playback(
     .await
     {
         Ok(samples) => {
-            // [ARCH-COMPLIANCE] Ses dosyası RAM'e yüklendiği an gRPC yanıtı dönülür.
             if let Some(tx) = responder {
                 let _ = tx.send(Ok(()));
             }
 
             tokio::spawn(async move {
-                info!(event = "MEDIA_PLAYBACK_START", sip.call_id = %call_id_owned, uri = %uri, "🚀 Medya PCM chunk'ları Egress kanalına basılıyor.");
+                tracing::info!(event = "MEDIA_PLAYBACK_START", sip.call_id = %call_id_owned, uri = %uri, "🚀 Medya PCM chunk'ları Egress kanalına basılıyor.");
 
                 let mut res_ok = true;
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                // [CRITICAL FIX] Cızırtıyı (crackling) önlemek için 10 paketlik (200ms) avans (pre-buffer)
                 let mut pre_buffer = 10;
 
                 for chunk in samples.chunks(160) {
@@ -168,10 +166,8 @@ pub async fn start_playback(
                             tenant_id: tenant_id_owned,
                             payload_json: json_payload,
                         };
-                        
                         use lapin::{options::BasicPublishOptions, BasicProperties};
                         use prost::Message;
-                        
                         let _ = channel.basic_publish(
                             crate::rabbitmq::EXCHANGE_NAME,
                             "call.media.playback.finished",
@@ -186,7 +182,7 @@ pub async fn start_playback(
             }.instrument(span));
         }
         Err(e) => {
-            error!(event = "MEDIA_PLAYBACK_ERROR", error = %e, "Medya oynatma hatası");
+            tracing::error!(event = "MEDIA_PLAYBACK_ERROR", error = %e, "Medya oynatma hatası");
             if let Some(tx) = responder {
                 let _ = tx.send(Err(anyhow::anyhow!("Playback error: {}", e)));
             }

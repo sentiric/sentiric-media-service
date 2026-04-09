@@ -218,8 +218,16 @@ impl RtpSession {
                     }
 
                     if let Some(packet) = Self::parse_rtp_packet(data) {
+                        // [ARCH-COMPLIANCE] Baresip gibi istemcilerden sızan RTCP (192-205) paketlerini yoksay.
+                        // Aksi halde ses decoder'ına girip kuyruğu bozabilir.
+                        if packet.header.payload_type >= 192 && packet.header.payload_type <= 205 {
+                            continue; // Bu paketi yoksay ve döngüye devam et
+                        }
+
                         // Kodek Güncelleme
                         if active_payload_type != Some(packet.header.payload_type) {
+                            use crate::rtp::codecs::AudioCodec;
+                            use sentiric_rtp_core::CodecFactory;
                             if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                                 active_decoder = Some(CodecFactory::create_decoder(codec.to_core_type()));
                                 active_encoder = Some(CodecFactory::create_encoder(codec.to_core_type()));
@@ -227,8 +235,7 @@ impl RtpSession {
                             }
                         }
 
-                        // [CRITICAL FIX]: Gelen paketi ANINDA çöz ve Ingress Kuyruğuna At!
-                        // JitterBuffer'ın paketi çöpe atmasına izin verme.
+                        // Gelen paketi ANINDA çöz ve Ingress Kuyruğuna At!
                         if packet.header.payload_type != 101 {
                             if let Some(ref mut decoder) = active_decoder {
                                 let raw_pcm = decoder.decode(&packet.payload);
