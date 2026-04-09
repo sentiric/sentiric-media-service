@@ -1,4 +1,4 @@
-// Dosya: src/rtp/session.rs
+// Dosya: sentiric-media-service/src/rtp/session.rs
 use crate::config::AppConfig;
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
@@ -9,7 +9,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::{Duration, Instant, MissedTickBehavior};
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::metrics::{ACTIVE_SESSIONS, RECORDING_BUFFER_BYTES};
 use metrics::gauge;
@@ -99,10 +99,8 @@ impl RtpSession {
             "🎧 RTP Oturumu Başlatıldı (Strict 20ms Sync Engine Devrede)"
         );
 
-        // [CLIPPY FIX]: type_complexity çözümü (command.rs içindeki Type Alias kullanılıyor)
         let live_stream_sender: crate::rtp::command::SharedLiveStreamSender =
             Arc::new(Mutex::new(None));
-
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
         let endpoint = RtpEndpoint::new(None);
 
@@ -167,13 +165,11 @@ impl RtpSession {
         loop {
             let timeout = session_config.app_config.rtp_session_inactivity_timeout;
 
-            // [ARCH-COMPLIANCE FIX]: Smart Media, Dumb Logic.
-            // Media Service sessizlik yüzünden kendi kendine çağrıyı sonlandıramaz.
             if last_activity.elapsed() > timeout {
                 warn!(
                     event = "RTP_INACTIVITY_WARNING",
                     sip.call_id = %self.call_id,
-                    "⚠️ RTP trafiği alınamıyor (Sessizlik). Oturum kapatılmıyor, B2BUA gRPC emri (ReleasePort) bekleniyor."
+                    "⚠️ RTP trafiği alınamıyor. B2BUA gRPC emri bekleniyor."
                 );
                 last_activity = Instant::now();
             }
@@ -235,39 +231,55 @@ impl RtpSession {
                     let mut rx_frame = vec![0i16; 160];
                     let mut tx_frame = vec![0i16; 160];
                     let mut rx_has_audio = false;
+                    let mut decoded_samples = Vec::new();
 
+                    // [CRITICAL FIX]: Gelen veri boyutu (160) kısıtlaması kaldırıldı.
+                    // Decoder'ın döndüğü tüm ham ses tamponlanır ve işlenir.
                     if let Some(packet) = jitter_buffer.pop() {
                         if let Some(ref mut decoder) = active_decoder {
                             if packet.header.payload_type != 101 {
                                 let raw_pcm = decoder.decode(&packet.payload);
-                                if raw_pcm.len() == 160 {
-                                    if (gain_multiplier - 1.0).abs() > f32::EPSILON {
-                                        for (i, &s) in raw_pcm.iter().enumerate() {
-                                            rx_frame[i] = ((s as f32 * gain_multiplier) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                                        }
-                                    } else {
-                                        rx_frame.copy_from_slice(&raw_pcm);
-                                    }
+                                if !raw_pcm.is_empty() {
+                                    decoded_samples = raw_pcm;
                                     rx_has_audio = true;
+                                } else {
+                                    debug!(event="DECODE_EMPTY", pt=packet.header.payload_type, "Decoder returned empty PCM data");
                                 }
                             }
                         }
                     }
 
+                    // Sesi işleme ve dağıtma (Echo, Live Stream, Record)
                     if rx_has_audio {
-                        if let Some(tx) = &*live_stream_sender.lock().await {
-                            let pcm_16k = sentiric_rtp_core::simple_resample(&rx_frame, 8000, 16000);
-                            let mut b = Vec::with_capacity(pcm_16k.len() * 2);
-                            for s in &pcm_16k { b.extend_from_slice(&s.to_le_bytes()); }
-                            let _ = tx.try_send(Ok(AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
+                        // 1. Standart Frame (Kayıt ve Hizalama için ilk 160 sample)
+                        let len_to_copy = decoded_samples.len().min(160);
+                        if (gain_multiplier - 1.0).abs() > f32::EPSILON {
+                            for i in 0..len_to_copy {
+                                rx_frame[i] = ((decoded_samples[i] as f32 * gain_multiplier) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+                            }
+                        } else {
+                            rx_frame[..len_to_copy].copy_from_slice(&decoded_samples[..len_to_copy]);
                         }
 
+                        // 2. AI Pipeline'a Canlı Akış (Tam Boyut)
+                        if let Some(tx) = &*live_stream_sender.lock().await {
+                            let pcm_16k = sentiric_rtp_core::simple_resample(&decoded_samples, 8000, 16000);
+                            let mut b = Vec::with_capacity(pcm_16k.len() * 2);
+                            for s in &pcm_16k { b.extend_from_slice(&s.to_le_bytes()); }
+                            let _ = tx.try_send(Ok(crate::rtp::command::AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
+                        }
+
+                        // 3. Echo Test (Tam Boyut)
                         if echo_mode {
-                            egress_queue.extend(rx_frame.iter().copied());
+                            if (gain_multiplier - 1.0).abs() > f32::EPSILON {
+                                egress_queue.extend(decoded_samples.iter().map(|&s| ((s as f32 * gain_multiplier) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16));
+                            } else {
+                                egress_queue.extend(decoded_samples.iter().copied());
+                            }
                         }
                     }
 
-                    // [CLIPPY FIX]: needless_range_loop
+                    // TX Queue İşleme (Dışarıya basılacak ses)
                     if egress_queue.len() >= 160 {
                         for item in tx_frame.iter_mut().take(160) {
                             *item = egress_queue.pop_front().unwrap_or(0);
@@ -289,12 +301,24 @@ impl RtpSession {
                         }
                     }
 
+                    // 4. Stereo Kayıt Birleştirme (RX = Müşteri Sesi, TX = Sistem Sesi)
                     if let Some(rec) = &mut *recording_session.lock().await {
                         const MAX_SAMPLES: usize = 57_600_000;
                         if rec.rx_buffer.len() + 160 <= MAX_SAMPLES {
-                            rec.rx_buffer.extend_from_slice(&rx_frame);
-                            rec.tx_buffer.extend_from_slice(&tx_frame);
-                            gauge!(RECORDING_BUFFER_BYTES).increment(640.0);
+                            // Dinamik boyutlu sesin TAMAMINI kayıt bufferına ekle (Veri kaybını önler)
+                            if rx_has_audio {
+                                rec.rx_buffer.extend_from_slice(&decoded_samples);
+                                // TX tarafını da RX boyutunda sıfırlarla uydur (Senkronizasyon için)
+                                let mut tx_pad = vec![0i16; decoded_samples.len()];
+                                let copy_len = tx_frame.len().min(decoded_samples.len());
+                                tx_pad[..copy_len].copy_from_slice(&tx_frame[..copy_len]);
+                                rec.tx_buffer.extend_from_slice(&tx_pad);
+                                gauge!(RECORDING_BUFFER_BYTES).increment((decoded_samples.len() * 4) as f64);
+                            } else {
+                                rec.rx_buffer.extend_from_slice(&rx_frame);
+                                rec.tx_buffer.extend_from_slice(&tx_frame);
+                                gauge!(RECORDING_BUFFER_BYTES).increment(640.0);
+                            }
                         } else if !rec.max_reached_warned {
                             warn!(event = "MAX_RECORDING_REACHED", sip.call_id = %self.call_id, "OOM Koruması aktif.");
                             rec.max_reached_warned = true;
@@ -320,7 +344,6 @@ impl RtpSession {
             }
         }
 
-        // B2BUA veya Workflow'dan gelen kesin "Kapat" komutuyla (Shutdown) buraya ulaşıldı. Kaydı tamamla.
         if let Some(rec) = recording_session.lock().await.take() {
             match crate::rtp::session_utils::finalize_and_save_recording(
                 rec,
