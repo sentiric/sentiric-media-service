@@ -1,5 +1,5 @@
-// sentiric-media-service/src/rtp/session_handlers.rs
-use super::command::{AudioFrame, RecordingSession, RtpCommand};
+// Dosya: src/rtp/session_handlers.rs
+use super::command::{RecordingSession, RtpCommand};
 use super::session::RtpSessionConfig;
 use crate::rabbitmq;
 use lapin::{options::BasicPublishOptions, BasicProperties};
@@ -23,7 +23,8 @@ pub struct PlaybackJob {
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     command: RtpCommand,
-    live_stream_sender: &Arc<Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>>,
+    // [CLIPPY FIX]: Type Complexity
+    live_stream_sender: &crate::rtp::command::SharedLiveStreamSender,
     recording_session: &Arc<Mutex<Option<RecordingSession>>>,
     playback_queue: &mut std::collections::VecDeque<PlaybackJob>,
     is_playing: &mut bool,
@@ -139,8 +140,6 @@ pub async fn start_playback(
 
                 let mut res = Ok(());
 
-                // [ARCH-COMPLIANCE] Ses dosyasının kanala Boca edilmesi (Buffering) engellendi.
-                // 20ms'lik metronom ile senkron ses aktarımı sağlandı.
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

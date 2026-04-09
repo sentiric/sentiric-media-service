@@ -1,9 +1,7 @@
-// sentiric-media-service/src/rtp/processing.rs
-
+// Dosya: src/rtp/processing.rs
 use sentiric_rtp_core::{AudioResampler, CodecFactory, CodecType, Encoder};
-use tracing::{info, warn}; // 'error' ve 'codecs' kaldırıldı
+use tracing::{info, warn};
 
-/// AudioProcessor: AI Pipeline (16kHz) ile RTP (8kHz) arasındaki köprüdür.
 pub struct AudioProcessor {
     encoder: Box<dyn Encoder>,
     accumulator: Vec<i16>,
@@ -37,7 +35,8 @@ impl AudioProcessor {
     }
 
     pub fn push_data(&mut self, data: Vec<u8>) {
-        if data.len() % 2 != 0 {
+        // [CLIPPY FIX]: manual_is_multiple_of
+        if !data.len().is_multiple_of(2) {
             warn!("⚠️ Malformed audio chunk received (odd length)");
             return;
         }
@@ -58,11 +57,7 @@ impl AudioProcessor {
         }
 
         let frame_16k: Vec<i16> = self.accumulator.drain(0..FRAME_SIZE_16K).collect();
-
-        // 1. Resampling (16k -> 8k) - Stateful
-        let frame_8k = self.resampler.process(&frame_16k); // .await KALDIRILDI
-
-        // 2. Encoding (8k -> RTP Payload)
+        let frame_8k = self.resampler.process(&frame_16k);
         let encoded = self.encoder.encode(&frame_8k);
 
         let payload_size = if self.current_codec == CodecType::G729 {

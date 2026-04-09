@@ -1,4 +1,4 @@
-// sentiric-media-service/src/rabbitmq.rs
+// Dosya: src/rabbitmq.rs
 use lapin::{
     options::*, types::FieldTable, BasicProperties, Channel as LapinChannel, Connection,
     ConnectionProperties, ExchangeKind,
@@ -10,7 +10,6 @@ use tracing::{error, info, warn};
 
 pub const EXCHANGE_NAME: &str = "sentiric_events";
 
-// [ARCH-COMPLIANCE] Sadece ilgili değiştirilen fonksiyon blokları
 pub async fn connect_with_retry(url: &str) -> anyhow::Result<Arc<LapinChannel>> {
     let mut attempt = 0;
     loop {
@@ -30,7 +29,9 @@ pub async fn connect_with_retry(url: &str) -> anyhow::Result<Arc<LapinChannel>> 
                         error!(event = "RABBITMQ_CONFIRM_ERROR", error = %e, "🚨 RabbitMQ Confirm Mode Error");
                     }
 
-                    let _ = conn.on_error(|err| error!(event = "RABBITMQ_CONN_ERROR", error = %err, "🚨 RabbitMQ Connection Error"));
+                    // [CLIPPY FIX]: let_unit_value
+                    conn.on_error(|err| error!(event = "RABBITMQ_CONN_ERROR", error = %err, "🚨 RabbitMQ Connection Error"));
+
                     return Ok(Arc::new(channel));
                 }
                 Err(e) => {

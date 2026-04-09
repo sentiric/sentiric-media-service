@@ -1,4 +1,4 @@
-// sentiric-media-service/src/rtp/session_utils.rs
+// Dosya: src/rtp/session_utils.rs
 use super::command::RecordingSession;
 use crate::metrics::RECORDING_BUFFER_BYTES;
 use crate::rabbitmq;
@@ -15,7 +15,6 @@ use tracing::{error, info, instrument};
 
 use sentiric_contracts::sentiric::event::v1::CallRecordingAvailableEvent;
 
-// [ARCH-COMPLIANCE] upload_to_s3 ve RabbitMQ event loglarındaki eksik bağlam onarılmıştır.
 #[instrument(skip_all, fields(call_id = %session.call_id))]
 pub async fn finalize_and_save_recording(
     session: RecordingSession,
@@ -28,7 +27,6 @@ pub async fn finalize_and_save_recording(
     gauge!(RECORDING_BUFFER_BYTES).decrement(((rx_len + tx_len) * 2) as f64);
 
     if max_len == 0 {
-        // [ARCH-COMPLIANCE] sip.call_id eklendi
         info!(event = "RECORDING_SKIPPED", sip.call_id = %session.call_id, "Boş kayıt, işlem atlanıyor.");
         return Ok(());
     }
@@ -79,7 +77,6 @@ pub async fn finalize_and_save_recording(
         .clone()
         .ok_or_else(|| anyhow!("S3 client eksik"))?;
 
-    // [ARCH-COMPLIANCE] Fonksiyon çağrısına session.call_id paslandı
     writers::upload_to_s3_with_retry(
         s3_client,
         &s3_config.bucket_name,
@@ -107,13 +104,13 @@ pub async fn finalize_and_save_recording(
         )
         .await
         {
-            //[ARCH-COMPLIANCE] sip.call_id loga eklendi.
             Ok(_) => {
                 info!(event = "RECORDING_EVENT_PUBLISHED", sip.call_id = %session.call_id, "📩 Stereo kayıt tamamlandı olayı (Confirmed) RabbitMQ'ya iletildi.")
             }
             Err(e) => {
                 error!(event = "RECORDING_EVENT_PUBLISH_FAIL", sip.call_id = %session.call_id, error = %e, "🔥 Kayıt S3'e yüklendi ama RabbitMQ'ya olay atılamadı!");
-                return Err(e.into());
+                // [CLIPPY FIX]: useless_conversion kaldırıldı
+                return Err(e);
             }
         }
     }

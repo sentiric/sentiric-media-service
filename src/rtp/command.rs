@@ -1,4 +1,4 @@
-// sentiric-media-service/src/rtp/command.rs
+// Dosya: src/rtp/command.rs
 use anyhow::Result;
 use bytes::Bytes;
 use hound::WavSpec;
@@ -7,19 +7,26 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tonic::Status;
 
+pub type SharedLiveStreamSender = std::sync::Arc<
+    tokio::sync::Mutex<
+        std::option::Option<
+            tokio::sync::mpsc::Sender<std::result::Result<AudioFrame, tonic::Status>>,
+        >,
+    >,
+>;
+
 #[derive(Debug)]
 pub struct AudioFrame {
     pub data: Bytes,
     pub media_type: String,
 }
 
-//[MİMARİ GÜNCELLEME]: Stereo Kayıt Desteği
 #[derive(Debug)]
 pub struct RecordingSession {
     pub output_uri: String,
     pub spec: WavSpec,
-    pub rx_buffer: Vec<i16>, // Müşteri sesi (Channel 0)
-    pub tx_buffer: Vec<i16>, // AI sesi (Channel 1)
+    pub rx_buffer: Vec<i16>,
+    pub tx_buffer: Vec<i16>,
     pub call_id: String,
     pub trace_id: String,
     pub max_reached_warned: bool,

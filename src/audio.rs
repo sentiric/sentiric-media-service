@@ -1,7 +1,7 @@
-// sentiric-media-service/src/audio.rs
+// Dosya: src/audio.rs
 use anyhow::{Context, Result};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -9,7 +9,7 @@ pub type AudioCache = Arc<Mutex<HashMap<String, Arc<Vec<i16>>>>>;
 
 pub async fn load_or_get_from_cache(
     cache: &AudioCache,
-    audio_path: &PathBuf,
+    audio_path: &Path,
 ) -> Result<Arc<Vec<i16>>> {
     let path_key = audio_path.to_string_lossy().to_string();
     let mut cache_guard = cache.lock().await;
@@ -18,9 +18,8 @@ pub async fn load_or_get_from_cache(
         return Ok(cached_samples.clone());
     }
 
-    // DEĞİŞİKLİK: Unused variable uyarısı için _prefix eklendi
     let _path_str = audio_path.to_str().context("Geçersiz dosya yolu")?;
-    let path_owned = audio_path.clone();
+    let path_owned = audio_path.to_path_buf();
 
     let new_samples: Vec<i16> = tokio::task::spawn_blocking(move || -> Result<Vec<i16>> {
         let reader = hound::WavReader::open(path_owned).context("WAV açma hatası")?;

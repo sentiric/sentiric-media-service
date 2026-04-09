@@ -1,4 +1,4 @@
-// sentiric-media-service/src/grpc/service.rs
+// Dosya: src/grpc/service.rs
 use crate::grpc::error::ServiceError;
 use crate::metrics::{ACTIVE_SESSIONS, GRPC_REQUESTS_TOTAL};
 use crate::rtp::command::{RecordingSession, RtpCommand};
@@ -77,7 +77,6 @@ impl MediaService for MyMediaService {
 
         let (response_tx, response_rx) = mpsc::channel(1);
 
-        // [ARCH-COMPLIANCE] Closure içine taşınacak değişkenlerin kopyalanması
         let trace_id_clone = trace_id.clone();
         let call_id_clone = call_id.clone();
 
@@ -92,9 +91,6 @@ impl MediaService for MyMediaService {
                 let _ = egress_tx.send(samples_8k).await;
             }
 
-            // [ARCH-COMPLIANCE] finite_state_assurance Kuralı Uygulaması
-            // Eğer AI motoru 10 saniye boyunca tek bir ses chunk'ı bile göndermezse,
-            // Stream bir "Zombie Task" olmamak için zorla intihar eder.
             const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
             loop {
@@ -114,19 +110,18 @@ impl MediaService for MyMediaService {
                                     event = "EGRESS_TX_CLOSED",
                                     trace_id = %trace_id_clone,
                                     sip.call_id = %call_id_clone,
-                                    "RTP Egress kanalı (session) kapandı, gRPC stream sonlandırılıyor."
+                                    "RTP Egress kanalı kapandı."
                                 );
                                 break;
                             }
                         }
                     }
                     Ok(Ok(None)) => {
-                        // EOF: İstemci (AI Pipeline) stream'i kendi isteğiyle, temiz bir şekilde kapattı.
                         tracing::debug!(
                             event = "GRPC_STREAM_EOF",
                             trace_id = %trace_id_clone,
                             sip.call_id = %call_id_clone,
-                            "AI istemcisi ses akışını (Stream) başarıyla tamamladı."
+                            "AI istemcisi ses akışını tamamladı."
                         );
                         break;
                     }
@@ -136,18 +131,16 @@ impl MediaService for MyMediaService {
                             trace_id = %trace_id_clone,
                             sip.call_id = %call_id_clone,
                             error = %e,
-                            "gRPC stream okunurken ağ veya protokol hatası oluştu."
+                            "gRPC stream hatası."
                         );
                         break;
                     }
                     Err(_) => {
-                        // [ARCH-COMPLIANCE] Timeout (Absolute Boundary) Devreye Girdi
                         tracing::warn!(
                             event = "GRPC_STREAM_TIMEOUT",
                             trace_id = %trace_id_clone,
                             sip.call_id = %call_id_clone,
-                            "Stream {} saniye boyunca AI katmanından veri alamadı. Zombie task koruması tetiklendi ve bağlantı düşürüldü.",
-                            STREAM_IDLE_TIMEOUT.as_secs()
+                            "Stream timeout."
                         );
                         break;
                     }
@@ -198,7 +191,6 @@ impl MediaService for MyMediaService {
                     self.app_state.clone(),
                 );
                 self.app_state.port_manager.add_session(port, session).await;
-                //[ARCH-COMPLIANCE] sip.call_id log'a eklendi
                 info!(event = "MEDIA_PORT_ALLOCATED", sip.call_id = %call_id, rtp.port = port, bind.addr = %bind_addr, "RTP Port Allocated");
                 Ok(Response::new(AllocatePortResponse {
                     rtp_port: port as u32,
@@ -273,7 +265,6 @@ impl MediaService for MyMediaService {
                         message: "Echo Off".into(),
                     }));
                 }
-                // [YENİ]: B2BUA hedef ataması yapmak için sahte anons
                 "set_target" => {
                     return Ok(Response::new(PlayAudioResponse {
                         success: true,
@@ -306,6 +297,8 @@ impl MediaService for MyMediaService {
 
     type RecordAudioStream =
         Pin<Box<dyn Stream<Item = Result<RecordAudioResponse, Status>> + Send>>;
+
+    #[allow(clippy::result_large_err)]
     async fn record_audio(
         &self,
         request: Request<RecordAudioRequest>,

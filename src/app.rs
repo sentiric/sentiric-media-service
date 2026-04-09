@@ -27,7 +27,10 @@ pub struct App {
 impl App {
     pub async fn bootstrap() -> Result<Self> {
         let env_file = env::var("ENV_FILE").unwrap_or_else(|_| ".env".to_string());
-        if let Err(_) = dotenvy::from_filename(&env_file) {}
+
+        // [CLIPPY FIX]: needless_ifs (Gereksiz if bloğu) engellendi.
+        // Dotenv hatası umursanmıyorsa değeri `let _` ile yutmak en performanslı yöntemdir.
+        let _ = dotenvy::from_filename(&env_file);
 
         let config =
             Arc::new(AppConfig::load_from_env().context("Konfigürasyon dosyası yüklenemedi")?);
@@ -43,7 +46,7 @@ impl App {
                 config.service_version.clone(),
                 config.env.clone(),
                 config.node_hostname.clone(),
-                config.tenant_id.clone(), // [ARCH-COMPLIANCE] Tenant enjekte edildi
+                config.tenant_id.clone(),
             );
             subscriber
                 .with(fmt::layer().event_format(suts_formatter))

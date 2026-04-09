@@ -1,4 +1,4 @@
-// sentiric-media-service/src/rtp/session.rs
+// Dosya: src/rtp/session.rs
 use crate::config::AppConfig;
 use crate::rtp::codecs::AudioCodec;
 use crate::rtp::command::{AudioFrame, RecordingSession, RtpCommand};
@@ -99,15 +99,14 @@ impl RtpSession {
             "🎧 RTP Oturumu Başlatıldı (Strict 20ms Sync Engine Devrede)"
         );
 
-        let live_stream_sender: Arc<
-            Mutex<Option<mpsc::Sender<Result<AudioFrame, tonic::Status>>>>,
-        > = Arc::new(Mutex::new(None));
+        // [CLIPPY FIX]: type_complexity çözümü (command.rs içindeki Type Alias kullanılıyor)
+        let live_stream_sender: crate::rtp::command::SharedLiveStreamSender =
+            Arc::new(Mutex::new(None));
+
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
         let endpoint = RtpEndpoint::new(None);
 
         let mut jitter_buffer = JitterBuffer::new(100, 60);
-
-        // [ARCH-COMPLIANCE] O(N) drain darboğazını önlemek için Vec yerine VecDeque kullanıldı.
         let mut egress_queue: VecDeque<i16> = VecDeque::with_capacity(16000);
 
         let mut last_seq: Option<u16> = None;
@@ -167,9 +166,16 @@ impl RtpSession {
 
         loop {
             let timeout = session_config.app_config.rtp_session_inactivity_timeout;
+
+            // [ARCH-COMPLIANCE FIX]: Smart Media, Dumb Logic.
+            // Media Service sessizlik yüzünden kendi kendine çağrıyı sonlandıramaz.
             if last_activity.elapsed() > timeout {
-                warn!(event = "RTP_TIMEOUT", sip.call_id = %self.call_id, "⚠️ Oturum hareketsizlik zaman aşımı.");
-                break;
+                warn!(
+                    event = "RTP_INACTIVITY_WARNING",
+                    sip.call_id = %self.call_id,
+                    "⚠️ RTP trafiği alınamıyor (Sessizlik). Oturum kapatılmıyor, B2BUA gRPC emri (ReleasePort) bekleniyor."
+                );
+                last_activity = Instant::now();
             }
 
             tokio::select! {
@@ -261,10 +267,10 @@ impl RtpSession {
                         }
                     }
 
+                    // [CLIPPY FIX]: needless_range_loop
                     if egress_queue.len() >= 160 {
-                        // [ARCH-COMPLIANCE] O(1) maliyetle pop_front yapıldı.
-                        for i in 0..160 {
-                            tx_frame[i] = egress_queue.pop_front().unwrap_or(0);
+                        for item in tx_frame.iter_mut().take(160) {
+                            *item = egress_queue.pop_front().unwrap_or(0);
                         }
                     } else {
                         tx_frame.fill(0);
@@ -314,6 +320,7 @@ impl RtpSession {
             }
         }
 
+        // B2BUA veya Workflow'dan gelen kesin "Kapat" komutuyla (Shutdown) buraya ulaşıldı. Kaydı tamamla.
         if let Some(rec) = recording_session.lock().await.take() {
             match crate::rtp::session_utils::finalize_and_save_recording(
                 rec,
