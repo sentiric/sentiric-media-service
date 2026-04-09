@@ -15,7 +15,7 @@ use crate::metrics::{ACTIVE_SESSIONS, RECORDING_BUFFER_BYTES};
 use metrics::gauge;
 
 use sentiric_rtp_core::{
-    AudioProfile, CodecFactory, Decoder, Encoder, JitterBuffer, RtpEndpoint, RtpHeader, RtpPacket,
+    AudioProfile, CodecFactory, Decoder, Encoder, RtpEndpoint, RtpHeader, RtpPacket,
 };
 
 #[derive(Clone)]
@@ -96,7 +96,7 @@ impl RtpSession {
             event = "RTP_SESSION_START",
             resource.service.name = "media-service",
             sip.call_id = %self.call_id,
-            "🎧 RTP Oturumu Başlatıldı (Strict 20ms Sync Engine Devrede)"
+            "🎧 RTP Oturumu Başlatıldı (Fluid Ingress Queue Devrede)"
         );
 
         let live_stream_sender: crate::rtp::command::SharedLiveStreamSender =
@@ -104,18 +104,16 @@ impl RtpSession {
         let recording_session: Arc<Mutex<Option<RecordingSession>>> = Arc::new(Mutex::new(None));
         let endpoint = RtpEndpoint::new(None);
 
-        let mut jitter_buffer = JitterBuffer::new(100, 60);
-        let mut egress_queue: VecDeque<i16> = VecDeque::with_capacity(16000);
+        // [CRITICAL FIX]: Katı JitterBuffer yerine Sıvı (Fluid) Ingress Queue!
+        // Gelen her ses pakedi anında çözülüp bu kuyruğa atılır.
+        let mut ingress_queue: VecDeque<i16> = VecDeque::with_capacity(32000);
+        let mut egress_queue: VecDeque<i16> = VecDeque::with_capacity(32000);
 
-        let mut last_seq: Option<u16> = None;
         let mut packet_loss_count = 0u64;
         let mut total_packets_rx = 0u64;
-        let mut jitter_acc = 0.0f64;
-        let mut last_arrival = Instant::now();
-
-        let mut echo_mode = false;
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
+        let mut echo_mode = false;
 
         let server_ssrc: u32 = rand::random();
         let mut tx_seq: u16 = rand::random();
@@ -160,8 +158,6 @@ impl RtpSession {
         let mut active_encoder: Option<Box<dyn Encoder>> =
             Some(CodecFactory::create_encoder(initial_codec));
 
-        info!(event = "RTP_ENGINE_READY", codec = ?initial_codec, "🚀 Medya Motoru önbellekten yüklendi.");
-
         loop {
             let timeout = session_config.app_config.rtp_session_inactivity_timeout;
 
@@ -183,23 +179,7 @@ impl RtpSession {
                     }
 
                     if let Some(packet) = Self::parse_rtp_packet(data) {
-                        let now = Instant::now();
-                        let delta = now.duration_since(last_arrival).as_millis() as f64;
-                        jitter_acc += (delta - 20.0).abs();
-                        last_arrival = now;
-
-                        let seq = packet.header.sequence_number;
-                        if let Some(prev) = last_seq {
-                            let expected = prev.wrapping_add(1);
-                            if seq != expected {
-                                let diff = seq.wrapping_sub(expected);
-                                if diff > 0 && diff < 1000 {
-                                    packet_loss_count += diff as u64;
-                                }
-                            }
-                        }
-                        last_seq = Some(seq);
-
+                        // Kodek Güncelleme
                         if active_payload_type != Some(packet.header.payload_type) {
                             if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                                 active_decoder = Some(CodecFactory::create_decoder(codec.to_core_type()));
@@ -207,7 +187,23 @@ impl RtpSession {
                                 active_payload_type = Some(packet.header.payload_type);
                             }
                         }
-                        jitter_buffer.push(packet);
+
+                        // [CRITICAL FIX]: Gelen paketi ANINDA çöz ve Ingress Kuyruğuna At!
+                        // JitterBuffer'ın paketi çöpe atmasına izin verme.
+                        if packet.header.payload_type != 101 {
+                            if let Some(ref mut decoder) = active_decoder {
+                                let raw_pcm = decoder.decode(&packet.payload);
+                                if !raw_pcm.is_empty() {
+                                    if (gain_multiplier - 1.0).abs() > f32::EPSILON {
+                                        ingress_queue.extend(raw_pcm.into_iter().map(|s| {
+                                            ((s as f32 * gain_multiplier) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16
+                                        }));
+                                    } else {
+                                        ingress_queue.extend(raw_pcm);
+                                    }
+                                }
+                            }
+                        }
                     }
                 },
 
@@ -231,53 +227,36 @@ impl RtpSession {
                     let mut rx_frame = vec![0i16; 160];
                     let mut tx_frame = vec![0i16; 160];
                     let mut rx_has_audio = false;
-                    let mut decoded_samples = Vec::new();
 
-                    if let Some(packet) = jitter_buffer.pop() {
-                        if let Some(ref mut decoder) = active_decoder {
-                            if packet.header.payload_type != 101 {
-                                let raw_pcm = decoder.decode(&packet.payload);
-                                if !raw_pcm.is_empty() {
-                                    decoded_samples = raw_pcm;
-                                    rx_has_audio = true;
-                                } else {
-                                    debug!(event="DECODE_EMPTY", pt=packet.header.payload_type, "Decoder returned empty PCM data");
-                                }
-                            }
+                    // 1. INGRESS (Müşteriden Gelen Sesi Çek)
+                    if ingress_queue.len() >= 160 {
+                        for item in rx_frame.iter_mut().take(160) {
+                            *item = ingress_queue.pop_front().unwrap_or(0);
                         }
+                        rx_has_audio = true;
+                    } else if !ingress_queue.is_empty() {
+                        let len = ingress_queue.len();
+                        for item in rx_frame.iter_mut().take(len) {
+                            *item = ingress_queue.pop_front().unwrap_or(0);
+                        }
+                        rx_has_audio = true;
                     }
 
-                    // Sesi işleme ve dağıtma (Echo, Live Stream, Record)
+                    // 2. SESİ DAĞIT (Echo ve AI için)
                     if rx_has_audio {
-                        // 1. Standart Frame (Kayıt ve Hizalama için ilk 160 sample)
-                        let len_to_copy = decoded_samples.len().min(160);
-                        if (gain_multiplier - 1.0).abs() > f32::EPSILON {
-                            for i in 0..len_to_copy {
-                                rx_frame[i] = ((decoded_samples[i] as f32 * gain_multiplier) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16;
-                            }
-                        } else {
-                            rx_frame[..len_to_copy].copy_from_slice(&decoded_samples[..len_to_copy]);
-                        }
-
-                        // 2. AI Pipeline'a Canlı Akış (Tam Boyut)
                         if let Some(tx) = &*live_stream_sender.lock().await {
-                            let pcm_16k = sentiric_rtp_core::simple_resample(&decoded_samples, 8000, 16000);
+                            let pcm_16k = sentiric_rtp_core::simple_resample(&rx_frame, 8000, 16000);
                             let mut b = Vec::with_capacity(pcm_16k.len() * 2);
                             for s in &pcm_16k { b.extend_from_slice(&s.to_le_bytes()); }
                             let _ = tx.try_send(Ok(crate::rtp::command::AudioFrame{ data: b.into(), media_type: "audio/L16;rate=16000".into() }));
                         }
 
-                        // 3. Echo Test (Tam Boyut)
                         if echo_mode {
-                            if (gain_multiplier - 1.0).abs() > f32::EPSILON {
-                                egress_queue.extend(decoded_samples.iter().map(|&s| ((s as f32 * gain_multiplier) as i32).clamp(i16::MIN as i32, i16::MAX as i32) as i16));
-                            } else {
-                                egress_queue.extend(decoded_samples.iter().copied());
-                            }
+                            egress_queue.extend(rx_frame.iter().copied());
                         }
                     }
 
-                    // TX Queue İşleme (Dışarıya basılacak ses)
+                    // 3. EGRESS (Müşteriye Gidecek Sesi Hazırla)
                     if egress_queue.len() >= 160 {
                         for item in tx_frame.iter_mut().take(160) {
                             *item = egress_queue.pop_front().unwrap_or(0);
@@ -286,6 +265,7 @@ impl RtpSession {
                         tx_frame.fill(0);
                     }
 
+                    // 4. SESİ GÖNDER (Müşteriye)
                     if let Some(target) = known_target.or_else(|| endpoint.get_target()) {
                         if let Some(enc) = &mut active_encoder {
                             let payload = enc.encode(&tx_frame);
@@ -299,22 +279,13 @@ impl RtpSession {
                         }
                     }
 
-                    // 4. Stereo Kayıt Birleştirme (RX = Müşteri Sesi, TX = Sistem Sesi)
+                    // 5. S3 STEREO KAYIT
                     if let Some(rec) = &mut *recording_session.lock().await {
                         const MAX_SAMPLES: usize = 57_600_000;
                         if rec.rx_buffer.len() + 160 <= MAX_SAMPLES {
-                            if rx_has_audio {
-                                rec.rx_buffer.extend_from_slice(&decoded_samples);
-                                let mut tx_pad = vec![0i16; decoded_samples.len()];
-                                let copy_len = tx_frame.len().min(decoded_samples.len());
-                                tx_pad[..copy_len].copy_from_slice(&tx_frame[..copy_len]);
-                                rec.tx_buffer.extend_from_slice(&tx_pad);
-                                gauge!(RECORDING_BUFFER_BYTES).increment((decoded_samples.len() * 4) as f64);
-                            } else {
-                                rec.rx_buffer.extend_from_slice(&rx_frame);
-                                rec.tx_buffer.extend_from_slice(&tx_frame);
-                                gauge!(RECORDING_BUFFER_BYTES).increment(640.0);
-                            }
+                            rec.rx_buffer.extend_from_slice(&rx_frame);
+                            rec.tx_buffer.extend_from_slice(&tx_frame);
+                            gauge!(RECORDING_BUFFER_BYTES).increment(640.0);
                         } else if !rec.max_reached_warned {
                             warn!(event = "MAX_RECORDING_REACHED", sip.call_id = %self.call_id, "OOM Koruması aktif.");
                             rec.max_reached_warned = true;
@@ -324,9 +295,8 @@ impl RtpSession {
 
                 _ = stats_ticker.tick() => {
                     let loss_rate = if total_packets_rx > 0 { (packet_loss_count as f64 / (total_packets_rx + packet_loss_count) as f64) * 100.0 } else { 0.0 };
-                    let avg_jitter = if total_packets_rx > 0 { jitter_acc / total_packets_rx as f64 } else { 0.0 };
                     if total_packets_rx > 0 {
-                        info!(event = "RTP_QOS", sip.call_id = %self.call_id, loss_pct = loss_rate, jitter_ms = avg_jitter, rx = total_packets_rx, tx = echo_tx_count, "QoS Report");
+                        debug!(event = "RTP_QOS", sip.call_id = %self.call_id, loss_pct = loss_rate, rx = total_packets_rx, tx = echo_tx_count, "QoS Report");
                     }
                 },
 
