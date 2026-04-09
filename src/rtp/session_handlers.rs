@@ -1,16 +1,10 @@
-// Dosya: src/rtp/session_handlers.rs
+// Dosya: sentiric-media-service/src/rtp/session_handlers.rs
 use super::command::{RecordingSession, RtpCommand};
 use super::session::RtpSessionConfig;
-use crate::rabbitmq;
-use lapin::{options::BasicPublishOptions, BasicProperties};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{debug, error, info, Instrument};
-
-use prost::Message;
-use sentiric_contracts::sentiric::event::v1::GenericEvent;
-use std::time::SystemTime;
+use tracing::{error, info, Instrument};
 
 #[derive(Debug)]
 pub struct PlaybackJob {
@@ -23,7 +17,6 @@ pub struct PlaybackJob {
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_command(
     command: RtpCommand,
-    // [CLIPPY FIX]: Type Complexity
     live_stream_sender: &crate::rtp::command::SharedLiveStreamSender,
     recording_session: &Arc<Mutex<Option<RecordingSession>>>,
     playback_queue: &mut std::collections::VecDeque<PlaybackJob>,
@@ -113,19 +106,17 @@ pub async fn handle_command(
 }
 
 pub async fn start_playback(
-    mut job: PlaybackJob, // [ARCH-COMPLIANCE] responder'ı take() edebilmek için mut yapıldı
+    mut job: PlaybackJob, // [ARCH-COMPLIANCE] Responder'ı ayırmak için mut yapıldı
     config: &RtpSessionConfig,
     egress_tx: mpsc::Sender<Vec<i16>>,
     finished_tx: mpsc::Sender<()>,
     call_id: &str,
 ) {
-    // [ARCH-COMPLIANCE] Responder'ı görevden ayırıyoruz ki asenkron thread'e girmeden önce yanıt dönebilelim.
     let responder = job.responder.take();
     let uri = job.audio_uri.clone();
     let call_id_owned = call_id.to_string();
     let app_state = config.app_state.clone();
     let tenant_id_owned = config.app_config.tenant_id.clone();
-
     let span = tracing::Span::current();
 
     match crate::rtp::session_utils::load_and_resample_samples_from_uri(
@@ -136,9 +127,7 @@ pub async fn start_playback(
     .await
     {
         Ok(samples) => {
-            // [ARCH-COMPLIANCE] finite_state_assurance Kuralı:
-            // Ses dosyası RAM'e başarıyla yüklendiği an gRPC çağrısına "OK" dönülür!
-            // Workflow-service asla anonsun bitmesini senkron olarak beklemez.
+            // [ARCH-COMPLIANCE] Ses dosyası RAM'e yüklendiği an gRPC yanıtı dönülür.
             if let Some(tx) = responder {
                 let _ = tx.send(Ok(()));
             }
@@ -150,10 +139,17 @@ pub async fn start_playback(
                 let mut interval = tokio::time::interval(std::time::Duration::from_millis(20));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+                // [CRITICAL FIX] Cızırtıyı (crackling) önlemek için 10 paketlik (200ms) avans (pre-buffer)
+                let mut pre_buffer = 10;
+
                 for chunk in samples.chunks(160) {
                     if job.cancellation_token.is_cancelled() { break; }
 
-                    interval.tick().await;
+                    if pre_buffer > 0 {
+                        pre_buffer -= 1;
+                    } else {
+                        interval.tick().await;
+                    }
 
                     if let Err(e) = egress_tx.send(chunk.to_vec()).await {
                         tracing::debug!(event = "EGRESS_SEND_ERROR", error = %e, "Egress channel closed");
@@ -162,7 +158,6 @@ pub async fn start_playback(
                     }
                 }
 
-                // Anons başarıyla bittiyse RabbitMQ'ya Asenkron Event fırlat
                 if res_ok {
                     if let Some(channel) = &app_state.rabbitmq_publisher {
                         let json_payload = serde_json::json!({ "callId": call_id_owned, "uri": uri }).to_string();
@@ -173,8 +168,10 @@ pub async fn start_playback(
                             tenant_id: tenant_id_owned,
                             payload_json: json_payload,
                         };
+                        
                         use lapin::{options::BasicPublishOptions, BasicProperties};
                         use prost::Message;
+                        
                         let _ = channel.basic_publish(
                             crate::rabbitmq::EXCHANGE_NAME,
                             "call.media.playback.finished",

@@ -109,7 +109,7 @@ impl RtpSession {
         let mut ingress_queue: VecDeque<i16> = VecDeque::with_capacity(32000);
         let mut egress_queue: VecDeque<i16> = VecDeque::with_capacity(32000);
 
-        let mut packet_loss_count = 0u64;
+        let packet_loss_count = 0u64; // mut KALDIRILDI
         let mut total_packets_rx = 0u64;
         let mut echo_tx_count = 0u64;
         let mut known_target: Option<SocketAddr> = None;
@@ -228,19 +228,16 @@ impl RtpSession {
                     let mut tx_frame = vec![0i16; 160];
                     let mut rx_has_audio = false;
 
+                    // 2. DÜZELTME: ptime_ticker döngüsü içindeki (Satır ~220 civarı) INGRESS bölümü
                     // 1. INGRESS (Müşteriden Gelen Sesi Çek)
                     if ingress_queue.len() >= 160 {
                         for item in rx_frame.iter_mut().take(160) {
                             *item = ingress_queue.pop_front().unwrap_or(0);
                         }
                         rx_has_audio = true;
-                    } else if !ingress_queue.is_empty() {
-                        let len = ingress_queue.len();
-                        for item in rx_frame.iter_mut().take(len) {
-                            *item = ingress_queue.pop_front().unwrap_or(0);
-                        }
-                        rx_has_audio = true;
                     }
+                    // [CRITICAL FIX] Jitter Buffer faz hizalaması (Phase Alignment) için `else if` bloğu BURADAN SİLİNDİ.
+                    // Eksik paket varsa zero-pad yapmak yerine sessizce frame'in tamamlanmasını bekliyoruz. Cızırtıyı (crackling) sıfırlar.
 
                     // 2. SESİ DAĞIT (Echo ve AI için)
                     if rx_has_audio {
