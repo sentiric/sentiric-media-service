@@ -6,7 +6,7 @@ use aws_sdk_s3::Client as S3Client;
 use metrics::counter;
 use std::sync::Arc;
 use tokio::time::{sleep, timeout, Duration};
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 #[instrument(skip(client, data), fields(s3.bucket = %bucket, s3.key = %key, file.size_bytes = data.len()))]
 pub async fn upload_to_s3_with_retry(
@@ -19,8 +19,9 @@ pub async fn upload_to_s3_with_retry(
     const MAX_RETRIES: u32 = 3;
     let mut attempt = 0;
 
-    // [ARCH-COMPLIANCE] sip.call_id eklendi
-    info!(event = "S3_UPLOAD_START", sip.call_id = %call_id, "☁️ Kayıt dosyası doğrudan bellekten S3'e yükleniyor...");
+    // [ARCH-COMPLIANCE] SUTS v4.2: Kayıt süreci bir arka plan görevi olduğu için DEBUG yapıldı.
+    // Başarı (SUCCESS) INFO kalmaya devam edecek.
+    debug!(event = "S3_UPLOAD_START", sip.call_id = %call_id, "☁️ Kayıt dosyası doğrudan bellekten S3'e yükleniyor...");
 
     loop {
         attempt += 1;

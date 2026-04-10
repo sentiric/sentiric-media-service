@@ -226,8 +226,7 @@ impl RtpSession {
 
                         // Kodek Güncelleme
                         if active_payload_type != Some(packet.header.payload_type) {
-                            use crate::rtp::codecs::AudioCodec;
-                            use sentiric_rtp_core::CodecFactory;
+
                             if let Ok(codec) = AudioCodec::from_rtp_payload_type(packet.header.payload_type) {
                                 active_decoder = Some(CodecFactory::create_decoder(codec.to_core_type()));
                                 active_encoder = Some(CodecFactory::create_encoder(codec.to_core_type()));

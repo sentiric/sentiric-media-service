@@ -182,7 +182,7 @@ pub async fn start_playback(
             }.instrument(span));
         }
         Err(e) => {
-            tracing::error!(event = "MEDIA_PLAYBACK_ERROR", error = %e, "Medya oynatma hatası");
+            error!(event = "MEDIA_PLAYBACK_ERROR", error = %e, "Medya oynatma hatası");
             if let Some(tx) = responder {
                 let _ = tx.send(Err(anyhow::anyhow!("Playback error: {}", e)));
             }

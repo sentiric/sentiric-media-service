@@ -118,7 +118,7 @@ impl PortManager {
 
             quarantined_guard.retain(|(port, release_time)| {
                 if now.duration_since(*release_time) >= cooldown {
-                    // [ARCH-COMPLIANCE] INFO yerine DEBUG yapıldı.
+                    // [ARCH-COMPLIANCE] SUTS v4.2: Rutin port temizliği detayı DEBUG'a çekildi.
                     debug!(
                         event = "PORT_RELEASED_FROM_QUARANTINE",
                         port = port,
