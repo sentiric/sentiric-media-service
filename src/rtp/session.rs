@@ -246,6 +246,13 @@ impl RtpSession {
                                     } else {
                                         ingress_queue.extend(raw_pcm);
                                     }
+
+                                    // [ARCH-COMPLIANCE FIX] OOM Protection & Jitter Reset
+                                    if ingress_queue.len() > 16000 {
+                                        tracing::warn!(event="INGRESS_QUEUE_OVERFLOW", sip.call_id=%self.call_id, "Ingress kuyruğu taştı, AI gecikmesi önleniyor (Catch-up).");
+                                        let drain_count = ingress_queue.len() - 8000;
+                                        ingress_queue.drain(0..drain_count);
+                                    }
                                 }
                             }
                         }
@@ -255,6 +262,13 @@ impl RtpSession {
                 Some(pcm_data) = egress_rx.recv() => {
                     last_activity = Instant::now();
                     egress_queue.extend(pcm_data);
+
+                    // [ARCH-COMPLIANCE FIX] OOM Protection (Max 2 saniyelik Egress Buffer = 16000 sample)
+                    if egress_queue.len() > 16000 {
+                        tracing::warn!(event="EGRESS_QUEUE_OVERFLOW", sip.call_id=%self.call_id, "Egress kuyruğu taştı, eski sesler kesiliyor (Catch-up).");
+                        let drain_count = egress_queue.len() - 8000; // Yarısını tut, eskisini at
+                        egress_queue.drain(0..drain_count);
+                    }
                 },
 
                 Some(cmd) = command_rx.recv() => {
