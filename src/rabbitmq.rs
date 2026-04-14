@@ -14,11 +14,13 @@ pub async fn connect_with_retry(url: &str) -> anyhow::Result<Arc<LapinChannel>> 
     let mut attempt = 0;
     loop {
         attempt += 1;
-        info!(
-            event = "RABBITMQ_CONNECTING",
-            attempt = attempt,
-            "🐇 RabbitMQ'ya bağlanılıyor..."
-        );
+        if attempt == 1 {
+            info!(
+                event = "RABBITMQ_CONNECTING",
+                "🐇 RabbitMQ'ya bağlanılıyor..."
+            );
+        }
+
         match Connection::connect(url, ConnectionProperties::default()).await {
             Ok(conn) => match conn.create_channel().await {
                 Ok(channel) => {
@@ -28,18 +30,31 @@ pub async fn connect_with_retry(url: &str) -> anyhow::Result<Arc<LapinChannel>> 
                     {
                         error!(event = "RABBITMQ_CONFIRM_ERROR", error = %e, "🚨 RabbitMQ Confirm Mode Error");
                     }
-
-                    // [CLIPPY FIX]: let_unit_value
                     conn.on_error(|err| error!(event = "RABBITMQ_CONN_ERROR", error = %err, "🚨 RabbitMQ Connection Error"));
 
+                    if attempt > 1 {
+                        info!(
+                            event = "RABBITMQ_RECOVERED",
+                            "✅ RabbitMQ bağlantısı sağlandı."
+                        );
+                    }
                     return Ok(Arc::new(channel));
                 }
                 Err(e) => {
-                    error!(event = "RABBITMQ_CHANNEL_FAIL", error = %e, "❌ RabbitMQ kanalı oluşturulamadı. Tekrar deneniyor...")
+                    error!(event = "RABBITMQ_CHANNEL_FAIL", error = %e, "❌ RabbitMQ kanalı oluşturulamadı.")
                 }
             },
             Err(e) => {
-                warn!(event = "RABBITMQ_UNREACHABLE", attempt = attempt, error = %e, "⚠️ RabbitMQ'ya ulaşılamıyor. 5 saniye sonra tekrar denenecek...")
+                // [ARCH-COMPLIANCE FIX] SUTS v4.2: İlk hata WARN, sonrakiler DEBUG
+                if attempt == 1 {
+                    warn!(event = "RABBITMQ_UNREACHABLE", error = %e, "⚠️ RabbitMQ'ya ulaşılamıyor. Arka planda sessizce denenecek (Ghost Mode)...");
+                } else {
+                    tracing::debug!(
+                        event = "RABBITMQ_RETRY",
+                        attempt = attempt,
+                        "RabbitMQ bekleniyor..."
+                    );
+                }
             }
         }
         sleep(Duration::from_secs(5)).await;
