@@ -1,98 +1,109 @@
-// Dosya: src/rabbitmq.rs
+// sentiric-media-service/src/rabbitmq.rs
 use lapin::{
     options::*, types::FieldTable, BasicProperties, Channel as LapinChannel, Connection,
     ConnectionProperties, ExchangeKind,
 };
 use std::sync::Arc;
-use std::time::Duration;
-use tokio::time::sleep;
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 pub const EXCHANGE_NAME: &str = "sentiric_events";
 
-pub async fn connect_with_retry(url: &str) -> anyhow::Result<Arc<LapinChannel>> {
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        if attempt == 1 {
-            info!(
-                event = "RABBITMQ_CONNECTING",
-                "🐇 RabbitMQ'ya bağlanılıyor..."
-            );
-        }
+// [ARCH-COMPLIANCE FIX] Ghost Publisher
+pub struct RabbitMqClient {
+    channel: Arc<RwLock<Option<LapinChannel>>>,
+}
 
-        match Connection::connect(url, ConnectionProperties::default()).await {
-            Ok(conn) => match conn.create_channel().await {
-                Ok(channel) => {
-                    if let Err(e) = channel
-                        .confirm_select(ConfirmSelectOptions::default())
-                        .await
-                    {
-                        error!(event = "RABBITMQ_CONFIRM_ERROR", error = %e, "🚨 RabbitMQ Confirm Mode Error");
-                    }
-                    conn.on_error(|err| error!(event = "RABBITMQ_CONN_ERROR", error = %err, "🚨 RabbitMQ Connection Error"));
+impl RabbitMqClient {
+    pub async fn new(url: &str) -> Self {
+        let client = Self {
+            channel: Arc::new(RwLock::new(None)),
+        };
 
-                    if attempt > 1 {
-                        info!(
-                            event = "RABBITMQ_RECOVERED",
-                            "✅ RabbitMQ bağlantısı sağlandı."
-                        );
-                    }
-                    return Ok(Arc::new(channel));
-                }
-                Err(e) => {
-                    error!(event = "RABBITMQ_CHANNEL_FAIL", error = %e, "❌ RabbitMQ kanalı oluşturulamadı.")
-                }
-            },
-            Err(e) => {
-                // [ARCH-COMPLIANCE FIX] SUTS v4.2: İlk hata WARN, sonrakiler DEBUG
+        let chan_clone = client.channel.clone();
+        let url_clone = url.to_string();
+
+        tokio::spawn(async move {
+            let mut attempt = 0;
+            loop {
+                attempt += 1;
                 if attempt == 1 {
-                    warn!(event = "RABBITMQ_UNREACHABLE", error = %e, "⚠️ RabbitMQ'ya ulaşılamıyor. Arka planda sessizce denenecek (Ghost Mode)...");
-                } else {
-                    tracing::debug!(
-                        event = "RABBITMQ_RETRY",
-                        attempt = attempt,
-                        "RabbitMQ bekleniyor..."
+                    info!(
+                        event = "RABBITMQ_CONNECTING",
+                        "🐇 RabbitMQ'ya bağlanılıyor..."
                     );
                 }
+
+                match Connection::connect(&url_clone, ConnectionProperties::default()).await {
+                    Ok(conn) => match conn.create_channel().await {
+                        Ok(channel) => {
+                            let _ = channel
+                                .exchange_declare(
+                                    EXCHANGE_NAME,
+                                    ExchangeKind::Topic,
+                                    ExchangeDeclareOptions {
+                                        durable: true,
+                                        ..Default::default()
+                                    },
+                                    FieldTable::default(),
+                                )
+                                .await;
+
+                            *chan_clone.write().await = Some(channel);
+                            info!(
+                                event = "RABBITMQ_RECOVERED",
+                                "✅ [MQ] RabbitMQ bağlantısı sağlandı."
+                            );
+                            break;
+                        }
+                        Err(e) => {
+                            error!(event = "RABBITMQ_CHANNEL_FAIL", error = %e, "❌ RabbitMQ kanalı oluşturulamadı.")
+                        }
+                    },
+                    Err(e) => {
+                        if attempt == 1 {
+                            warn!(event = "RABBITMQ_UNREACHABLE", error = %e, "⚠️ RabbitMQ yok. Media Service Ghost Publisher modunda.");
+                        } else {
+                            tracing::debug!(
+                                event = "RABBITMQ_RETRY",
+                                attempt = attempt,
+                                "RabbitMQ bekleniyor..."
+                            );
+                        }
+                    }
+                }
+                tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
+        });
+
+        client
+    }
+
+    pub async fn publish_with_confirm(
+        &self,
+        routing_key: &str,
+        payload: &[u8],
+    ) -> anyhow::Result<()> {
+        let channel_guard = self.channel.read().await;
+        if let Some(channel) = channel_guard.as_ref() {
+            let confirm = channel
+                .basic_publish(
+                    EXCHANGE_NAME,
+                    routing_key,
+                    BasicPublishOptions::default(),
+                    payload,
+                    BasicProperties::default().with_delivery_mode(2),
+                )
+                .await?
+                .await?;
+
+            if confirm.is_nack() {
+                anyhow::bail!("RabbitMQ mesajı NACK etti");
+            }
+            Ok(())
+        } else {
+            tracing::debug!(event="GHOST_PUBLISH", routing_key=%routing_key, "RabbitMQ yok, mesaj yutuldu (Ghost Mode).");
+            Ok(())
         }
-        sleep(Duration::from_secs(5)).await;
     }
-}
-
-pub async fn declare_exchange(channel: &LapinChannel) -> Result<(), lapin::Error> {
-    channel
-        .exchange_declare(
-            EXCHANGE_NAME,
-            ExchangeKind::Topic,
-            ExchangeDeclareOptions {
-                durable: true,
-                ..Default::default()
-            },
-            FieldTable::default(),
-        )
-        .await
-}
-
-pub async fn publish_with_confirm(
-    channel: &LapinChannel,
-    routing_key: &str,
-    payload: &[u8],
-) -> anyhow::Result<()> {
-    let confirm = channel
-        .basic_publish(
-            EXCHANGE_NAME,
-            routing_key,
-            BasicPublishOptions::default(),
-            payload,
-            BasicProperties::default().with_delivery_mode(2),
-        )
-        .await?
-        .await?;
-
-    if confirm.is_nack() {
-        anyhow::bail!("RabbitMQ mesajı NACK etti (Disk dolu veya kota aşımı)");
-    }
-    Ok(())
 }

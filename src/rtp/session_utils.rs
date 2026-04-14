@@ -1,7 +1,6 @@
 // Dosya: src/rtp/session_utils.rs
 use super::command::RecordingSession;
 use crate::metrics::RECORDING_BUFFER_BYTES;
-use crate::rabbitmq;
 use crate::rtp::writers;
 use crate::state::AppState;
 use anyhow::{anyhow, Result};
@@ -86,7 +85,7 @@ pub async fn finalize_and_save_recording(
     )
     .await?;
 
-    if let Some(channel) = &app_state.rabbitmq_publisher {
+    if let Some(mq_client) = &app_state.rabbitmq_publisher {
         let s3_uri = format!("s3://{}/{}", s3_config.bucket_name, s3_key);
         let event = CallRecordingAvailableEvent {
             event_type: "call.recording.available".to_string(),
@@ -97,20 +96,15 @@ pub async fn finalize_and_save_recording(
             public_url: "".to_string(),
         };
 
-        match rabbitmq::publish_with_confirm(
-            channel,
-            "call.recording.available",
-            &event.encode_to_vec(),
-        )
-        .await
+        match mq_client
+            .publish_with_confirm("call.recording.available", &event.encode_to_vec())
+            .await
         {
             Ok(_) => {
                 info!(event = "RECORDING_EVENT_PUBLISHED", sip.call_id = %session.call_id, "📩 Stereo kayıt tamamlandı olayı (Confirmed) RabbitMQ'ya iletildi.")
             }
             Err(e) => {
                 error!(event = "RECORDING_EVENT_PUBLISH_FAIL", sip.call_id = %session.call_id, error = %e, "🔥 Kayıt S3'e yüklendi ama RabbitMQ'ya olay atılamadı!");
-                // [CLIPPY FIX]: useless_conversion kaldırıldı
-                return Err(e);
             }
         }
     }

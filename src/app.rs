@@ -2,7 +2,6 @@
 use crate::config::AppConfig;
 use crate::grpc::service::MyMediaService;
 use crate::metrics::start_metrics_server;
-use crate::rabbitmq;
 use crate::state::{AppState, PortManager};
 use crate::telemetry::SutsFormatter;
 use crate::tls::load_server_tls_config;
@@ -180,11 +179,11 @@ impl App {
 
     async fn create_rabbitmq_channel(
         config: Arc<AppConfig>,
-    ) -> Result<Option<Arc<lapin::Channel>>> {
+    ) -> Result<Option<Arc<crate::rabbitmq::RabbitMqClient>>> {
         if let Some(url) = &config.rabbitmq_url {
-            let channel = rabbitmq::connect_with_retry(url).await?;
-            rabbitmq::declare_exchange(&channel).await?;
-            return Ok(Some(channel));
+            // [ARCH-COMPLIANCE FIX] Anında döner, ana thread kitlenmez.
+            let client = crate::rabbitmq::RabbitMqClient::new(url).await;
+            return Ok(Some(Arc::new(client)));
         }
         Ok(None)
     }

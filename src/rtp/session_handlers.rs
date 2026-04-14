@@ -157,7 +157,7 @@ pub async fn start_playback(
                 }
 
                 if res_ok {
-                    if let Some(channel) = &app_state.rabbitmq_publisher {
+                    if let Some(mq_client) = &app_state.rabbitmq_publisher {
                         let json_payload = serde_json::json!({ "callId": call_id_owned, "uri": uri }).to_string();
                         let event = sentiric_contracts::sentiric::event::v1::GenericEvent {
                             event_type: "call.media.playback.finished".to_string(),
@@ -166,14 +166,10 @@ pub async fn start_playback(
                             tenant_id: tenant_id_owned,
                             payload_json: json_payload,
                         };
-                        use lapin::{options::BasicPublishOptions, BasicProperties};
                         use prost::Message;
-                        let _ = channel.basic_publish(
-                            crate::rabbitmq::EXCHANGE_NAME,
+                        let _ = mq_client.publish_with_confirm(
                             "call.media.playback.finished",
-                            BasicPublishOptions::default(),
-                            &event.encode_to_vec(),
-                            BasicProperties::default()
+                            &event.encode_to_vec()
                         ).await;
                     }
                 }

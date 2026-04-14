@@ -1,17 +1,16 @@
-// sentiric-media-service/src/state.rs
+// sentiric-media-service/src/state.rs (Üst kısımdaki değişen yer)
 use crate::audio::AudioCache;
 use crate::config::AppConfig;
 use crate::rtp::session::RtpSession;
 use aws_sdk_s3::Client as S3Client;
-use lapin::Channel as LapinChannel;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
-use tracing::{debug, info}; // ✅ YENİ IMPORT
+use tracing::{debug, info};
 
 type ActiveSessions = Arc<Mutex<HashMap<u16, Arc<RtpSession>>>>;
-type PortsPool = Arc<Mutex<VecDeque<u16>>>; // DÜZELTİLDİ: VecDeque
+type PortsPool = Arc<Mutex<VecDeque<u16>>>;
 type QuarantinedPorts = Arc<Mutex<Vec<(u16, Instant)>>>;
 
 #[derive(Clone)]
@@ -19,14 +18,15 @@ pub struct AppState {
     pub port_manager: PortManager,
     pub audio_cache: AudioCache,
     pub s3_client: Option<Arc<S3Client>>,
-    pub rabbitmq_publisher: Option<Arc<LapinChannel>>,
+    // [HATA BURADAYDI, LapinChannel yerine RabbitMqClient kullanıyoruz]
+    pub rabbitmq_publisher: Option<Arc<crate::rabbitmq::RabbitMqClient>>,
 }
 
 impl AppState {
     pub fn new(
         port_manager: PortManager,
         s3_client: Option<Arc<S3Client>>,
-        rabbitmq_publisher: Option<Arc<LapinChannel>>,
+        rabbitmq_publisher: Option<Arc<crate::rabbitmq::RabbitMqClient>>,
     ) -> Self {
         Self {
             port_manager,
